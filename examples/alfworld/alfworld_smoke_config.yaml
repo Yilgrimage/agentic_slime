@@ -1,0 +1,36 @@
+# Small ALFWorld config for a real GRPO wiring smoke.
+alfworld_config_path: null
+alfworld_data_dir: /mnt/bn/jixf-nas-lq/mlf/data/alfworld
+alfworld_training_method: dqn
+alfworld_num_train_games: -1
+alfworld_num_eval_games: -1
+alfworld_env_type: AlfredTWEnv
+alfworld_split: train
+alfworld_max_turns: 3
+alfworld_action_max_tokens: 8
+alfworld_include_admissible_actions: true
+alfworld_restrict_to_admissible: false
+alfworld_invalid_action_fallback: model
+alfworld_reward_source: won
+alfworld_skip_to_task: false
+alfworld_direct_game_file: true
+alfworld_return_logprob: true
+alfworld_stop:
+  - "\n"
+
+
+# ALFWorld env-server settings. The HTTP process only owns lease routing; each
+# warm env worker is a child process so TextWorld parser state is isolated.
+alfworld_server_pool_size: 8
+alfworld_server_acquire_timeout_s: 30
+alfworld_server_session_ttl_s: 1800
+alfworld_server_lease_ttl_s: 1800
+alfworld_server_idempotency_ttl_s: 300
+alfworld_server_reuse_envs: true
+alfworld_server_reset_on_release: false
+alfworld_server_worker_start_timeout_s: 120
+alfworld_server_worker_request_timeout_s: 120
+alfworld_server_prewarm_splits:
+  - train
+# Retained for compatibility; pooled direct-game reset is exact by default.
+alfworld_server_honor_direct_game_file: true

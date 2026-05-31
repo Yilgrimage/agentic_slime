@@ -1,0 +1,20 @@
+eval:
+  defaults:
+    input_key: prompt
+    metadata_key: metadata
+    n_samples_per_eval_prompt: 1
+    max_response_len: 384
+    temperature: 0.0
+    top_p: 1.0
+    top_k: -1
+  datasets:
+    - name: alfworld-valid-seen
+      path: /tmp/mlf-runtime/alfworld/data/valid_seen_100.jsonl
+      custom_generate_function_path: examples.alfworld.generate_with_alfworld.generate
+      metadata_overrides:
+        split: valid_seen
+    - name: alfworld-valid-unseen
+      path: /tmp/mlf-runtime/alfworld/data/valid_unseen_100.jsonl
+      custom_generate_function_path: examples.alfworld.generate_with_alfworld.generate
+      metadata_overrides:
+        split: valid_unseen
