@@ -96,7 +96,9 @@ class AsyncRolloutWorker:
     def stop(self) -> None:
         self.running = False
         if self.worker_thread and self.worker_thread.is_alive():
-            self.worker_thread.join(timeout=5)
+            self.worker_thread.join(timeout=45)
+            if self.worker_thread.is_alive():
+                logger.warning("fully-async worker did not stop within timeout")
 
     def get_completed_groups(self) -> list[tuple[int, list[Sample]]]:
         completed: list[tuple[int, list[Sample]]] = []
@@ -162,9 +164,20 @@ class AsyncRolloutWorker:
                 len(active_tasks),
             )
             try:
-                await asyncio.wait(active_tasks, timeout=30)
+                done, pending = await asyncio.wait(active_tasks, timeout=30)
+                for task in done:
+                    try:
+                        task.result()
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("fully-async task crashed during stop: %r", e)
+                if pending:
+                    logger.warning("fully-async: cancelling %d in-flight tasks after drain timeout", len(pending))
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
             except Exception:  # noqa: BLE001
-                pass
+                logger.exception("fully-async worker stop failed")
+            self.state.reset()
 
     def _make_done_cb(self, gid: int):
         def _cb(done_task: asyncio.Task) -> None:

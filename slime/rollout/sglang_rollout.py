@@ -91,9 +91,8 @@ class GenerateState(metaclass=SingletonMeta):
         self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
-        self.semaphore = asyncio.Semaphore(
-            args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
-        )
+        self.semaphore_limit = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
+        self._semaphores: dict[asyncio.AbstractEventLoop, asyncio.Semaphore] = {}
         self.sampling_params: dict[str, Any] = dict(
             temperature=args.rollout_temperature,
             top_p=args.rollout_top_p,
@@ -115,6 +114,14 @@ class GenerateState(metaclass=SingletonMeta):
         self.dp_rank = 0
 
         self.reset()
+
+    def get_semaphore(self) -> asyncio.Semaphore:
+        loop = asyncio.get_running_loop()
+        semaphore = self._semaphores.get(loop)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(self.semaphore_limit)
+            self._semaphores[loop] = semaphore
+        return semaphore
 
     @contextmanager
     def dp_rank_context(self):
@@ -257,7 +264,7 @@ async def generate_and_rm(
     state = GenerateState(args)
 
     # generate
-    async with state.semaphore:
+    async with state.get_semaphore():
         if state.aborted:
             sample.status = Sample.Status.ABORTED
             return sample
@@ -503,6 +510,35 @@ async def eval_rollout(args: Namespace, rollout_id: int) -> tuple[dict[str, dict
     return RolloutFnEvalOutput(data=results), []
 
 
+async def _eval_generate_and_rm_with_timeout(
+    args: Namespace,
+    sample: Sample,
+    sampling_params: dict[str, Any],
+) -> Sample | list[Sample]:
+    timeout_s = float(getattr(args, "eval_sample_timeout_s", 0) or 0)
+    try:
+        coro = generate_and_rm(args, sample, sampling_params=sampling_params, evaluation=True)
+        if timeout_s > 0:
+            return await asyncio.wait_for(coro, timeout=timeout_s)
+        return await coro
+    except TimeoutError as exc:
+        logger.warning(
+            "eval sample %s timed out after %.1fs",
+            getattr(sample, "index", None),
+            timeout_s,
+        )
+        sample.status = Sample.Status.FAILED
+        sample.reward = 0.0
+        sample.metadata.setdefault("eval_error", repr(exc))
+        return sample
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("eval sample %s failed", getattr(sample, "index", None))
+        sample.status = Sample.Status.FAILED
+        sample.reward = 0.0
+        sample.metadata.setdefault("eval_error", repr(exc))
+        return sample
+
+
 async def eval_rollout_single_dataset(
     args: Namespace, rollout_id: int, dataset_cfg: EvalDatasetConfig
 ) -> dict[str, dict[str, list[Any]]]:
@@ -565,11 +601,10 @@ async def eval_rollout_single_dataset(
                 sampling_params["sampling_seed"] = args.rollout_seed + j
             tasks.append(
                 asyncio.create_task(
-                    generate_and_rm(
+                    _eval_generate_and_rm_with_timeout(
                         args,
                         sample,
                         sampling_params=sampling_params,
-                        evaluation=True,
                     )
                 )
             )

@@ -122,7 +122,8 @@ if [ ! -d "${ALFWORLD_LIB}" ] && [ -d "${NAS_ALFWORLD_LIB}" ]; then
   cp -a "${NAS_ALFWORLD_LIB}" "${ALFWORLD_LIB}"
 fi
 
-if [ "${ALFWORLD_CONFIG}" = "${LOCAL_RUNTIME_ROOT}/configs/alfworld_smoke_config.yaml" ]; then
+if [ -z "${USER_ALFWORLD_CONFIG}" ]; then
+  mkdir -p "$(dirname "${ALFWORLD_CONFIG}")"
   sed "s|^alfworld_data_dir:.*|alfworld_data_dir: ${ALFWORLD_DATA_DIR}|" "${BASE_ALFWORLD_CONFIG}" > "${ALFWORLD_CONFIG}"
 fi
 
@@ -160,8 +161,9 @@ PYTHONPATH="${ALFWORLD_SERVER_PYTHONPATH}" "${PYTHON_BIN}" "${REPO_DIR}/examples
   > "${ALFWORLD_SERVER_LOG}" 2>&1 &
 ALFWORLD_SERVER_PID=$!
 
+ALFWORLD_SERVER_READY=0
 for _ in $(seq 1 120); do
-  if "${PYTHON_BIN}" - <<PYH
+  if "${PYTHON_BIN}" - <<PYH 2>/dev/null
 import json
 import urllib.request
 url = "${ALFWORLD_ENV_SERVER_URL}/health"
@@ -170,6 +172,7 @@ with urllib.request.urlopen(url, timeout=1) as resp:
     raise SystemExit(0 if data.get("ok") else 1)
 PYH
   then
+    ALFWORLD_SERVER_READY=1
     break
   fi
   if ! kill -0 "${ALFWORLD_SERVER_PID}" 2>/dev/null; then
@@ -179,6 +182,12 @@ PYH
   fi
   sleep 1
 done
+
+if [ "${ALFWORLD_SERVER_READY}" -ne 1 ]; then
+  echo "ALFWorld env server did not become healthy at ${ALFWORLD_ENV_SERVER_URL}. Log follows:"
+  cat "${ALFWORLD_SERVER_LOG}" || true
+  exit 1
+fi
 
 NUM_GPUS=${NUM_GPUS:-4}
 ACTOR_GPUS=${ACTOR_GPUS:-2}
@@ -227,7 +236,8 @@ ROLLOUT_ARGS=(
 EVAL_ARGS=()
 if [ "${ENABLE_ALFWORLD_EVAL:-1}" = "1" ]; then
   EVAL_ARGS=(
-     --eval-interval "${EVAL_INTERVAL:-5}"
+     --eval-function-path "${ALFWORLD_EVAL_FUNCTION_PATH:-examples.alfworld.eval_rollout.generate_rollout}"
+     --eval-interval "${EVAL_INTERVAL:-1}"
      --eval-config "${ALFWORLD_EVAL_CONFIG}"
      --eval-max-response-len "${EVAL_MAX_RESPONSE_LEN:-${ROLLOUT_MAX_RESPONSE_LEN:-384}}"
      --n-samples-per-eval-prompt "${N_SAMPLES_PER_EVAL_PROMPT:-1}"

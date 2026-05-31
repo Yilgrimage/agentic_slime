@@ -145,6 +145,7 @@ def terminate_process(process: multiprocessing.Process, timeout: float = 1.0) ->
 
 
 _http_client: httpx.AsyncClient | None = None
+_http_clients: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = {}
 _client_concurrency: int = 0
 
 # Optional Ray-based distributed POST dispatch
@@ -198,6 +199,30 @@ async def _post(client, url, payload, max_retries=60, headers=None):
     return output
 
 
+def _make_http_client(concurrency: int) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        limits=httpx.Limits(max_connections=max(1, concurrency)),
+        timeout=httpx.Timeout(None),
+        trust_env=False,  # internal SGLang comm only — never route through system proxy
+    )
+
+
+def _get_loop_http_client() -> httpx.AsyncClient:
+    global _http_client
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        if _http_client is None or _http_client.is_closed:
+            _http_client = _make_http_client(_client_concurrency)
+        return _http_client
+    client = _http_clients.get(loop)
+    if client is None or client.is_closed:
+        client = _make_http_client(_client_concurrency)
+        _http_clients[loop] = client
+    _http_client = client
+    return client
+
+
 def init_http_client(args):
     """Initialize HTTP client and optionally enable distributed POST via Ray."""
     global _http_client, _client_concurrency, _distributed_post_enabled
@@ -205,12 +230,7 @@ def init_http_client(args):
         return
 
     _client_concurrency = args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine
-    if _http_client is None:
-        _http_client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=_client_concurrency),
-            timeout=httpx.Timeout(None),
-            trust_env=False,  # internal SGLang comm only — never route through system proxy
-        )
+    _http_client = _get_loop_http_client()
 
     # Optionally initialize distributed POST via Ray without changing interfaces
     if args.use_distributed_post:
@@ -290,11 +310,11 @@ async def post(url, payload, max_retries=60, headers=None):
             logger.info(f"[http_utils] Distributed POST failed, falling back to local: {e} (url={url})")
             # fall through to local
 
-    return await _post(_http_client, url, payload, max_retries, headers=headers)
+    return await _post(_get_loop_http_client(), url, payload, max_retries, headers=headers)
 
 
 async def get(url):
-    response = await _http_client.get(url)
+    response = await _get_loop_http_client().get(url)
     response.raise_for_status()
     content = await response.aread()
     output = json.loads(content)

@@ -138,6 +138,15 @@ def _select_game_file(game_files: list[str], task_index: int) -> str:
     return game_files[int(task_index) % len(game_files)]
 
 
+def _alfworld_backend_split(split: str) -> str:
+    return {
+        "valid_seen": "eval_in_distribution",
+        "valid_unseen": "eval_out_of_distribution",
+        "eval_seen": "eval_in_distribution",
+        "eval_unseen": "eval_out_of_distribution",
+    }.get(split, split)
+
+
 def _alfworld_worker_loop(
     worker_id: str,
     split: str,
@@ -156,10 +165,14 @@ def _alfworld_worker_loop(
         from alfworld.agents.environment import get_environment
 
         env_cls = get_environment(env_type)
-        wrapper = env_cls(config, train_eval=split)
+        backend_split = _alfworld_backend_split(split)
+        wrapper = env_cls(config, train_eval=backend_split)
         game_files = list(getattr(wrapper, "game_files", None) or [])
         if not game_files:
-            raise RuntimeError(f"ALFWorld split={split} has no games. Check data_path and game.tw-pddl files.")
+            raise RuntimeError(
+                f"ALFWorld split={split} backend_split={backend_split} has no games. "
+                "Check data_path and game.tw-pddl files."
+            )
         env = wrapper.init_env(batch_size=1)
         game_file: str | None = None
         reset_count = 0

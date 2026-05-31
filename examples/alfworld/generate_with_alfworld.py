@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 import logging
 import os
 from typing import Any
@@ -141,7 +142,10 @@ async def _call_policy(args: Any, sample: Sample, sampling_params: dict) -> tupl
     if sample.session_id and getattr(args, "router_policy", None) == "consistent_hashing":
         headers = {"X-SMG-Routing-Key": sample.session_id}
     payload = {"input_ids": sample.tokens, "sampling_params": sampling_params, "return_logprob": True}
-    output = await post(url, payload, headers=headers)
+    output = await asyncio.wait_for(
+        post(url, payload, headers=headers),
+        timeout=float(_arg(args, "alfworld_policy_timeout_s", 60.0)),
+    )
     text = output.get("text", "")
     meta = output.get("meta_info", {})
     token_logprobs = meta.get("output_token_logprobs") or []

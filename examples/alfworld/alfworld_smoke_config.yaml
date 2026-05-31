@@ -8,6 +8,8 @@ alfworld_env_type: AlfredTWEnv
 alfworld_split: train
 alfworld_max_turns: 3
 alfworld_action_max_tokens: 8
+alfworld_policy_timeout_s: 30
+eval_sample_timeout_s: 45
 alfworld_include_admissible_actions: true
 alfworld_restrict_to_admissible: false
 alfworld_invalid_action_fallback: model
