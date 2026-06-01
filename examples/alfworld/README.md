@@ -3,7 +3,7 @@
 This example plugs ALFWorld into slime through `--custom-generate-function-path`.
 One rollout sample is one ALFWorld episode. Model action tokens use
 `loss_mask=1`; environment observations and formatting tokens use `loss_mask=0`.
-When `alfworld_return_logprob: true`, model action tokens keep SGLang rollout
+When `return_logprob: true`, model action tokens keep SGLang rollout
 logprobs and environment tokens get dummy `0.0` logprobs so OPD/GRPO tensor
 lengths stay aligned.
 
@@ -17,7 +17,7 @@ Install ALFWorld in the runtime environment used for rollout workers. For the
 current server smoke tests it was installed into an isolated target directory:
 
 ```bash
-python3 -m pip install --target /mnt/bn/jixf-nas-lq/mlf/pythonlibs/alfworld_text alfworld
+python3 -m pip install --target /tmp/mlf-runtime/alfworld/pythonlibs/alfworld_text alfworld
 ```
 
 Full ALFWorld TextWorld reset requires `game.tw-pddl` files under:
@@ -128,6 +128,8 @@ Add these rollout arguments to a normal slime GRPO script:
 --input-key prompt \
 --metadata-key metadata \
 --custom-generate-function-path examples.alfworld.generate_with_alfworld.generate \
+--custom-rollout-log-function-path examples.alfworld.rollout_logging.log_rollout_data \
+--custom-eval-rollout-log-function-path examples.alfworld.rollout_logging.log_eval_rollout_data \
 --custom-config-path examples/alfworld/alfworld_config.yaml \
 --advantage-estimator grpo
 ```
@@ -147,34 +149,16 @@ training entry with slime's fully-async rollout path:
 --rollout-function-path slime.rollout.fully_async_rollout.generate_rollout_fully_async
 ```
 
-## OPD on top of GRPO
-
-For `--opd-type sglang`, the rollout stores ALFWorld environment reward in
-sample metadata and leaves `sample.reward` for the teacher server. The
-post-process hook then restores env rewards and attaches teacher logprobs.
-
-```bash
---use-opd \
---opd-type sglang \
---opd-kl-coef 1.0 \
---reward-model-path slime.rollout.on_policy_distillation.reward_func \
---custom-reward-post-process-path examples.alfworld.opd.post_process_rewards
-```
-
-`--opd-type megatron` needs no ALFWorld-specific reward post-process because the
-teacher logprobs are computed inside Megatron during actor training.
-
 ## Smoke tests
 
 ```bash
 python -m py_compile \
   examples/alfworld/generate_with_alfworld.py \
-  examples/alfworld/opd.py \
   examples/alfworld/make_prompt_data.py \
   examples/alfworld/smoke_test.py \
   examples/alfworld/real_env_smoke_test.py
 PYTHONPATH=. python examples/alfworld/smoke_test.py
-PYTHONPATH=/mnt/bn/jixf-nas-lq/mlf/pythonlibs/alfworld_text:. \
+PYTHONPATH=/tmp/mlf-runtime/alfworld/pythonlibs/alfworld_text:. \
   python examples/alfworld/real_env_smoke_test.py
 ```
 
@@ -182,6 +166,23 @@ PYTHONPATH=/mnt/bn/jixf-nas-lq/mlf/pythonlibs/alfworld_text:. \
 
 - `alfworld_direct_game_file: true` is the default path for training. It selects
   the episode file directly from the cached split wrapper.
-- Set `alfworld_restrict_to_admissible: true` only if you want invalid model
+- The canonical dense reward channel is `metadata["token_rewards"]`, a
+  `response_length`-aligned list. Format rewards/penalties are placed on the
+  final generated token of each turn; the environment outcome reward is placed on
+  the final token of the rollout. `sample.reward` is the sum of this list for
+  compatibility with slime's current scalar GRPO reward path.
+- Generated `<think>...</think>` content is parsed for the current action but is
+  not retained in the multi-turn training context. If action-format parsing
+  fails, only the last `format_error_context_tokens` generated tokens are kept in
+  context; the default is 20.
+- The default reward scale is `outcome_reward: 10.0` for success and
+  `format_penalty: -0.1` for malformed action output.
+- Per-rollout metadata is intentionally small: `actions`, `turn_count`,
+  `format_ok`, `format_errors`, `env_score`, `env_success`, `env_reward`, and an
+  `alfworld` block for task/server identifiers.
+- `examples.alfworld.rollout_logging` aggregates metadata into slime's tracking path,
+  including `alfworld/format_error_rate`, `alfworld/success_rate`, and eval
+  variants under `eval/<dataset>/...`.
+- Set `restrict_to_admissible: true` only if you want invalid model
   actions rewritten before `env.step()`.
 - Partial rollout is intentionally disabled for this adapter.

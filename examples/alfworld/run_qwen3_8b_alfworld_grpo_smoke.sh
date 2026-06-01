@@ -219,6 +219,8 @@ CKPT_ARGS=(
 ROLLOUT_ARGS=(
    --rollout-function-path slime.rollout.fully_async_rollout.generate_rollout_fully_async
    --custom-generate-function-path examples.alfworld.generate_with_alfworld.generate
+   --custom-rollout-log-function-path examples.alfworld.rollout_logging.log_rollout_data
+   --custom-eval-rollout-log-function-path examples.alfworld.rollout_logging.log_eval_rollout_data
    --custom-config-path "${ALFWORLD_CONFIG}"
    --prompt-data "${DATA_PATH}"
    --input-key prompt
@@ -227,6 +229,7 @@ ROLLOUT_ARGS=(
    --num-rollout "${NUM_ROLLOUT:-1}"
    --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-2}"
    --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-2}"
+   --rollout-max-context-len "${ROLLOUT_MAX_CONTEXT_LEN:-8192}"
    --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN:-512}"
    --rollout-temperature 1
    --global-batch-size "${GLOBAL_BATCH_SIZE:-4}"
@@ -248,10 +251,10 @@ if [ "${ENABLE_ALFWORLD_EVAL:-1}" = "1" ]; then
 fi
 
 PERF_ARGS=(
-   --tensor-model-parallel-size "${ACTOR_GPUS}"
+   --tensor-model-parallel-size "${TP_SIZE:-${ACTOR_GPUS}}"
    --sequence-parallel
    --pipeline-model-parallel-size 1
-   --context-parallel-size 1
+   --context-parallel-size "${CP_SIZE:-1}"
    --expert-model-parallel-size 1
    --expert-tensor-parallel-size 1
    --use-dynamic-batch-size

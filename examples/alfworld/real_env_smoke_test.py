@@ -13,7 +13,7 @@ class FakeTokenizer:
 
 
 async def fake_policy(args, sample, sampling_params):
-    return "look", [101], [-0.1], "stop"
+    return "<think>inspect the current room</think><action>look</action>", [101], [-0.1], "stop"
 
 
 async def run(data_dir: str):
@@ -29,16 +29,19 @@ async def run(data_dir: str):
         alfworld_env_type="AlfredTWEnv",
         alfworld_split="train",
         alfworld_num_train_games=2,
-        alfworld_max_turns=1,
-        alfworld_action_max_tokens=8,
-        alfworld_stop=[chr(10)],
-        alfworld_include_admissible_actions=True,
-        alfworld_restrict_to_admissible=False,
-        alfworld_invalid_action_fallback="model",
-        alfworld_reward_source="won",
+        max_turns=1,
+        action_max_tokens=128,
+        generation_stop=None,
+        include_admissible_actions=True,
+        restrict_to_admissible=False,
+        invalid_action_fallback="model",
+        reward_source="won",
+        outcome_reward=10.0,
         alfworld_skip_to_task=False,
         alfworld_direct_game_file=True,
-        alfworld_return_logprob=True,
+        return_logprob=True,
+        format_reward=0.0,
+        format_penalty=-0.1,
         use_opd=False,
         opd_type=None,
     )
@@ -50,17 +53,18 @@ async def run(data_dir: str):
         results.append(result)
 
         assert result.status == Sample.Status.COMPLETED
-        assert result.metadata["alfworld_actions"] == ["look"]
-        assert result.metadata["alfworld_game_file"]
+        assert result.metadata["actions"] == ["look"]
+        assert result.metadata["alfworld"]["game_file"]
+        assert len(result.metadata["token_rewards"]) == result.response_length
+        assert sum(result.metadata["token_rewards"]) == result.reward
         assert len(result.loss_mask) == result.response_length
         assert len(result.rollout_log_probs) == result.response_length
-        assert result.rollout_log_probs[0] == -0.1
-        assert sum(result.loss_mask) == 1
-        assert result.reward in (0.0, 1.0)
+        assert "<think>" not in result.response
+        assert "<action>look</action>" in result.response
+        assert sum(result.loss_mask) == len(FakeTokenizer().encode("<action>look</action>"))
+        assert result.reward in (0.0, 10.0)
 
-    assert results[0].metadata["alfworld_game_file"] != results[1].metadata["alfworld_game_file"]
-    cache = alf_gen._EnvCache(args)
-    assert "train" in cache.wrappers
+    assert results[0].metadata["alfworld"]["game_file"] != results[1].metadata["alfworld"]["game_file"]
     print("ALFWorld real env adapter smoke test passed")
 
 

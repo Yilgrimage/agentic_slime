@@ -7,29 +7,36 @@ alfworld_num_train_games: -1
 alfworld_num_eval_games: -1
 alfworld_env_type: AlfredTWEnv
 alfworld_split: train
-alfworld_max_turns: 50
-alfworld_action_max_tokens: 16
-alfworld_include_admissible_actions: true
-alfworld_restrict_to_admissible: false
-alfworld_invalid_action_fallback: model
-alfworld_reward_source: won
+max_turns: 50
+action_max_tokens: 128
+format_error_context_tokens: 20
+include_admissible_actions: true
+restrict_to_admissible: false
+invalid_action_fallback: model
+reward_source: won
+outcome_reward: 10.0
 alfworld_skip_to_task: false
 alfworld_direct_game_file: true
-alfworld_return_logprob: true
-alfworld_stop:
-  - "\n"
+return_logprob: true
+generation_stop: null
+format_reward: 0.0
+format_penalty: -0.1
+policy_timeout_s: 120
+env_request_timeout_s: 660
 
 
 # ALFWorld env-server settings. The server keeps env instances warm and leases
 # one worker per active agent session; close returns the worker to the pool.
-alfworld_server_pool_size: 8
-alfworld_server_acquire_timeout_s: 30
+alfworld_server_pool_size: 32
+alfworld_server_acquire_timeout_s: 600
 alfworld_server_session_ttl_s: 1800
 alfworld_server_lease_ttl_s: 1800
 alfworld_server_idempotency_ttl_s: 300
 alfworld_server_reuse_envs: true
 alfworld_server_reset_on_release: false
+alfworld_server_worker_start_timeout_s: 300
 alfworld_server_reset_parallelism: 1
+alfworld_server_worker_request_timeout_s: 180
 alfworld_server_prewarm_splits:
   - train
 # Retained for compatibility; pooled direct-game reset is exact by default.

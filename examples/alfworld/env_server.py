@@ -57,7 +57,7 @@ def _server_config(raw: dict) -> dict:
 
 def _default_alfworld_config(raw: dict) -> dict:
     data_dir = str(raw.get("alfworld_data_dir") or "$ALFWORLD_DATA").rstrip("/")
-    max_steps = int(raw.get("alfworld_max_turns", 50))
+    max_steps = int(raw.get("max_turns", raw.get("alfworld_max_turns", 50)))
     return {
         "dataset": {
             "data_path": raw.get("alfworld_data_path") or f"{data_dir}/json_2.1.1/train",
