@@ -1,0 +1,33 @@
+# Small WebShop config for GRPO wiring smoke.
+env_split: train
+max_turns: 20
+action_max_tokens: 512
+format_error_context_tokens: 20
+policy_timeout_s: 120
+env_request_timeout_s: 660
+include_available_actions: true
+restrict_to_available: false
+invalid_action_fallback: model
+reward_source: score
+outcome_reward: 10.0
+return_logprob: true
+generation_stop: null
+format_reward: 0.0
+format_penalty: -0.1
+
+webshop:
+  env_id: WebAgentTextEnv-v0
+  observation_mode: text
+  data_dir: /tmp/mlf-runtime/data/webshop
+  num_products: 1000
+  human_goals: true
+
+env_server:
+  pool_size: 32
+  acquire_timeout_s: 600
+  lease_ttl_s: 1800
+  idempotency_ttl_s: 300
+  worker_start_timeout_s: 300
+  worker_request_timeout_s: 180
+  prewarm_splits:
+    - train
