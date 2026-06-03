@@ -30,6 +30,7 @@ class FakeBackend:
         return {
             "observation": f"reset:{payload.get('task_index')}",
             "info": {"admissible_commands": [["look"]]},
+            "split": str(payload.get("split") or self.split),
             "task_index": int(payload.get("task_index") or 0),
             "reset_count": self.reset_count,
             "step_count": self.step_count,
@@ -89,7 +90,8 @@ def main() -> None:
         lease = _post(base_url, "/allocate", {"split": "train", "task_key": "train:0", "request_id": "r0"})
         assert lease["ok"] is True
         lease_id = lease["lease_id"]
-        reset = _post(base_url, "/reset", {"lease_id": lease_id, "task_index": 0})
+        worker_id = lease["worker_id"]
+        reset = _post(base_url, "/reset", {"lease_id": lease_id, "split": "train", "task_index": 0})
         assert reset["observation"] == "reset:0"
         step = _post(base_url, "/step", {"lease_id": lease_id, "action": "look"})
         assert step["success"] is True
@@ -97,8 +99,16 @@ def main() -> None:
         assert eval_payload["score"] == 1.0
         close = _post(base_url, "/close", {"lease_id": lease_id})
         assert close["found"] is True
+        eval_lease = _post(base_url, "/allocate", {"split": "valid_seen", "task_key": "valid_seen:1", "request_id": "e0"})
+        assert eval_lease["ok"] is True
+        assert eval_lease["worker_id"] == worker_id
+        eval_reset = _post(base_url, "/reset", {"lease_id": eval_lease["lease_id"], "split": "valid_seen", "task_index": 1})
+        assert eval_reset["split"] == "valid_seen"
+        _post(base_url, "/close", {"lease_id": eval_lease["lease_id"]})
         status = json.loads(_OPENER.open(f"{base_url}/status", timeout=10).read().decode())
         assert status["active_leases"] == 0
+        assert list(status["pools"]) == ["__shared__"]
+        assert status["pools"]["__shared__"]["pool_size"] == 1
         print("agent env server smoke test passed")
     finally:
         server.shutdown()

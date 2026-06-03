@@ -227,6 +227,7 @@ class WebShopBackend:
 
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         assert self.env is not None
+        self.split = str(payload.get("split") or self.split)
         self.task_index = int(payload.get("task_index") or 0)
         obs = _reset_env(self.env, self.task_index)
         self.reset_count += 1

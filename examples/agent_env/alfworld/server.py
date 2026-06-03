@@ -165,6 +165,7 @@ class ALFWorldBackend:
         self.wrapper: Any | None = None
         self.env: Any | None = None
         self.base_game_files: list[str] = []
+        self.loaded_split: str | None = None
         self.registered_game_file: str | None = None
         self.game_file: str | None = None
         self.reset_count = 0
@@ -175,7 +176,7 @@ class ALFWorldBackend:
         self.last_info: dict[str, Any] = {}
         self.task_index: int | None = None
 
-    def start(self) -> dict[str, Any]:
+    def _load_wrapper(self, split: str) -> dict[str, Any]:
         import sys
 
         alfworld_lib = os.environ.get("ALFWORLD_LIB")
@@ -183,16 +184,28 @@ class ALFWorldBackend:
             sys.path.insert(0, alfworld_lib)
         from alfworld.agents.environment import get_environment
 
+        self._close_env()
         env_cls = get_environment(self.env_type)
-        backend_split = _alfworld_backend_split(self.split)
+        backend_split = _alfworld_backend_split(split)
         self.wrapper = env_cls(self.config, train_eval=backend_split)
         self.base_game_files = list(getattr(self.wrapper, "game_files", None) or [])
         if not self.base_game_files:
             raise RuntimeError(
-                f"ALFWorld split={self.split} backend_split={backend_split} has no games. "
+                f"ALFWorld split={split} backend_split={backend_split} has no games. "
                 "Check data_path and game.tw-pddl files."
             )
+        self.split = split
+        self.loaded_split = split
+        self.registered_game_file = None
+        self.game_file = None
         return {"num_games": len(self.base_game_files)}
+
+    def start(self) -> dict[str, Any]:
+        return self._load_wrapper(self.split)
+
+    def _ensure_split(self, split: str) -> None:
+        if self.wrapper is None or self.loaded_split != split:
+            self._load_wrapper(split)
 
     def _close_env(self) -> None:
         if self.env is not None and hasattr(self.env, "close"):
@@ -220,6 +233,8 @@ class ALFWorldBackend:
             self.registered_game_file = game_file
 
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
+        split = str(payload.get("split") or self.split)
+        self._ensure_split(split)
         self.task_index = int(payload.get("task_index") or 0)
         seed = payload.get("seed", self.task_index)
         direct_game_file = bool(payload.get("direct_game_file", self.default_direct_game_file))

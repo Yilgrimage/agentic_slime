@@ -156,14 +156,22 @@ class ProcessPoolEnvServer:
         self.worker_request_timeout_s = float(self.server_config["worker_request_timeout_s"])
         self.reuse_workers = bool(self.server_config["reuse_workers"])
         self.reset_on_release = bool(self.server_config["reset_on_release"])
+        self.shared_pool = bool(self.server_config["shared_pool"])
         self.mp_ctx = mp.get_context("spawn")
         self.lock = threading.Lock()
         self.available: dict[str, queue.Queue[Worker]] = {}
         self.created: dict[str, list[Worker]] = {}
         self.leases: dict[str, Lease] = {}
         self.idempotency: dict[tuple[str, str], tuple[str, float]] = {}
-        for split in self.server_config["prewarm_splits"]:
-            self._ensure_pool(str(split))
+        prewarm_splits = [str(split) for split in self.server_config["prewarm_splits"]]
+        if self.shared_pool:
+            self._ensure_pool(prewarm_splits[0] if prewarm_splits else "train")
+        else:
+            for split in prewarm_splits:
+                self._ensure_pool(split)
+
+    def _pool_key(self, split: str) -> str:
+        return "__shared__" if self.shared_pool else split
 
     def _spawn_worker(self, split: str, index: int | str) -> Worker:
         parent_conn, child_conn = self.mp_ctx.Pipe()
@@ -198,17 +206,24 @@ class ProcessPoolEnvServer:
         return worker
 
     def _ensure_pool(self, split: str) -> None:
-        if split in self.available:
+        pool_key = self._pool_key(split)
+        if pool_key in self.available:
             return
         pool_size = int(self.server_config["pool_size"])
         workers = [self._spawn_worker(split, i) for i in range(pool_size)]
         q: queue.Queue[Worker] = queue.Queue(maxsize=pool_size)
-        logger.info("Prewarming %d process-isolated %s workers for split=%s", pool_size, self.env_name, split)
+        logger.info(
+            "Prewarming %d process-isolated %s workers for pool=%s initial_split=%s",
+            pool_size,
+            self.env_name,
+            pool_key,
+            split,
+        )
         for worker in workers:
             self._wait_ready(worker)
             q.put(worker)
-        self.available[split] = q
-        self.created[split] = workers
+        self.available[pool_key] = q
+        self.created[pool_key] = workers
 
     def _worker_request(self, worker: Worker, cmd: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         with worker.lock:
@@ -239,7 +254,7 @@ class ProcessPoolEnvServer:
         if self.reset_on_release:
             self._worker_request(lease.worker, "release", {"reset_on_release": True})
         if lease.pooled:
-            self.available[lease.worker.split].put(lease.worker)
+            self.available[self._pool_key(lease.worker.split)].put(lease.worker)
         else:
             self._worker_request(lease.worker, "close")
             lease.worker.process.join(timeout=5)
@@ -255,8 +270,9 @@ class ProcessPoolEnvServer:
         if not self.reuse_workers:
             return self._start_worker(split, f"dedicated-{uuid.uuid4().hex[:8]}"), False
         self._ensure_pool(split)
+        pool_key = self._pool_key(split)
         try:
-            return self.available[split].get(timeout=self.acquire_timeout_s), True
+            return self.available[pool_key].get(timeout=self.acquire_timeout_s), True
         except queue.Empty as exc:
             raise CapacityError(f"No {self.env_name} worker available for split={split} within {self.acquire_timeout_s}s") from exc
 
@@ -309,6 +325,7 @@ class ProcessPoolEnvServer:
         lease = self._get_lease(lease_id)
         result = self._worker_request(lease.worker, "reset", payload)
         lease.split = str(result.get("split", lease.split))
+        lease.worker.split = lease.split
         lease.reset_at = time.time()
         lease.last_used_at = time.time()
         lease.final_score = 0.0
@@ -357,12 +374,15 @@ class ProcessPoolEnvServer:
 
     def health(self) -> dict[str, Any]:
         ready_values = [worker.ready for workers in self.created.values() for worker in workers]
+        worker_splits = sorted({worker.split for workers in self.created.values() for worker in workers})
         payload: dict[str, Any] = {
             "ok": True,
             "leases": len(self.leases),
             "active_leases": len(self.leases),
             "pool_size": int(self.server_config["pool_size"]),
-            "splits": list(self.available),
+            "shared_pool": self.shared_pool,
+            "pools": list(self.available),
+            "splits": worker_splits,
             "lease_ttl_s": self.lease_ttl_s,
             "worker_request_timeout_s": self.worker_request_timeout_s,
         }
@@ -390,10 +410,11 @@ class ProcessPoolEnvServer:
                 for lease_id, lease in self.leases.items()
             ]
         pools = {}
-        for split, workers in self.created.items():
-            pools[split] = {
+        for pool_key, workers in self.created.items():
+            pools[pool_key] = {
                 "pool_size": len(workers),
-                "available": self.available[split].qsize() if split in self.available else 0,
+                "available": self.available[pool_key].qsize() if pool_key in self.available else 0,
+                "splits": sorted({worker.split for worker in workers}),
                 "resets": sum(w.reset_count for w in workers),
                 "steps": sum(w.step_count for w in workers),
                 "alive": sum(1 for w in workers if w.process.is_alive()),
@@ -424,6 +445,7 @@ def normalize_server_config(raw: dict[str, Any]) -> dict[str, Any]:
         "prewarm_splits": list(raw.get("prewarm_splits", ["train"])),
         "reuse_workers": bool(raw.get("reuse_workers", True)),
         "reset_on_release": bool(raw.get("reset_on_release", False)),
+        "shared_pool": bool(raw.get("shared_pool", True)),
     }
 
 
