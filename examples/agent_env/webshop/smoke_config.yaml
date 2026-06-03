@@ -19,6 +19,8 @@ webshop:
   env_id: WebAgentTextEnv-v0
   observation_mode: text
   data_dir: /tmp/mlf-runtime/data/webshop
+  product_file: /tmp/mlf-runtime/code/WebShop/data/items_shuffle_1000.json
+  attr_file: /tmp/mlf-runtime/code/WebShop/data/items_ins_v2_1000.json
   num_products: 1000
   human_goals: true
 

@@ -27,15 +27,17 @@ fi
 export PATH="${ENV_PREFIX}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install "alfworld>=0.4.2" conda-pack
+python -m pip install "alfworld>=0.4.2" PyYAML conda-pack
 
 python - <<'PY'
 import alfworld
 import textworld
+import yaml
 
 print("alfworld_env_imports_ok", {
     "alfworld": getattr(alfworld, "__file__", "unknown"),
     "textworld": getattr(textworld, "__version__", "unknown"),
+    "yaml": getattr(yaml, "__version__", "unknown"),
 })
 PY
 

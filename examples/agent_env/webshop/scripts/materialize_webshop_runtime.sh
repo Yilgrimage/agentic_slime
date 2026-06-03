@@ -15,6 +15,13 @@ LOCAL_DATA=${LOCAL_WEBSHOP_DATA:-${MLF_LOCAL_ROOT}/data/webshop}
 
 mkdir -p "$(dirname "${LOCAL_ENV}")" "$(dirname "${LOCAL_SRC}")" "$(dirname "${LOCAL_DATA}")"
 
+copy_tree_excluding_parts() {
+  local src=$1
+  local dst=$2
+  mkdir -p "${dst}"
+  tar -C "${src}" --exclude='*.parts' --exclude='*.part' -cf - . | tar -C "${dst}" -xf -
+}
+
 if [ ! -x "${LOCAL_ENV}/bin/python" ]; then
   mkdir -p "${LOCAL_ENV}"
   tar -xzf "${NAS_PACK}" -C "${LOCAL_ENV}"
@@ -26,17 +33,20 @@ if [ ! -d "${LOCAL_SRC}" ] && [ -d "${NAS_SRC}" ]; then
 fi
 
 if [ -d "${NAS_DATA}" ]; then
-  if [ ! -d "${LOCAL_DATA}" ]; then
-    cp -a "${NAS_DATA}" "${LOCAL_DATA}"
-  fi
+  copy_tree_excluding_parts "${NAS_DATA}" "${LOCAL_DATA}"
   if [ -d "${NAS_DATA}/data" ]; then
     mkdir -p "${LOCAL_SRC}/data"
-    cp -a "${NAS_DATA}/data/." "${LOCAL_SRC}/data/"
+    copy_tree_excluding_parts "${NAS_DATA}/data" "${LOCAL_SRC}/data"
   fi
   if [ -d "${NAS_DATA}/search_engine/indexes_1k" ]; then
     mkdir -p "${LOCAL_SRC}/search_engine"
     rm -rf "${LOCAL_SRC}/search_engine/indexes_1k"
     cp -a "${NAS_DATA}/search_engine/indexes_1k" "${LOCAL_SRC}/search_engine/indexes_1k"
+  fi
+  if [ -d "${NAS_DATA}/search_engine/indexes_100k" ]; then
+    mkdir -p "${LOCAL_SRC}/search_engine"
+    rm -rf "${LOCAL_SRC}/search_engine/indexes_100k"
+    cp -a "${NAS_DATA}/search_engine/indexes_100k" "${LOCAL_SRC}/search_engine/indexes_100k"
   fi
 fi
 

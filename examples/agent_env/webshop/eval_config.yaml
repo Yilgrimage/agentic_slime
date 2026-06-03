@@ -10,6 +10,6 @@ eval:
   datasets:
     - name: webshop-valid
       path: /tmp/mlf-runtime/data/webshop/valid_100.jsonl
-      custom_generate_function_path: examples.webshop.generate.generate
+      custom_generate_function_path: examples.agent_env.webshop.rollout.generate
       metadata_overrides:
         split: valid

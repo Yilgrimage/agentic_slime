@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 from slime.utils.types import Sample
 
-import examples.alfworld.generate_with_alfworld as alf_gen
+import examples.agent_env.alfworld.rollout as alf_gen
+import examples.agent_env.rollout as agent_rollout
 
 
 class FakeTokenizer:
@@ -47,13 +48,13 @@ async def fake_close(args, lease_id):
 
 
 async def main():
-    alf_gen._tokenizer = lambda args: FakeTokenizer()
-    alf_gen._call_policy = fake_policy
-    alf_gen._allocate_env = fake_allocate
-    alf_gen._reset_env = fake_reset
-    alf_gen._step_env = fake_step
-    alf_gen._evaluate_env = fake_evaluate
-    alf_gen._close_env = fake_close
+    agent_rollout.tokenizer = lambda args: FakeTokenizer()
+    agent_rollout.call_policy = lambda args, spec, sample, sampling_params: fake_policy(args, sample, sampling_params)
+    agent_rollout.allocate_env = lambda args, spec, sample: fake_allocate(args, sample)
+    agent_rollout.reset_env = lambda args, spec, sample, lease_id, extra_payload=None: fake_reset(args, sample, lease_id)
+    agent_rollout.step_env = lambda args, spec, lease_id, action: fake_step(args, lease_id, action)
+    agent_rollout.evaluate_env = lambda args, spec, lease_id: fake_evaluate(args, lease_id)
+    agent_rollout.close_env = lambda args, spec, lease_id: fake_close(args, lease_id)
 
     args = SimpleNamespace(
         partial_rollout=False,

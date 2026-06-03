@@ -5,7 +5,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from examples.agent_env.env_router import EnvRouter
+from examples.agent_env.router import EnvRouter
 
 
 class FakeWorker:

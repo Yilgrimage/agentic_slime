@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 from slime.utils.types import Sample
 
-import examples.webshop.generate as rollout
+import examples.agent_env.webshop.rollout as rollout
+import examples.agent_env.rollout as agent_rollout
 
 
 class FakeTokenizer:
@@ -54,13 +55,13 @@ async def fake_close(args, lease_id):
 
 
 async def main():
-    rollout._tokenizer = lambda args: FakeTokenizer()
-    rollout._call_policy = fake_policy
-    rollout._allocate_env = fake_allocate
-    rollout._reset_env = fake_reset
-    rollout._step_env = fake_step
-    rollout._evaluate_env = fake_evaluate
-    rollout._close_env = fake_close
+    agent_rollout.tokenizer = lambda args: FakeTokenizer()
+    agent_rollout.call_policy = lambda args, spec, sample, sampling_params: fake_policy(args, sample, sampling_params)
+    agent_rollout.allocate_env = lambda args, spec, sample: fake_allocate(args, sample)
+    agent_rollout.reset_env = lambda args, spec, sample, lease_id, extra_payload=None: fake_reset(args, sample, lease_id)
+    agent_rollout.step_env = lambda args, spec, lease_id, action: fake_step(args, lease_id, action)
+    agent_rollout.evaluate_env = lambda args, spec, lease_id: fake_evaluate(args, lease_id)
+    agent_rollout.close_env = lambda args, spec, lease_id: fake_close(args, lease_id)
 
     args = SimpleNamespace(
         partial_rollout=False,

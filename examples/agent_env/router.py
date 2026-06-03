@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+class AgentThreadingHTTPServer(ThreadingHTTPServer):
+    request_queue_size = 256
+    daemon_threads = True
+
+
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
     body = json.dumps(payload).encode("utf-8")
     handler.send_response(status)
@@ -293,7 +298,7 @@ def main() -> None:
         retry_capacity=not args.no_retry_capacity,
     )
     logger.info("agent env router listening on http://%s:%s workers=%s", args.host, args.port, worker_urls)
-    ThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
+    AgentThreadingHTTPServer((args.host, args.port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

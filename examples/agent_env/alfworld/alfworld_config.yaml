@@ -8,7 +8,7 @@ alfworld_num_eval_games: -1
 alfworld_env_type: AlfredTWEnv
 alfworld_split: train
 max_turns: 50
-action_max_tokens: 128
+action_max_tokens: 512
 format_error_context_tokens: 20
 include_admissible_actions: true
 restrict_to_admissible: false

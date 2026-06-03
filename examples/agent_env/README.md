@@ -1,10 +1,27 @@
-# Agent Environment Router
+# Agent Environment Runtime
 
-`env_router.py` is a generic lease router for agentic environment pool servers.
-It is intentionally environment-agnostic: ALFWorld, WebShop, and future
-ScienceWorld servers expose the same small HTTP lease protocol, while the router
-only chooses a worker at allocation time and forwards later requests to the same
-worker.
+This folder contains the environment-agnostic pieces shared by agentic examples.
+ALFWorld, WebShop, and future ScienceWorld adapters should keep only
+environment-specific reset/step logic in their own folders.
+
+Shared modules:
+
+- `router.py`: generic multi-worker lease router.
+- `server.py`: generic process-pool lease server and HTTP protocol.
+- `rollout.py`: generic Slime custom-generate agent loop, including policy
+  calls, `<think>/<action>` parsing, context trimming, env HTTP calls, token
+  reward alignment, and lease cleanup.
+- `metrics.py`: generic rollout/eval metric aggregation for Slime
+  logging.
+
+Environment folders provide a small `AgentEnvSpec` plus a backend implementation:
+
+- prompt and observation rendering
+- available/admissible action extraction
+- invalid-action fallback policy
+- success/outcome interpretation
+- env-specific reset payload and metadata
+- backend-specific imports, reset/step/evaluate behavior, and data paths
 
 Generic endpoints:
 
@@ -25,7 +42,7 @@ lease is encoded as `<worker_idx>:<worker_lease_id>`, which makes `reset`,
 Example:
 
 ```bash
-python -m examples.agent_env.env_router \
+python -m examples.agent_env.router \
   --host 0.0.0.0 \
   --port 18080 \
   --workers http://node0:18180,http://node1:18180,http://node2:18180,http://node3:18180
@@ -39,10 +56,15 @@ Keep environment-specific behavior in the env server:
 - observations, scores, done/success flags
 - environment-local metadata
 
-Keep generic behavior in this router:
+Keep generic behavior in this folder:
 
 - worker discovery from configured URLs
 - task-key based worker selection
 - capacity/unreachable fallback
 - global lease encoding and sticky forwarding
 - aggregate health/status
+- process-pool worker lifecycle
+- lease allocation, idempotency, TTL, and release
+- multi-turn rollout bookkeeping
+- token-level reward list shape management
+- common rollout/eval logging

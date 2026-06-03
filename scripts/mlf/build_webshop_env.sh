@@ -78,7 +78,7 @@ fi
 PYTHONPATH="${MLF_NAS_ROOT}/code/slime:${WEBSHOP_LIB}" WEBSHOP_LIB="${WEBSHOP_LIB}" WEBSHOP_DATA="${WEBSHOP_DATA}" python - <<'PY'
 import os
 
-from examples.webshop.env_server import _install_text_env_import_stubs, _load_text_env_class
+from examples.agent_env.webshop.server import _install_text_env_import_stubs, _load_text_env_class
 
 _install_text_env_import_stubs()
 cls = _load_text_env_class(os.environ["WEBSHOP_LIB"])

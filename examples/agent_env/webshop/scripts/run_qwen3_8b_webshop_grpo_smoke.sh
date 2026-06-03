@@ -51,17 +51,38 @@ WEBSHOP_LIB=${WEBSHOP_LIB:-${LOCAL_WEBSHOP_SRC}}
 NAS_WEBSHOP_DATA=${NAS_WEBSHOP_DATA:-${NAS_MLF_ROOT}/data/webshop}
 LOCAL_WEBSHOP_DATA=${LOCAL_WEBSHOP_DATA:-${LOCAL_RUNTIME_ROOT}/data/webshop}
 WEBSHOP_DATA_DIR=${WEBSHOP_DATA_DIR:-${LOCAL_WEBSHOP_DATA}}
-WEBSHOP_PROMPT_NUM_TASKS=${WEBSHOP_PROMPT_NUM_TASKS:-13}
-DATA_PATH=${DATA_PATH:-${WEBSHOP_DATA_DIR}/train_${WEBSHOP_PROMPT_NUM_TASKS}.jsonl}
-EVAL_VALID_PATH=${EVAL_VALID_PATH:-${WEBSHOP_DATA_DIR}/valid_${WEBSHOP_PROMPT_NUM_TASKS}.jsonl}
+WEBSHOP_DATA_SIZE=${WEBSHOP_DATA_SIZE:-small}
+if [ "${WEBSHOP_DATA_SIZE}" = "full" ] || [ "${WEBSHOP_DATA_SIZE}" = "all" ]; then
+  DEFAULT_WEBSHOP_NUM_PRODUCTS=100000
+  DEFAULT_WEBSHOP_PRODUCT_FILE="${WEBSHOP_DATA_DIR}/data/items_shuffle.json"
+  DEFAULT_WEBSHOP_ATTR_FILE="${WEBSHOP_DATA_DIR}/data/items_ins_v2.json"
+  DEFAULT_WEBSHOP_ENV_POOL_SIZE=32
+else
+  DEFAULT_WEBSHOP_NUM_PRODUCTS=1000
+  DEFAULT_WEBSHOP_PRODUCT_FILE="${WEBSHOP_DATA_DIR}/data/items_shuffle_1000.json"
+  DEFAULT_WEBSHOP_ATTR_FILE="${WEBSHOP_DATA_DIR}/data/items_ins_v2_1000.json"
+  DEFAULT_WEBSHOP_ENV_POOL_SIZE=32
+fi
+WEBSHOP_NUM_PRODUCTS=${WEBSHOP_NUM_PRODUCTS:-${DEFAULT_WEBSHOP_NUM_PRODUCTS}}
+WEBSHOP_PRODUCT_FILE=${WEBSHOP_PRODUCT_FILE:-${DEFAULT_WEBSHOP_PRODUCT_FILE}}
+WEBSHOP_ATTR_FILE=${WEBSHOP_ATTR_FILE:-${DEFAULT_WEBSHOP_ATTR_FILE}}
+WEBSHOP_ENV_POOL_SIZE=${WEBSHOP_ENV_POOL_SIZE:-${DEFAULT_WEBSHOP_ENV_POOL_SIZE}}
+WEBSHOP_PROMPT_NUM_TASKS=${WEBSHOP_PROMPT_NUM_TASKS:-}
+USER_DATA_PATH=${DATA_PATH:-}
+USER_EVAL_VALID_PATH=${EVAL_VALID_PATH:-}
 
-BASE_WEBSHOP_CONFIG=${BASE_WEBSHOP_CONFIG:-${REPO_DIR}/examples/webshop/webshop_smoke_config.yaml}
+BASE_WEBSHOP_CONFIG=${BASE_WEBSHOP_CONFIG:-${REPO_DIR}/examples/agent_env/webshop/smoke_config.yaml}
 WEBSHOP_CONFIG=${WEBSHOP_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/webshop_smoke_config.yaml}
-BASE_WEBSHOP_EVAL_CONFIG=${BASE_WEBSHOP_EVAL_CONFIG:-${REPO_DIR}/examples/webshop/webshop_eval_config.yaml}
+BASE_WEBSHOP_EVAL_CONFIG=${BASE_WEBSHOP_EVAL_CONFIG:-${REPO_DIR}/examples/agent_env/webshop/eval_config.yaml}
 WEBSHOP_EVAL_CONFIG=${WEBSHOP_EVAL_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/webshop_eval_config.yaml}
 WEBSHOP_SERVER_HOST=${WEBSHOP_SERVER_HOST:-127.0.0.1}
 WEBSHOP_SERVER_PORT=${WEBSHOP_SERVER_PORT:-18180}
-WEBSHOP_ENV_SERVER_URL=${WEBSHOP_ENV_SERVER_URL:-http://${WEBSHOP_SERVER_HOST}:${WEBSHOP_SERVER_PORT}}
+USE_EXISTING_AGENT_INFRA=${USE_EXISTING_AGENT_INFRA:-0}
+if [ "${USE_EXISTING_AGENT_INFRA}" = "1" ]; then
+  WEBSHOP_ENV_SERVER_URL=${WEBSHOP_ENV_SERVER_URL:-http://127.0.0.1:19000}
+else
+  WEBSHOP_ENV_SERVER_URL=${WEBSHOP_ENV_SERVER_URL:-http://${WEBSHOP_SERVER_HOST}:${WEBSHOP_SERVER_PORT}}
+fi
 WEBSHOP_SERVER_LOG=${WEBSHOP_SERVER_LOG:-${LOCAL_RUNTIME_ROOT}/logs/webshop_env_server.log}
 
 LOCAL_MODEL_DIR=${LOCAL_MODEL_DIR:-${LOCAL_RUNTIME_ROOT}/models/Qwen3-8B}
@@ -81,14 +102,14 @@ export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-${LOCAL_RUNTIME_ROOT}/cache/cuda}
 
 mkdir -p "${LOCAL_RUNTIME_ROOT}/configs" "${LOCAL_RUNTIME_ROOT}/logs" "${LOCAL_RUNTIME_ROOT}/code" "${TMPDIR}" "${XDG_CACHE_HOME}" "${HF_HOME}" "${TRANSFORMERS_CACHE}" "${TORCH_EXTENSIONS_DIR}" "${TRITON_CACHE_DIR}" "${CUDA_CACHE_PATH}"
 
-if [ ! -d "${WEBSHOP_LIB}" ] && [ -d "${NAS_WEBSHOP_SRC}" ]; then
+if [ "${USE_EXISTING_AGENT_INFRA}" != "1" ] && [ ! -d "${WEBSHOP_LIB}" ] && [ -d "${NAS_WEBSHOP_SRC}" ]; then
   mkdir -p "$(dirname "${WEBSHOP_LIB}")"
   cp -a "${NAS_WEBSHOP_SRC}" "${WEBSHOP_LIB}"
 fi
 
-if [ ! -d "${WEBSHOP_DATA_DIR}" ] && [ -d "${NAS_WEBSHOP_DATA}" ]; then
-  mkdir -p "$(dirname "${WEBSHOP_DATA_DIR}")"
-  cp -a "${NAS_WEBSHOP_DATA}" "${WEBSHOP_DATA_DIR}"
+if [ "${USE_EXISTING_AGENT_INFRA}" != "1" ] && [ -d "${NAS_WEBSHOP_DATA}" ]; then
+  mkdir -p "${WEBSHOP_DATA_DIR}"
+  cp -a "${NAS_WEBSHOP_DATA}/." "${WEBSHOP_DATA_DIR}/"
 fi
 
 mkdir -p "$(dirname "${WEBSHOP_CONFIG}")"
@@ -100,6 +121,11 @@ import yaml
 
 path = Path("${WEBSHOP_CONFIG}")
 cfg = yaml.safe_load(path.read_text()) or {}
+webshop = cfg.setdefault("webshop", {})
+webshop["data_dir"] = "${WEBSHOP_DATA_DIR}"
+webshop["product_file"] = "${WEBSHOP_PRODUCT_FILE}"
+webshop["attr_file"] = "${WEBSHOP_ATTR_FILE}"
+webshop["num_products"] = int("${WEBSHOP_NUM_PRODUCTS}")
 server = cfg.setdefault("env_server", {})
 overrides = {
     "pool_size": os.environ.get("WEBSHOP_ENV_POOL_SIZE"),
@@ -114,16 +140,6 @@ for key, value in overrides.items():
 path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 PYH
 
-if [ ! -f "${DATA_PATH}" ] || [ ! -f "${EVAL_VALID_PATH}" ]; then
-  "${SLIME_PYTHON}" "${REPO_DIR}/examples/webshop/make_prompt_data.py" \
-    --output-dir "${WEBSHOP_DATA_DIR}" \
-    --num-tasks "${WEBSHOP_PROMPT_NUM_TASKS}" \
-    --splits train valid
-fi
-
-sed "s|path: /tmp/mlf-runtime/data/webshop/valid_100.jsonl|path: ${EVAL_VALID_PATH}|" \
-  "${BASE_WEBSHOP_EVAL_CONFIG}" > "${WEBSHOP_EVAL_CONFIG}"
-
 WEBSHOP_SERVER_PID=""
 cleanup() {
   if [ -n "${WEBSHOP_SERVER_PID}" ] && kill -0 "${WEBSHOP_SERVER_PID}" 2>/dev/null; then
@@ -136,12 +152,14 @@ trap cleanup EXIT
 export WEBSHOP_ENV_SERVER_URL WEBSHOP_LIB WEBSHOP_DATA="${WEBSHOP_DATA_DIR}"
 export JAVA_HOME="${WEBSHOP_ENV}/lib/jvm"
 export JVM_PATH="${JAVA_HOME}/lib/server/libjvm.so"
-PYTHONPATH="${WEBSHOP_LIB}" "${WEBSHOP_PYTHON}" "${REPO_DIR}/examples/webshop/env_server.py" \
-  --host "${WEBSHOP_SERVER_HOST}" \
-  --port "${WEBSHOP_SERVER_PORT}" \
-  --config "${WEBSHOP_CONFIG}" \
-  > "${WEBSHOP_SERVER_LOG}" 2>&1 &
-WEBSHOP_SERVER_PID=$!
+if [ "${USE_EXISTING_AGENT_INFRA}" != "1" ]; then
+  PYTHONPATH="${WEBSHOP_LIB}" "${WEBSHOP_PYTHON}" "${REPO_DIR}/examples/agent_env/webshop/server.py" \
+    --host "${WEBSHOP_SERVER_HOST}" \
+    --port "${WEBSHOP_SERVER_PORT}" \
+    --config "${WEBSHOP_CONFIG}" \
+    > "${WEBSHOP_SERVER_LOG}" 2>&1 &
+  WEBSHOP_SERVER_PID=$!
+fi
 
 WEBSHOP_SERVER_READY=0
 for _ in $(seq 1 180); do
@@ -157,7 +175,7 @@ PYH
     WEBSHOP_SERVER_READY=1
     break
   fi
-  if ! kill -0 "${WEBSHOP_SERVER_PID}" 2>/dev/null; then
+  if [ -n "${WEBSHOP_SERVER_PID}" ] && ! kill -0 "${WEBSHOP_SERVER_PID}" 2>/dev/null; then
     echo "WebShop env server exited early. Log follows:"
     cat "${WEBSHOP_SERVER_LOG}" || true
     exit 1
@@ -169,6 +187,41 @@ if [ "${WEBSHOP_SERVER_READY}" -ne 1 ]; then
   echo "WebShop env server did not become healthy at ${WEBSHOP_ENV_SERVER_URL}. Log follows:"
   cat "${WEBSHOP_SERVER_LOG}" || true
   exit 1
+fi
+
+if [ -z "${WEBSHOP_PROMPT_NUM_TASKS}" ]; then
+  WEBSHOP_PROMPT_NUM_TASKS=$("${SLIME_PYTHON}" - <<PYH
+import json
+import urllib.request
+base_url = "${WEBSHOP_ENV_SERVER_URL}".rstrip("/")
+data = json.loads(urllib.request.urlopen(f"{base_url}/health", timeout=5).read().decode())
+num_goals = data.get("num_goals")
+if not num_goals:
+    status = json.loads(urllib.request.urlopen(f"{base_url}/status", timeout=5).read().decode())
+    workers = status.get("workers") or []
+    worker_goals = [int(w["num_goals"]) for w in workers if w.get("num_goals")]
+    if worker_goals:
+        num_goals = min(worker_goals)
+if not num_goals:
+    raise SystemExit("WebShop server did not report num_goals")
+print(int(num_goals))
+PYH
+)
+  DATA_PATH=${DATA_PATH:-${WEBSHOP_DATA_DIR}/train_${WEBSHOP_PROMPT_NUM_TASKS}.jsonl}
+  EVAL_VALID_PATH=${EVAL_VALID_PATH:-${WEBSHOP_DATA_DIR}/valid_${WEBSHOP_PROMPT_NUM_TASKS}.jsonl}
+fi
+
+DATA_PATH=${USER_DATA_PATH:-${WEBSHOP_DATA_DIR}/train_${WEBSHOP_PROMPT_NUM_TASKS}.jsonl}
+EVAL_VALID_PATH=${USER_EVAL_VALID_PATH:-${WEBSHOP_DATA_DIR}/valid_${WEBSHOP_PROMPT_NUM_TASKS}.jsonl}
+
+sed "s|path: /tmp/mlf-runtime/data/webshop/valid_100.jsonl|path: ${EVAL_VALID_PATH}|" \
+  "${BASE_WEBSHOP_EVAL_CONFIG}" > "${WEBSHOP_EVAL_CONFIG}"
+
+if [ ! -f "${DATA_PATH}" ] || [ ! -f "${EVAL_VALID_PATH}" ]; then
+  "${SLIME_PYTHON}" "${REPO_DIR}/examples/agent_env/webshop/prompt_data.py" \
+    --output-dir "${WEBSHOP_DATA_DIR}" \
+    --num-tasks "${WEBSHOP_PROMPT_NUM_TASKS}" \
+    --splits train valid
 fi
 
 SLIME_CUDA_HOME=${SLIME_CUDA_HOME:-${SLIME_ENV}}
@@ -193,10 +246,12 @@ MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 
 mkdir -p "${SAVE_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}"
 
-"${SLIME_PYTHON}" -m ray.scripts.scripts stop --force 2>/dev/null || true
-pkill -u "${USER}" -f "sglang.launch_server" 2>/dev/null || true
-pkill -u "${USER}" -f "sglang_router" 2>/dev/null || true
-sleep 3
+if [ "${USE_EXISTING_AGENT_INFRA}" != "1" ]; then
+  "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force 2>/dev/null || true
+  pkill -u "${USER}" -f "sglang.launch_server" 2>/dev/null || true
+  pkill -u "${USER}" -f "sglang_router" 2>/dev/null || true
+  sleep 3
+fi
 
 cd "${REPO_DIR}"
 source scripts/models/qwen3-8B.sh
@@ -205,20 +260,20 @@ CKPT_ARGS=(
    --hf-checkpoint "${MODEL_DIR}"
    --ref-load "${TORCH_DIST_DIR}"
    --save "${SAVE_DIR}"
-   --save-interval 9999
+   --save-interval "${SAVE_INTERVAL:-9999}"
 )
 
 ROLLOUT_ARGS=(
    --rollout-function-path slime.rollout.fully_async_rollout.generate_rollout_fully_async
-   --custom-generate-function-path examples.webshop.generate.generate
-   --custom-rollout-log-function-path examples.webshop.rollout_logging.log_rollout_data
-   --custom-eval-rollout-log-function-path examples.webshop.rollout_logging.log_eval_rollout_data
+   --custom-generate-function-path examples.agent_env.webshop.rollout.generate
+   --custom-rollout-log-function-path examples.agent_env.webshop.rollout.log_rollout_data
+   --custom-eval-rollout-log-function-path examples.agent_env.webshop.rollout.log_eval_rollout_data
    --custom-config-path "${WEBSHOP_CONFIG}"
    --prompt-data "${DATA_PATH}"
    --input-key prompt
    --metadata-key metadata
    --rollout-shuffle
-   --num-rollout "${NUM_ROLLOUT:-1}"
+   --num-rollout "${NUM_ROLLOUT:-${NUM_STEPS:-1}}"
    --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-2}"
    --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-2}"
    --rollout-max-context-len "${ROLLOUT_MAX_CONTEXT_LEN:-8192}"
@@ -282,20 +337,54 @@ MISC_ARGS=(
    --num-steps "${NUM_STEPS:-1}"
    --log-interval 1
    --seed "${SEED:-42}"
-   --ray-address "127.0.0.1:${RAY_PORT}"
    --ray-temp-dir "${RAY_TEMP_DIR}"
-   --actor-num-nodes 1
+   --actor-num-nodes "${ACTOR_NUM_NODES:-1}"
    --actor-num-gpus-per-node "${ACTOR_GPUS}"
    --rollout-num-gpus "${ROLLOUT_GPUS}"
 )
 
-"${SLIME_PYTHON}" train_async.py \
-   "${CKPT_ARGS[@]}" \
-   "${MODEL_ARGS[@]}" \
-   "${ROLLOUT_ARGS[@]}" \
-   "${EVAL_ARGS[@]}" \
-   "${PERF_ARGS[@]}" \
-   "${GRPO_ARGS[@]}" \
-   "${OPTIMIZER_ARGS[@]}" \
-   "${SGLANG_ARGS[@]}" \
+TRAIN_ENTRY=(
+   "${SLIME_PYTHON}" "${REPO_DIR}/train_async.py"
+   "${CKPT_ARGS[@]}"
+   "${MODEL_ARGS[@]}"
+   "${ROLLOUT_ARGS[@]}"
+   "${EVAL_ARGS[@]}"
+   "${PERF_ARGS[@]}"
+   "${GRPO_ARGS[@]}"
+   "${OPTIMIZER_ARGS[@]}"
+   "${SGLANG_ARGS[@]}"
    "${MISC_ARGS[@]}"
+)
+
+if [ "${SUBMIT_VIA_RAY_JOB:-0}" = "1" ]; then
+  RAY_JOB_ADDRESS=${RAY_JOB_ADDRESS:-http://127.0.0.1:8265}
+  RUNTIME_ENV_JSON=$("${SLIME_PYTHON}" - <<PYH
+import json
+env = {
+    "PYTHONPATH": "${PYTHONPATH}",
+    "PYTHONNOUSERSITE": "1",
+    "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+    "CUDA_HOME": "${CUDA_HOME}",
+    "PATH": "${PATH}",
+    "CPATH": "${CPATH}",
+    "C_INCLUDE_PATH": "${C_INCLUDE_PATH}",
+    "CPLUS_INCLUDE_PATH": "${CPLUS_INCLUDE_PATH}",
+    "LIBRARY_PATH": "${LIBRARY_PATH}",
+    "LD_LIBRARY_PATH": "${LD_LIBRARY_PATH}",
+    "WEBSHOP_ENV_SERVER_URL": "${WEBSHOP_ENV_SERVER_URL}",
+    "WEBSHOP_LIB": "${WEBSHOP_LIB}",
+    "WEBSHOP_DATA": "${WEBSHOP_DATA_DIR}",
+    "JAVA_HOME": "${JAVA_HOME}",
+    "JVM_PATH": "${JVM_PATH}",
+    "no_proxy": "127.0.0.1,localhost,10.136.98.20,10.136.98.214,10.136.101.70,10.136.101.154",
+}
+print(json.dumps({"env_vars": env}))
+PYH
+)
+  "${SLIME_ENV}/bin/ray" job submit \
+     --address="${RAY_JOB_ADDRESS}" \
+     --runtime-env-json="${RUNTIME_ENV_JSON}" \
+     -- "${TRAIN_ENTRY[@]}"
+else
+  "${TRAIN_ENTRY[@]}"
+fi

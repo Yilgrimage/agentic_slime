@@ -76,13 +76,18 @@ ALFWORLD_LIB=${ALFWORLD_LIB:-${LOCAL_ALFWORLD_LIB}}
 DATA_PATH=${DATA_PATH:-${ALFWORLD_DATA_DIR}/train_100.jsonl}
 EVAL_VALID_SEEN_PATH=${EVAL_VALID_SEEN_PATH:-${ALFWORLD_DATA_DIR}/valid_seen_100.jsonl}
 EVAL_VALID_UNSEEN_PATH=${EVAL_VALID_UNSEEN_PATH:-${ALFWORLD_DATA_DIR}/valid_unseen_100.jsonl}
-BASE_ALFWORLD_CONFIG=${BASE_ALFWORLD_CONFIG:-${REPO_DIR}/examples/alfworld/alfworld_smoke_config.yaml}
+BASE_ALFWORLD_CONFIG=${BASE_ALFWORLD_CONFIG:-${REPO_DIR}/examples/agent_env/alfworld/smoke_config.yaml}
 ALFWORLD_CONFIG=${ALFWORLD_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/alfworld_smoke_config.yaml}
-BASE_ALFWORLD_EVAL_CONFIG=${BASE_ALFWORLD_EVAL_CONFIG:-${REPO_DIR}/examples/alfworld/alfworld_eval_config.yaml}
+BASE_ALFWORLD_EVAL_CONFIG=${BASE_ALFWORLD_EVAL_CONFIG:-${REPO_DIR}/examples/agent_env/alfworld/eval_config.yaml}
 ALFWORLD_EVAL_CONFIG=${ALFWORLD_EVAL_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/alfworld_eval_config.yaml}
 ALFWORLD_SERVER_HOST=${ALFWORLD_SERVER_HOST:-127.0.0.1}
 ALFWORLD_SERVER_PORT=${ALFWORLD_SERVER_PORT:-18080}
-ALFWORLD_ENV_SERVER_URL=${ALFWORLD_ENV_SERVER_URL:-http://${ALFWORLD_SERVER_HOST}:${ALFWORLD_SERVER_PORT}}
+USE_EXISTING_AGENT_INFRA=${USE_EXISTING_AGENT_INFRA:-0}
+if [ "${USE_EXISTING_AGENT_INFRA}" = "1" ]; then
+  ALFWORLD_ENV_SERVER_URL=${ALFWORLD_ENV_SERVER_URL:-http://127.0.0.1:19000}
+else
+  ALFWORLD_ENV_SERVER_URL=${ALFWORLD_ENV_SERVER_URL:-http://${ALFWORLD_SERVER_HOST}:${ALFWORLD_SERVER_PORT}}
+fi
 ALFWORLD_SERVER_LOG=${ALFWORLD_SERVER_LOG:-${LOCAL_RUNTIME_ROOT}/logs/alfworld_env_server.log}
 
 LOCAL_MODEL_DIR=${LOCAL_MODEL_DIR:-${LOCAL_RUNTIME_ROOT}/models/Qwen3-8B}
@@ -128,7 +133,7 @@ if [ -z "${USER_ALFWORLD_CONFIG}" ]; then
 fi
 
 if [ ! -f "${DATA_PATH}" ] || [ ! -f "${EVAL_VALID_SEEN_PATH}" ] || [ ! -f "${EVAL_VALID_UNSEEN_PATH}" ]; then
-  "${PYTHON_BIN}" "${REPO_DIR}/examples/alfworld/make_prompt_data.py" \
+  "${PYTHON_BIN}" "${REPO_DIR}/examples/agent_env/alfworld/prompt_data.py" \
     --output-dir "${ALFWORLD_DATA_DIR}" \
     --num-tasks "${ALFWORLD_PROMPT_NUM_TASKS:-100}" \
     --splits train valid_seen valid_unseen
@@ -154,12 +159,14 @@ trap cleanup EXIT
 
 export ALFWORLD_ENV_SERVER_URL
 ALFWORLD_SERVER_PYTHONPATH="${ALFWORLD_LIB}:${SLIME_ENV}/lib/python3.12/site-packages:${REPO_DIR}"
-PYTHONPATH="${ALFWORLD_SERVER_PYTHONPATH}" "${PYTHON_BIN}" "${REPO_DIR}/examples/alfworld/env_server.py" \
-  --host "${ALFWORLD_SERVER_HOST}" \
-  --port "${ALFWORLD_SERVER_PORT}" \
-  --config "${ALFWORLD_CONFIG}" \
-  > "${ALFWORLD_SERVER_LOG}" 2>&1 &
-ALFWORLD_SERVER_PID=$!
+if [ "${USE_EXISTING_AGENT_INFRA}" != "1" ]; then
+  PYTHONPATH="${ALFWORLD_SERVER_PYTHONPATH}" "${PYTHON_BIN}" "${REPO_DIR}/examples/agent_env/alfworld/server.py" \
+    --host "${ALFWORLD_SERVER_HOST}" \
+    --port "${ALFWORLD_SERVER_PORT}" \
+    --config "${ALFWORLD_CONFIG}" \
+    > "${ALFWORLD_SERVER_LOG}" 2>&1 &
+  ALFWORLD_SERVER_PID=$!
+fi
 
 ALFWORLD_SERVER_READY=0
 for _ in $(seq 1 120); do
@@ -175,7 +182,7 @@ PYH
     ALFWORLD_SERVER_READY=1
     break
   fi
-  if ! kill -0 "${ALFWORLD_SERVER_PID}" 2>/dev/null; then
+  if [ -n "${ALFWORLD_SERVER_PID}" ] && ! kill -0 "${ALFWORLD_SERVER_PID}" 2>/dev/null; then
     echo "ALFWorld env server exited early. Log follows:"
     cat "${ALFWORLD_SERVER_LOG}" || true
     exit 1
@@ -197,10 +204,12 @@ MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 
 mkdir -p "${SAVE_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}"
 
-"${PYTHON_BIN}" -m ray.scripts.scripts stop --force 2>/dev/null || true
-pkill -u "${USER}" -f "sglang.launch_server" 2>/dev/null || true
-pkill -u "${USER}" -f "sglang_router" 2>/dev/null || true
-sleep 3
+if [ "${USE_EXISTING_AGENT_INFRA}" != "1" ]; then
+  "${PYTHON_BIN}" -m ray.scripts.scripts stop --force 2>/dev/null || true
+  pkill -u "${USER}" -f "sglang.launch_server" 2>/dev/null || true
+  pkill -u "${USER}" -f "sglang_router" 2>/dev/null || true
+  sleep 3
+fi
 
 cd "${REPO_DIR}"
 source scripts/models/qwen3-8B.sh
@@ -213,14 +222,14 @@ CKPT_ARGS=(
    --hf-checkpoint "${MODEL_DIR}"
    --ref-load "${TORCH_DIST_DIR}"
    --save "${SAVE_DIR}"
-   --save-interval 9999
+   --save-interval "${SAVE_INTERVAL:-9999}"
 )
 
 ROLLOUT_ARGS=(
    --rollout-function-path slime.rollout.fully_async_rollout.generate_rollout_fully_async
-   --custom-generate-function-path examples.alfworld.generate_with_alfworld.generate
-   --custom-rollout-log-function-path examples.alfworld.rollout_logging.log_rollout_data
-   --custom-eval-rollout-log-function-path examples.alfworld.rollout_logging.log_eval_rollout_data
+   --custom-generate-function-path examples.agent_env.alfworld.rollout.generate
+   --custom-rollout-log-function-path examples.agent_env.alfworld.rollout.log_rollout_data
+   --custom-eval-rollout-log-function-path examples.agent_env.alfworld.rollout.log_eval_rollout_data
    --custom-config-path "${ALFWORLD_CONFIG}"
    --prompt-data "${DATA_PATH}"
    --input-key prompt
@@ -239,7 +248,7 @@ ROLLOUT_ARGS=(
 EVAL_ARGS=()
 if [ "${ENABLE_ALFWORLD_EVAL:-1}" = "1" ]; then
   EVAL_ARGS=(
-     --eval-function-path "${ALFWORLD_EVAL_FUNCTION_PATH:-examples.alfworld.eval_rollout.generate_rollout}"
+     --eval-function-path "${ALFWORLD_EVAL_FUNCTION_PATH:-slime.rollout.sglang_rollout.generate_rollout}"
      --eval-interval "${EVAL_INTERVAL:-1}"
      --eval-config "${ALFWORLD_EVAL_CONFIG}"
      --eval-max-response-len "${EVAL_MAX_RESPONSE_LEN:-${ROLLOUT_MAX_RESPONSE_LEN:-384}}"
@@ -287,6 +296,13 @@ SGLANG_ARGS=(
 )
 
 MISC_ARGS=(
+   --num-steps "${NUM_STEPS:-1}"
+   --log-interval 1
+   --seed "${SEED:-42}"
+   --ray-temp-dir "${RAY_TEMP_DIR}"
+   --actor-num-nodes "${ACTOR_NUM_NODES:-1}"
+   --actor-num-gpus-per-node "${ACTOR_GPUS}"
+   --rollout-num-gpus "${ROLLOUT_GPUS}"
    --attention-dropout 0.0
    --hidden-dropout 0.0
    --accumulate-allreduce-grads-in-fp32
@@ -298,20 +314,19 @@ export PYTHONPATH="${MEGATRON_PATH}:${REPO_DIR}:${SLIME_ENV}/lib/python3.12/site
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NCCL_NVLS_ENABLE="${HAS_NVLINK}"
 export RAY_ADDRESS=127.0.0.1:6379
-"${PYTHON_BIN}" -m ray.scripts.scripts start --head \
-   --node-ip-address "${MASTER_ADDR}" \
-   --num-gpus "${NUM_GPUS}" \
-   --disable-usage-stats \
-   --dashboard-host=0.0.0.0 \
-   --dashboard-port="${RAY_PORT}" \
-   --temp-dir "${RAY_TEMP_DIR}"
+if [ "${USE_EXISTING_AGENT_INFRA}" != "1" ]; then
+  "${PYTHON_BIN}" -m ray.scripts.scripts start --head \
+     --node-ip-address "${MASTER_ADDR}" \
+     --num-gpus "${NUM_GPUS}" \
+     --disable-usage-stats \
+     --dashboard-host=0.0.0.0 \
+     --dashboard-port="${RAY_PORT}" \
+     --temp-dir "${RAY_TEMP_DIR}"
+fi
 
-
-"${PYTHON_BIN}" train_async.py \
-   --actor-num-nodes 1 \
-   --actor-num-gpus-per-node "${ACTOR_GPUS}" \
-   --rollout-num-gpus "${ROLLOUT_GPUS}" \
-   ${MODEL_ARGS[@]} \
+TRAIN_ENTRY=(
+   "${PYTHON_BIN}" "${REPO_DIR}/train_async.py"
+   "${MODEL_ARGS[@]}"
    "${CKPT_ARGS[@]}" \
    "${ROLLOUT_ARGS[@]}" \
    "${OPTIMIZER_ARGS[@]}" \
@@ -320,3 +335,35 @@ export RAY_ADDRESS=127.0.0.1:6379
    "${EVAL_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
    "${MISC_ARGS[@]}"
+)
+
+if [ "${SUBMIT_VIA_RAY_JOB:-0}" = "1" ]; then
+  RAY_JOB_ADDRESS=${RAY_JOB_ADDRESS:-http://127.0.0.1:8265}
+  RUNTIME_ENV_JSON=$("${PYTHON_BIN}" - <<PYH
+import json
+env = {
+    "PYTHONPATH": "${PYTHONPATH}",
+    "PYTHONNOUSERSITE": "1",
+    "CUDA_DEVICE_MAX_CONNECTIONS": "1",
+    "CUDA_HOME": "${CUDA_HOME}",
+    "PATH": "${PATH}",
+    "CPATH": "${CPATH}",
+    "C_INCLUDE_PATH": "${C_INCLUDE_PATH}",
+    "CPLUS_INCLUDE_PATH": "${CPLUS_INCLUDE_PATH}",
+    "LIBRARY_PATH": "${LIBRARY_PATH}",
+    "LD_LIBRARY_PATH": "${LD_LIBRARY_PATH}",
+    "ALFWORLD_ENV_SERVER_URL": "${ALFWORLD_ENV_SERVER_URL}",
+    "ALFWORLD_LIB": "${ALFWORLD_LIB}",
+    "ALFWORLD_DATA": "${ALFWORLD_DATA_DIR}",
+    "no_proxy": "127.0.0.1,localhost,10.136.98.20,10.136.98.214,10.136.101.70,10.136.101.154",
+}
+print(json.dumps({"env_vars": env}))
+PYH
+)
+  "${SLIME_ENV}/bin/ray" job submit \
+     --address="${RAY_JOB_ADDRESS}" \
+     --runtime-env-json="${RUNTIME_ENV_JSON}" \
+     -- "${TRAIN_ENTRY[@]}"
+else
+  "${TRAIN_ENTRY[@]}"
+fi

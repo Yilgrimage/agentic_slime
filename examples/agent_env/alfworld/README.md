@@ -1,11 +1,21 @@
 # ALFWorld agentic rollout for slime
 
 This example plugs ALFWorld into slime through `--custom-generate-function-path`.
-One rollout sample is one ALFWorld episode. Model action tokens use
+One rollout sample is one ALFWorld episode. `rollout.py` now only
+declares ALFWorld-specific prompt/action/success behavior and delegates the
+common agent loop to `examples.agent_env.rollout`. Model action tokens use
 `loss_mask=1`; environment observations and formatting tokens use `loss_mask=0`.
-When `return_logprob: true`, model action tokens keep SGLang rollout
-logprobs and environment tokens get dummy `0.0` logprobs so OPD/GRPO tensor
-lengths stay aligned.
+When `return_logprob: true`, model action tokens keep SGLang rollout logprobs
+and environment tokens get dummy `0.0` logprobs so OPD/GRPO tensor lengths stay
+aligned.
+
+Directory layout:
+
+- `rollout.py`: ALFWorld `AgentEnvSpec` for the shared rollout
+  loop.
+- `server.py`: ALFWorld backend for the shared process-pool lease server.
+- `prompt_data.py`: ALFWorld prompt metadata generation.
+- `scripts/`: ALFWorld shell entrypoints.
 
 ## Setup on cn_server_0
 
@@ -41,12 +51,12 @@ Create prompt data. Each row is one ALFWorld task id; slime duplicates each row
 `--n-samples-per-prompt` times for GRPO groups.
 
 ```bash
-python examples/alfworld/make_prompt_data.py \
+python examples/agent_env/alfworld/prompt_data.py \
   --output /mnt/bn/jixf-nas-lq/mlf/data/alfworld/train.jsonl \
   --num-tasks 100 \
   --split train
 
-python examples/alfworld/make_prompt_data.py \
+python examples/agent_env/alfworld/prompt_data.py \
   --output-dir /mnt/bn/jixf-nas-lq/mlf/data/alfworld \
   --num-tasks 100 \
   --splits train valid_seen valid_unseen
@@ -57,25 +67,25 @@ python examples/alfworld/make_prompt_data.py \
 This adapter keeps the training/rollout environment and ALFWorld runtime
 decoupled:
 
-- `generate_with_alfworld.py` stays on the slime side. It only talks to SGLang
+- `rollout.py` stays on the slime side. It only talks to SGLang
   for model actions and to the ALFWorld HTTP server for `/reset`, `/step`, and
   `/close`.
-- `env_server.py` owns the ALFWorld import, data path, and env lifecycle. The
+- `server.py` owns the ALFWorld import, data path, and env lifecycle. The
   slime training environment does not need ALFWorld on its `PYTHONPATH`.
-- The server prewarms a pool of ALFWorld env workers per split. A rollout episode
-  leases one worker at reset time and returns it on close, so we avoid repeatedly
-  constructing ALFWorld/TextWorld envs.
-- The server is process-isolated. The HTTP process only owns lease routing; each
-  warm ALFWorld/TextWorld env lives in a child process. Independent active
-  episodes can reset/step concurrently without sharing parser state.
+- The shared process-pool server prewarms a pool of ALFWorld env workers per
+  split. A rollout episode leases one worker at reset time and returns it on
+  close, so we avoid repeatedly constructing ALFWorld/TextWorld envs.
+- The server is process-isolated. The HTTP process only owns lease routing and
+  worker lifecycle; each warm ALFWorld/TextWorld env lives in a child process.
+  Independent active episodes can reset/step concurrently without sharing parser
+  state.
 - If slime uses `router_policy=consistent_hashing`, the adapter forwards
   `sample.session_id` as the SGLang routing key.
 - For high-throughput training with long-tail episode lengths, use slime
   `train_async.py` plus fully-async rollout so slow ALFWorld episodes do not
   block the next training batch.
 
-Server-side knobs live in `alfworld_config.yaml` and
-`alfworld_smoke_config.yaml`:
+Server-side knobs live in `alfworld_config.yaml` and `smoke_config.yaml`:
 
 ```yaml
 alfworld_server_pool_size: 8
@@ -115,9 +125,10 @@ GET  /status     -> pool, lease, and worker counters
 
 `session_id` is still accepted as an alias for `lease_id` for compatibility with
 older rollout code. `request_id` on `/allocate` is idempotent, which prevents a
-rollout retry from accidentally occupying two workers. The server remains single
-node today; a future router can encode worker identity into `lease_id` and proxy
-all lease-scoped requests back to the owning env worker.
+rollout retry from accidentally occupying two workers. Multi-node routing is
+handled by `examples.agent_env.router`, which encodes worker identity into the
+global `lease_id` and proxies all lease-scoped requests back to the owning env
+worker.
 
 ## GRPO
 
@@ -127,19 +138,19 @@ Add these rollout arguments to a normal slime GRPO script:
 --prompt-data /mnt/bn/jixf-nas-lq/mlf/data/alfworld/train.jsonl \
 --input-key prompt \
 --metadata-key metadata \
---custom-generate-function-path examples.alfworld.generate_with_alfworld.generate \
---custom-rollout-log-function-path examples.alfworld.rollout_logging.log_rollout_data \
---custom-eval-rollout-log-function-path examples.alfworld.rollout_logging.log_eval_rollout_data \
---custom-config-path examples/alfworld/alfworld_config.yaml \
+--custom-generate-function-path examples.agent_env.alfworld.rollout.generate \
+--custom-rollout-log-function-path examples.agent_env.alfworld.rollout.log_rollout_data \
+--custom-eval-rollout-log-function-path examples.agent_env.alfworld.rollout.log_eval_rollout_data \
+--custom-config-path examples/agent_env/alfworld/alfworld_config.yaml \
 --advantage-estimator grpo
 ```
 
-Add eval through slime's native eval dataset path. `alfworld_eval_config.yaml`
+Add eval through slime's native eval dataset path. `eval_config.yaml`
 uses the same custom generate function and injects the ALFWorld split metadata:
 
 ```bash
 --eval-interval 5 \
---eval-config examples/alfworld/alfworld_eval_config.yaml
+--eval-config examples/agent_env/alfworld/eval_config.yaml
 ```
 
 For fully-async training, keep the same custom generate function and launch the
@@ -153,13 +164,13 @@ training entry with slime's fully-async rollout path:
 
 ```bash
 python -m py_compile \
-  examples/alfworld/generate_with_alfworld.py \
-  examples/alfworld/make_prompt_data.py \
-  examples/alfworld/smoke_test.py \
-  examples/alfworld/real_env_smoke_test.py
-PYTHONPATH=. python examples/alfworld/smoke_test.py
+  examples/agent_env/alfworld/rollout.py \
+  examples/agent_env/alfworld/prompt_data.py \
+  examples/agent_env/alfworld/smoke_test.py \
+  examples/agent_env/alfworld/real_env_smoke_test.py
+PYTHONPATH=. python examples/agent_env/alfworld/smoke_test.py
 PYTHONPATH=/tmp/mlf-runtime/alfworld/pythonlibs/alfworld_text:. \
-  python examples/alfworld/real_env_smoke_test.py
+  python examples/agent_env/alfworld/real_env_smoke_test.py
 ```
 
 ## Notes
@@ -180,7 +191,7 @@ PYTHONPATH=/tmp/mlf-runtime/alfworld/pythonlibs/alfworld_text:. \
 - Per-rollout metadata is intentionally small: `actions`, `turn_count`,
   `format_ok`, `format_errors`, `env_score`, `env_success`, `env_reward`, and an
   `alfworld` block for task/server identifiers.
-- `examples.alfworld.rollout_logging` aggregates metadata into slime's tracking path,
+- `examples.agent_env.alfworld.rollout` aggregates metadata into slime's tracking path,
   including `alfworld/format_error_rate`, `alfworld/success_rate`, and eval
   variants under `eval/<dataset>/...`.
 - Set `restrict_to_admissible: true` only if you want invalid model
