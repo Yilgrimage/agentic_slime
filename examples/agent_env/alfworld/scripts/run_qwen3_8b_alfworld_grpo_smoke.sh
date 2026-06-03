@@ -70,12 +70,14 @@ PYTHON_BIN=${PYTHON_BIN:-${SLIME_ENV}/bin/python}
 NAS_ALFWORLD_DATA=${NAS_ALFWORLD_DATA:-${NAS_MLF_ROOT}/data/alfworld}
 LOCAL_ALFWORLD_DATA=${LOCAL_ALFWORLD_DATA:-${LOCAL_RUNTIME_ROOT}/data/alfworld}
 ALFWORLD_DATA_DIR=${ALFWORLD_DATA_DIR:-${LOCAL_ALFWORLD_DATA}}
+ALFWORLD_TRAIN_NUM_TASKS=${ALFWORLD_TRAIN_NUM_TASKS:-${ALFWORLD_PROMPT_NUM_TASKS:-100}}
+ALFWORLD_EVAL_NUM_TASKS=${ALFWORLD_EVAL_NUM_TASKS:-16}
 NAS_ALFWORLD_LIB=${NAS_ALFWORLD_LIB:-${NAS_MLF_ROOT}/pythonlibs/alfworld_text}
 LOCAL_ALFWORLD_LIB=${LOCAL_ALFWORLD_LIB:-${LOCAL_RUNTIME_ROOT}/pythonlibs/alfworld_text}
 ALFWORLD_LIB=${ALFWORLD_LIB:-${LOCAL_ALFWORLD_LIB}}
-DATA_PATH=${DATA_PATH:-${ALFWORLD_DATA_DIR}/train_100.jsonl}
-EVAL_VALID_SEEN_PATH=${EVAL_VALID_SEEN_PATH:-${ALFWORLD_DATA_DIR}/valid_seen_100.jsonl}
-EVAL_VALID_UNSEEN_PATH=${EVAL_VALID_UNSEEN_PATH:-${ALFWORLD_DATA_DIR}/valid_unseen_100.jsonl}
+DATA_PATH=${DATA_PATH:-${ALFWORLD_DATA_DIR}/train_${ALFWORLD_TRAIN_NUM_TASKS}.jsonl}
+EVAL_VALID_SEEN_PATH=${EVAL_VALID_SEEN_PATH:-${ALFWORLD_DATA_DIR}/valid_seen_${ALFWORLD_EVAL_NUM_TASKS}.jsonl}
+EVAL_VALID_UNSEEN_PATH=${EVAL_VALID_UNSEEN_PATH:-${ALFWORLD_DATA_DIR}/valid_unseen_${ALFWORLD_EVAL_NUM_TASKS}.jsonl}
 BASE_ALFWORLD_CONFIG=${BASE_ALFWORLD_CONFIG:-${REPO_DIR}/examples/agent_env/alfworld/smoke_config.yaml}
 ALFWORLD_CONFIG=${ALFWORLD_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/alfworld_smoke_config.yaml}
 BASE_ALFWORLD_EVAL_CONFIG=${BASE_ALFWORLD_EVAL_CONFIG:-${REPO_DIR}/examples/agent_env/alfworld/eval_config.yaml}
@@ -132,11 +134,18 @@ if [ -z "${USER_ALFWORLD_CONFIG}" ]; then
   sed "s|^alfworld_data_dir:.*|alfworld_data_dir: ${ALFWORLD_DATA_DIR}|" "${BASE_ALFWORLD_CONFIG}" > "${ALFWORLD_CONFIG}"
 fi
 
-if [ ! -f "${DATA_PATH}" ] || [ ! -f "${EVAL_VALID_SEEN_PATH}" ] || [ ! -f "${EVAL_VALID_UNSEEN_PATH}" ]; then
+if [ ! -f "${DATA_PATH}" ]; then
   "${PYTHON_BIN}" "${REPO_DIR}/examples/agent_env/alfworld/prompt_data.py" \
     --output-dir "${ALFWORLD_DATA_DIR}" \
-    --num-tasks "${ALFWORLD_PROMPT_NUM_TASKS:-100}" \
-    --splits train valid_seen valid_unseen
+    --num-tasks "${ALFWORLD_TRAIN_NUM_TASKS}" \
+    --splits train
+fi
+
+if [ ! -f "${EVAL_VALID_SEEN_PATH}" ] || [ ! -f "${EVAL_VALID_UNSEEN_PATH}" ]; then
+  "${PYTHON_BIN}" "${REPO_DIR}/examples/agent_env/alfworld/prompt_data.py" \
+    --output-dir "${ALFWORLD_DATA_DIR}" \
+    --num-tasks "${ALFWORLD_EVAL_NUM_TASKS}" \
+    --splits valid_seen valid_unseen
 fi
 
 if [ -n "${USER_ALFWORLD_EVAL_CONFIG}" ]; then
