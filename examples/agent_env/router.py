@@ -158,6 +158,14 @@ class EnvRouter:
 
             if result.get("ok") and result.get("lease_id"):
                 worker_lease_id = str(result["lease_id"])
+                logger.debug(
+                    "allocated task_key=%s primary_worker_idx=%s worker_idx=%s worker_url=%s lease_id=%s",
+                    task_key,
+                    primary_idx,
+                    worker.idx,
+                    worker.url,
+                    worker_lease_id,
+                )
                 result["lease_id"] = self.encode_lease(worker.idx, worker_lease_id)
                 result["session_id"] = result["lease_id"]
                 result["worker_idx"] = worker.idx

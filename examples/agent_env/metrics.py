@@ -10,7 +10,6 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     format_error_counts = []
     success_count = 0
     env_rewards = []
-    token_rewards = []
 
     for sample in samples:
         metadata = sample.metadata or {}
@@ -21,8 +20,6 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         success_count += int(bool(metadata.get("env_success", False)))
         if "env_reward" in metadata:
             env_rewards.append(float(metadata["env_reward"]))
-        if "token_rewards" in metadata:
-            token_rewards.append(float(sum(metadata["token_rewards"])))
 
     total_turns = sum(turn_counts)
     total_format_errors = sum(format_error_counts)
@@ -34,8 +31,6 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     }
     if env_rewards:
         metrics[f"{prefix}/env_reward_mean"] = sum(env_rewards) / len(env_rewards)
-    if token_rewards:
-        metrics[f"{prefix}/token_reward_mean"] = sum(token_rewards) / len(token_rewards)
     return metrics
 
 

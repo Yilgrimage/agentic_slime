@@ -1,8 +1,13 @@
-# Small WebShop config for GRPO wiring smoke.
+# WebShop config for Qwen3-8B GRPO training.
+wandb_project: agentic-slime
+wandb_group: qwen3-8b-webshop-grpo
+wandb_team: yilgrimage-bytedance
+
 env_split: train
-max_turns: 20
+max_turns: 15
 action_max_tokens: 512
 format_error_context_tokens: 20
+keep_think_in_context: true
 policy_timeout_s: 120
 env_request_timeout_s: 660
 include_available_actions: true

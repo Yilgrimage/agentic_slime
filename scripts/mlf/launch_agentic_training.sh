@@ -5,6 +5,15 @@ MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
 REPO_DIR=${REPO_DIR:-${MLF_NAS_ROOT}/code/slime}
 MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
 MLF_LOCAL_ROOT=${MLF_LOCAL_ROOT:-/tmp/mlf-runtime}
+WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${MLF_NAS_ROOT}/secrets/wandb.env}
+
+export PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-1}
+if [ -f "${WANDB_SECRET_FILE}" ]; then
+  # Expected keys: WANDB_API_KEY, optionally WANDB_BASE_URL/WANDB_ENTITY.
+  # Keep this file out of git and chmod it to 600 on NAS.
+  # shellcheck disable=SC1090
+  source "${WANDB_SECRET_FILE}"
+fi
 
 ENV_NAME=webshop
 DATA_SIZE=${WEBSHOP_DATA_SIZE:-full}
@@ -25,8 +34,10 @@ SSH_USER=${SSH_USER:-tiger}
 SSH_PORT=${SSH_PORT:-10413}
 SSH_KEY=${SSH_KEY:-~/.ssh/byte_id_rsa}
 SSH_KEY=${SSH_KEY/#\~/${HOME}}
-SSH_JUMP=${SSH_JUMP:-jump-proxy-arnold-hl.byted.org}
+SSH_JUMP=${SSH_JUMP-jump-proxy-arnold-hl.byted.org}
+SSH_CONFIG=${SSH_CONFIG:-}
 SSH_IPV6=${SSH_IPV6:-1}
+RAY_CUDA_VISIBLE_DEVICES=${RAY_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}
 
 usage() {
   cat <<'EOF'
@@ -36,10 +47,10 @@ Start agentic training infrastructure. Runtime preparation is intentionally
 separate; run prepare_agentic_runtime.sh first.
 
 Options:
-  --env NAME           webshop or alfworld
+  --env NAME           webshop, alfworld, tau2, or appworld
   --nodes FILE         Node list. Use a one-line file or omit for single-node.
   --role ROLE          auto, head, worker
-  --orchestrator MODE  head or local. local SSHes to every node from here.
+  --orchestrator MODE  head or local. head submits one tmux on node0; local SSHes to every node.
   --no-remote-workers  Internal option: head starts local services only
   --no-router          Internal option: head does not start router/train
   --env-port PORT      Per-node env server port
@@ -48,6 +59,7 @@ Options:
   --env-pool-size N    Env worker pool size
   --data-size SIZE     WebShop data size: small or full
   --train-cmd CMD      Command to execute on head after infra is ready
+  RAY_CUDA_VISIBLE_DEVICES can restrict Ray/training to a GPU subset, e.g. 0,1,2,3.
   --head-address HOST  Internal option for worker role
   --router-workers CSV Internal option: explicit env server worker URLs
   --dry-run            Print actions only
@@ -109,18 +121,31 @@ http_host() {
   fi
 }
 
-ssh_args() {
+fill_ssh_args() {
   local host=$1
-  local args=()
+  SSH_ARGS=()
+  if [ -n "${SSH_CONFIG}" ]; then
+    SSH_ARGS+=("-F" "${SSH_CONFIG}")
+  fi
   if [ "${SSH_IPV6}" = "1" ]; then
-    args+=("-6")
+    SSH_ARGS+=("-6")
   fi
-  args+=("-o" "StrictHostKeyChecking=no" "-o" "UserKnownHostsFile=/dev/null" "-o" "IdentitiesOnly=yes" "-i" "${SSH_KEY}" "-p" "${SSH_PORT}")
+  SSH_ARGS+=(
+    "-o" "StrictHostKeyChecking=no"
+    "-o" "UserKnownHostsFile=/dev/null"
+    "-o" "IdentitiesOnly=yes"
+    "-i" "${SSH_KEY}"
+    "-p" "${SSH_PORT}"
+  )
   if [ -n "${SSH_JUMP}" ]; then
-    args+=("-J" "${SSH_JUMP}")
+    SSH_ARGS+=("-J" "${SSH_JUMP}")
   fi
-  args+=("${SSH_USER}@${host}")
-  printf '%q ' "${args[@]}"
+  SSH_ARGS+=("${SSH_USER}@${host}")
+}
+
+print_ssh_cmd() {
+  printf 'ssh '
+  printf '%q ' "${SSH_ARGS[@]}"
 }
 
 run_cmd() {
@@ -142,6 +167,14 @@ require_runtime() {
     alfworld)
       [ -x "${MLF_LOCAL_ENVS}/alfworld/bin/python" ] || { echo "Missing ALFWorld env" >&2; exit 1; }
       [ -d "${MLF_LOCAL_ROOT}/data/alfworld" ] || { echo "Missing ALFWorld data" >&2; exit 1; }
+      ;;
+    tau2)
+      [ -x "${MLF_LOCAL_ENVS}/tau2/bin/python" ] || { echo "Missing tau2 env" >&2; exit 1; }
+      [ -d "${MLF_LOCAL_ROOT}/data/tau2" ] || { echo "Missing tau2 data" >&2; exit 1; }
+      ;;
+    appworld)
+      [ -x "${MLF_LOCAL_ENVS}/appworld/bin/python" ] || { echo "Missing AppWorld env" >&2; exit 1; }
+      [ -d "${MLF_LOCAL_ROOT}/data/appworld" ] || { echo "Missing AppWorld data" >&2; exit 1; }
       ;;
     *) echo "Unsupported env: ${ENV_NAME}" >&2; exit 1 ;;
   esac
@@ -168,7 +201,7 @@ write_webshop_config() {
   "${SLIME_PYTHON}" - <<PY
 from pathlib import Path
 import yaml
-base = Path("${REPO_DIR}/examples/agent_env/webshop/smoke_config.yaml")
+base = Path("${REPO_DIR}/examples/agent_env/webshop/train_config.yaml")
 cfg = yaml.safe_load(base.read_text()) or {}
 cfg.setdefault("webshop", {})
 cfg["webshop"]["data_dir"] = "${MLF_LOCAL_ROOT}/data/webshop"
@@ -193,12 +226,73 @@ write_alfworld_config() {
   mkdir -p "${MLF_LOCAL_ROOT}/configs"
   "${SLIME_PYTHON}" - <<PY
 from pathlib import Path
+
+base = Path("${REPO_DIR}/examples/agent_env/alfworld/train_config.yaml")
+text = base.read_text()
+updates = {
+    "alfworld_data_dir": "${MLF_LOCAL_ROOT}/data/alfworld",
+    "alfworld_server_pool_size": "${pool_size}",
+    "alfworld_server_worker_start_timeout_s": "600",
+}
+lines = text.splitlines()
+seen = set()
+out = []
+for line in lines:
+    key = line.split(":", 1)[0].strip() if ":" in line and not line.startswith((" ", "\t")) else None
+    if key in updates:
+        out.append(f"{key}: {updates[key]}")
+        seen.add(key)
+    else:
+        out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{key}: {value}")
+Path("${config}").write_text("\\n".join(out) + "\\n")
+PY
+  echo "${config}"
+}
+
+write_tau2_config() {
+  local config="${MLF_LOCAL_ROOT}/configs/tau2_launch.yaml"
+  local pool_size="${ENV_POOL_SIZE:-8}"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo "${config}"
+    return
+  fi
+  mkdir -p "${MLF_LOCAL_ROOT}/configs"
+  "${SLIME_PYTHON}" - <<PY
+from pathlib import Path
 import yaml
-base = Path("${REPO_DIR}/examples/agent_env/alfworld/smoke_config.yaml")
+base = Path("${REPO_DIR}/examples/agent_env/tau2/train_config.yaml")
 cfg = yaml.safe_load(base.read_text()) or {}
-cfg["alfworld_data_dir"] = "${MLF_LOCAL_ROOT}/data/alfworld"
-cfg["alfworld_server_pool_size"] = ${pool_size}
-cfg["alfworld_server_worker_start_timeout_s"] = 600
+cfg.setdefault("tau2", {})
+cfg["tau2"]["data_dir"] = "${MLF_LOCAL_ROOT}/data/tau2/data"
+cfg.setdefault("env_server", {})
+cfg["env_server"]["pool_size"] = ${pool_size}
+cfg["env_server"]["worker_start_timeout_s"] = 600
+Path("${config}").write_text(yaml.safe_dump(cfg, sort_keys=False))
+PY
+  echo "${config}"
+}
+
+write_appworld_config() {
+  local config="${MLF_LOCAL_ROOT}/configs/appworld_launch.yaml"
+  local pool_size="${ENV_POOL_SIZE:-4}"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo "${config}"
+    return
+  fi
+  mkdir -p "${MLF_LOCAL_ROOT}/configs"
+  "${SLIME_PYTHON}" - <<PY
+from pathlib import Path
+import yaml
+base = Path("${REPO_DIR}/examples/agent_env/appworld/train_config.yaml")
+cfg = yaml.safe_load(base.read_text()) or {}
+cfg.setdefault("appworld", {})
+cfg["appworld"]["root"] = "${MLF_LOCAL_ROOT}/data/appworld"
+cfg.setdefault("env_server", {})
+cfg["env_server"]["pool_size"] = ${pool_size}
+cfg["env_server"]["worker_start_timeout_s"] = 600
 Path("${config}").write_text(yaml.safe_dump(cfg, sort_keys=False))
 PY
   echo "${config}"
@@ -213,14 +307,28 @@ start_env_server() {
       config=$(write_webshop_config)
       run_cmd tmux kill-session -t "mlf_${ENV_NAME}_env" 2>/dev/null || true
       run_cmd tmux new-session -d -s "mlf_${ENV_NAME}_env" \
-        "cd ${REPO_DIR} && export WEBSHOP_LIB=${MLF_LOCAL_ROOT}/code/WebShop WEBSHOP_DATA=${MLF_LOCAL_ROOT}/data/webshop JAVA_HOME=${MLF_LOCAL_ENVS}/webshop/lib/jvm JVM_PATH=${MLF_LOCAL_ENVS}/webshop/lib/jvm/lib/server/libjvm.so PYTHONPATH=${REPO_DIR}:${MLF_LOCAL_ROOT}/code/WebShop && ${MLF_LOCAL_ENVS}/webshop/bin/python examples/agent_env/webshop/server.py --host 0.0.0.0 --port ${ENV_PORT} --config ${config} > ${MLF_LOCAL_ROOT}/logs/${ENV_NAME}_env_server.log 2>&1"
+        "cd ${REPO_DIR} && export PYTHONNOUSERSITE=1 WEBSHOP_LIB=${MLF_LOCAL_ROOT}/code/WebShop WEBSHOP_DATA=${MLF_LOCAL_ROOT}/data/webshop JAVA_HOME=${MLF_LOCAL_ENVS}/webshop/lib/jvm JVM_PATH=${MLF_LOCAL_ENVS}/webshop/lib/jvm/lib/server/libjvm.so PYTHONPATH=${REPO_DIR}:${MLF_LOCAL_ROOT}/code/WebShop && ${MLF_LOCAL_ENVS}/webshop/bin/python examples/agent_env/webshop/server.py --host 0.0.0.0 --port ${ENV_PORT} --config ${config} > ${MLF_LOCAL_ROOT}/logs/${ENV_NAME}_env_server.log 2>&1"
       ;;
     alfworld)
       local config
       config=$(write_alfworld_config)
       run_cmd tmux kill-session -t "mlf_${ENV_NAME}_env" 2>/dev/null || true
       run_cmd tmux new-session -d -s "mlf_${ENV_NAME}_env" \
-        "cd ${REPO_DIR} && export ALFWORLD_DATA=${MLF_LOCAL_ROOT}/data/alfworld ALFWORLD_LIB=${MLF_NAS_ROOT}/code/alfworld PYTHONPATH=${REPO_DIR} && ${MLF_LOCAL_ENVS}/alfworld/bin/python examples/agent_env/alfworld/server.py --host 0.0.0.0 --port ${ENV_PORT} --config ${config} > ${MLF_LOCAL_ROOT}/logs/${ENV_NAME}_env_server.log 2>&1"
+        "cd ${REPO_DIR} && export PYTHONNOUSERSITE=1 ALFWORLD_DATA=${MLF_LOCAL_ROOT}/data/alfworld ALFWORLD_LIB=${MLF_NAS_ROOT}/code/alfworld PYTHONPATH=${REPO_DIR} && ${MLF_LOCAL_ENVS}/alfworld/bin/python examples/agent_env/alfworld/server.py --host 0.0.0.0 --port ${ENV_PORT} --config ${config} > ${MLF_LOCAL_ROOT}/logs/${ENV_NAME}_env_server.log 2>&1"
+      ;;
+    tau2)
+      local config
+      config=$(write_tau2_config)
+      run_cmd tmux kill-session -t "mlf_${ENV_NAME}_env" 2>/dev/null || true
+      run_cmd tmux new-session -d -s "mlf_${ENV_NAME}_env" \
+        "cd ${REPO_DIR} && export PYTHONNOUSERSITE=1 TAU2_DATA_DIR=${MLF_LOCAL_ROOT}/data/tau2/data PYTHONPATH=${REPO_DIR} && ${MLF_LOCAL_ENVS}/tau2/bin/python examples/agent_env/tau2/server.py --host 0.0.0.0 --port ${ENV_PORT} --config ${config} > ${MLF_LOCAL_ROOT}/logs/${ENV_NAME}_env_server.log 2>&1"
+      ;;
+    appworld)
+      local config
+      config=$(write_appworld_config)
+      run_cmd tmux kill-session -t "mlf_${ENV_NAME}_env" 2>/dev/null || true
+      run_cmd tmux new-session -d -s "mlf_${ENV_NAME}_env" \
+        "cd ${REPO_DIR} && export PYTHONNOUSERSITE=1 HOME=${MLF_LOCAL_ROOT}/data/appworld APPWORLD_ROOT=${MLF_LOCAL_ROOT}/data/appworld PYTHONPATH=${REPO_DIR} && ${MLF_LOCAL_ENVS}/appworld/bin/python examples/agent_env/appworld/server.py --host 0.0.0.0 --port ${ENV_PORT} --config ${config} > ${MLF_LOCAL_ROOT}/logs/${ENV_NAME}_env_server.log 2>&1"
       ;;
   esac
 }
@@ -233,7 +341,7 @@ start_ray_head() {
   run_cmd tmux kill-session -t mlf_ray_head 2>/dev/null || true
   run_cmd "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force
   run_cmd tmux new-session -d -s mlf_ray_head \
-    "export RAY_DISABLE_DOCKER_CPU_WARNING=1; ${SLIME_PYTHON} -m ray.scripts.scripts start --head --node-ip-address ${node_ip} --port ${RAY_PORT} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265 --block > /tmp/mlf_ray_head.log 2>&1"
+    "export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1; if [ -n '${RAY_CUDA_VISIBLE_DEVICES}' ]; then export CUDA_VISIBLE_DEVICES='${RAY_CUDA_VISIBLE_DEVICES}'; fi; ${SLIME_PYTHON} -m ray.scripts.scripts start --head --node-ip-address ${node_ip} --port ${RAY_PORT} --num-gpus ${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265 --block > /tmp/mlf_ray_head.log 2>&1"
 }
 
 start_ray_worker() {
@@ -243,7 +351,7 @@ start_ray_worker() {
   run_cmd tmux kill-session -t mlf_ray_worker 2>/dev/null || true
   run_cmd "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force
   run_cmd tmux new-session -d -s mlf_ray_worker \
-    "export RAY_DISABLE_DOCKER_CPU_WARNING=1; ${SLIME_PYTHON} -m ray.scripts.scripts start --address ${head}:${RAY_PORT} --node-ip-address ${node_ip} --disable-usage-stats --block > /tmp/mlf_ray_worker.log 2>&1"
+    "export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1; if [ -n '${RAY_CUDA_VISIBLE_DEVICES}' ]; then export CUDA_VISIBLE_DEVICES='${RAY_CUDA_VISIBLE_DEVICES}'; fi; ${SLIME_PYTHON} -m ray.scripts.scripts start --address ${head}:${RAY_PORT} --node-ip-address ${node_ip} --num-gpus ${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}} --disable-usage-stats --block > /tmp/mlf_ray_worker.log 2>&1"
 }
 
 wait_http() {
@@ -288,8 +396,8 @@ for _ in range(300):
     time.sleep(2)
 sys.exit(0 if ok else 1)"
   remote_cmd=$(printf '%q ' bash -lc "$(printf '%q ' "${SLIME_PYTHON}" -c "${py_code}")")
-  # shellcheck disable=SC2046
-  ssh $(ssh_args "${host}") "${remote_cmd}"
+  fill_ssh_args "${host}"
+  ssh "${SSH_ARGS[@]}" "${remote_cmd}"
 }
 
 remote_ray_alive_nodes() {
@@ -297,8 +405,14 @@ remote_ray_alive_nodes() {
   local remote_cmd py_code
   py_code="import ray; ray.init(address='127.0.0.1:${RAY_PORT}', ignore_reinit_error=True); print(sum(1 for n in ray.nodes() if n.get('Alive'))); ray.shutdown()"
   remote_cmd=$(printf '%q ' bash -lc "$(printf '%q ' "${SLIME_PYTHON}" -c "${py_code}")")
-  # shellcheck disable=SC2046
-  ssh $(ssh_args "${host}") "${remote_cmd}"
+  fill_ssh_args "${host}"
+  ssh "${SSH_ARGS[@]}" "${remote_cmd}"
+}
+
+local_ray_alive_nodes() {
+  local py_code
+  py_code="import ray; ray.init(address='127.0.0.1:${RAY_PORT}', ignore_reinit_error=True); print(sum(1 for n in ray.nodes() if n.get('Alive'))); ray.shutdown()"
+  "${SLIME_PYTHON}" -c "${py_code}"
 }
 
 wait_ray_nodes() {
@@ -323,6 +437,27 @@ wait_ray_nodes() {
   return 1
 }
 
+wait_local_ray_nodes() {
+  local expected=$1
+  echo "Waiting local Ray nodes: expected=${expected}"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo "+ wait_local_ray_nodes ${expected}"
+    return 0
+  fi
+  local alive
+  for _ in $(seq 1 180); do
+    alive=$(local_ray_alive_nodes 2>/dev/null | tail -n 1 || true)
+    if [ "${alive:-0}" -ge "${expected}" ] 2>/dev/null; then
+      echo "Ray ready: alive=${alive}"
+      return 0
+    fi
+    echo "Ray not ready: alive=${alive:-unknown}/${expected}"
+    sleep 5
+  done
+  echo "Timed out waiting for local Ray nodes" >&2
+  return 1
+}
+
 start_router() {
   local workers=()
   local node
@@ -338,7 +473,7 @@ start_router() {
   fi
   run_cmd tmux kill-session -t "mlf_${ENV_NAME}_router" 2>/dev/null || true
   run_cmd tmux new-session -d -s "mlf_${ENV_NAME}_router" \
-    "cd ${REPO_DIR} && ${SLIME_PYTHON} examples/agent_env/router.py --host 0.0.0.0 --port ${ROUTER_PORT} --workers ${joined} > ${MLF_LOCAL_ROOT}/logs/${ENV_NAME}_router.log 2>&1"
+    "cd ${REPO_DIR} && export PYTHONNOUSERSITE=1 && ${SLIME_PYTHON} examples/agent_env/router.py --host 0.0.0.0 --port ${ROUTER_PORT} --workers ${joined} > ${MLF_LOCAL_ROOT}/logs/${ENV_NAME}_router.log 2>&1"
 }
 
 remote_worker() {
@@ -353,13 +488,19 @@ remote_worker() {
     [ "${DRY_RUN}" -eq 0 ] || printf '%q ' --dry-run
   )
   echo "Starting worker ${host}"
-  # shellcheck disable=SC2046
-  ssh $(ssh_args "${host}") "${remote_cmd}"
+  fill_ssh_args "${host}"
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    printf '+ '
+    print_ssh_cmd
+    printf '%q\n' "${remote_cmd}"
+    return
+  fi
+  ssh "${SSH_ARGS[@]}" "${remote_cmd}"
 }
 
 remote_cmd_prefix() {
-  printf 'cd %q && MLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q REPO_DIR=%q bash scripts/mlf/launch_agentic_training.sh ' \
-    "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${REPO_DIR}"
+  printf 'cd %q && MLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q REPO_DIR=%q RAY_CUDA_VISIBLE_DEVICES=%q NUM_GPUS_PER_NODE_FOR_RAY=%q bash scripts/mlf/launch_agentic_training.sh ' \
+    "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${REPO_DIR}" "${RAY_CUDA_VISIBLE_DEVICES}" "${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}}"
 }
 
 remote_start_tmux() {
@@ -371,13 +512,15 @@ remote_start_tmux() {
   local attempt
   remote_cmd=$(printf 'tmux kill-session -t %q 2>/dev/null || true; tmux new-session -d -s %q %q; tmux ls 2>/dev/null | grep %q' "${session}" "${session}" "${command}" "${session}")
   echo "Starting ${session} on ${host}"
+  fill_ssh_args "${host}"
   if [ "${DRY_RUN}" -eq 1 ]; then
-    echo "+ ssh ${host} ${remote_cmd}"
+    printf '+ '
+    print_ssh_cmd
+    printf '%q\n' "${remote_cmd}"
     return
   fi
   for attempt in 1 2 3; do
-    # shellcheck disable=SC2046
-    if ssh $(ssh_args "${host}") "${remote_cmd}"; then
+    if ssh "${SSH_ARGS[@]}" "${remote_cmd}"; then
       return 0
     fi
     echo "Retry ${attempt}/3 failed for ${session} on ${host}" >&2
@@ -405,9 +548,9 @@ remote_query() {
   local host=$1
   local command=$2
   local attempt
+  fill_ssh_args "${host}"
   for attempt in 1 2 3; do
-    # shellcheck disable=SC2046
-    if ssh $(ssh_args "${host}") "${command}"; then
+    if ssh "${SSH_ARGS[@]}" "${command}"; then
       return 0
     fi
     echo "Retry ${attempt}/3 failed for query on ${host}" >&2
@@ -437,7 +580,7 @@ local_orchestrator() {
     head_addr=$(remote_first_ip "${head}")
   fi
   echo "Local orchestrator: head=${head} head_addr=${head_addr}"
-  env_worker_urls+=("http://${head_addr}:${ENV_PORT}")
+  env_worker_urls+=("http://$(http_host "${head_addr}"):${ENV_PORT}")
 
   cmd="$(
     remote_cmd_prefix
@@ -459,7 +602,7 @@ local_orchestrator() {
     else
       node_addr=$(remote_first_ip "${node}")
     fi
-    env_worker_urls+=("http://${node_addr}:${ENV_PORT}")
+    env_worker_urls+=("http://$(http_host "${node_addr}"):${ENV_PORT}")
     cmd="$(
       remote_cmd_prefix
       printf '%q ' --role worker --env "${ENV_NAME}" --env-port "${ENV_PORT}" --ray-port "${RAY_PORT}" --data-size "${DATA_SIZE}" --head-address "${head_addr}"
@@ -494,28 +637,49 @@ run_worker() {
 }
 
 run_head() {
-  local head
-  head=$(first_node)
-  [ "${head}" = "this" ] && head="127.0.0.1"
+  local head expected_nodes
+  local env_worker_urls=()
+  if [ -n "${HEAD_ADDRESS}" ]; then
+    head="${HEAD_ADDRESS}"
+  else
+    head=$(hostname -I | tr ' ' '\n' | grep -m1 .)
+  fi
   start_ray_head
   start_env_server
   wait_http "http://127.0.0.1:${ENV_PORT}/health"
+  env_worker_urls+=("http://$(http_host "${head}"):${ENV_PORT}")
   if [ "${NO_ROUTER}" -eq 1 ]; then
     echo "Head local services are ready."
     return
   fi
   if [ -n "${NODES_FILE}" ] && [ "${NO_REMOTE_WORKERS}" -eq 0 ]; then
-    local node
+    local node cmd node_addr
     for node in $(read_nodes | tail -n +2); do
-      remote_worker "${node}" "${head}"
+      cmd="$(
+        remote_cmd_prefix
+        printf '%q ' --role worker --env "${ENV_NAME}" --env-port "${ENV_PORT}" --ray-port "${RAY_PORT}" --data-size "${DATA_SIZE}" --head-address "${head}"
+        [ -z "${ENV_POOL_SIZE}" ] || printf '%q ' --env-pool-size "${ENV_POOL_SIZE}"
+      ) > /tmp/mlf_multi_worker.log 2>&1"
+      remote_start_tmux "${node}" mlf_multi_worker /tmp/mlf_multi_worker.log "${cmd}"
     done
+    for node in $(read_nodes | tail -n +2); do
+      remote_wait_http "${node}" "http://127.0.0.1:${ENV_PORT}/health"
+      node_addr=$(remote_first_ip "${node}")
+      env_worker_urls+=("http://$(http_host "${node_addr}"):${ENV_PORT}")
+    done
+    expected_nodes=$(read_nodes | wc -l | tr -d ' ')
+    wait_local_ray_nodes "${expected_nodes}"
   fi
+  ROUTER_WORKERS=$(IFS=,; echo "${env_worker_urls[*]}")
   start_router
   wait_http "http://127.0.0.1:${ROUTER_PORT}/health"
   if [ -n "${TRAIN_CMD}" ]; then
-    export AGENT_ENV_ROUTER_URL="http://127.0.0.1:${ROUTER_PORT}"
+    export AGENT_ENV_ROUTER_URL="http://$(http_host "${head}"):${ROUTER_PORT}"
     export WEBSHOP_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"
     export ALFWORLD_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"
+    export TAU2_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"
+    export APPWORLD_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"
+    export WEBSHOP_DATA_SIZE="${DATA_SIZE}"
     echo "+ ${TRAIN_CMD}"
     if [ "${DRY_RUN}" -eq 0 ]; then
       bash -lc "${TRAIN_CMD}"
@@ -535,15 +699,19 @@ if [ "${ROLE}" = "auto" ]; then
     ROLE=head
   else
     # Delegate orchestration to the first node.
+    # From the head, workers are reached directly with the node-local key; the
+    # local machine should only maintain this one SSH connection long enough to
+    # submit the tmux session.
     remote_cmd=$(
-      printf 'cd %q && MLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q REPO_DIR=%q bash scripts/mlf/launch_agentic_training.sh ' \
-        "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${REPO_DIR}"
+      printf 'cd %q && MLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q REPO_DIR=%q RAY_CUDA_VISIBLE_DEVICES=%q NUM_GPUS_PER_NODE_FOR_RAY=%q SSH_JUMP= SSH_KEY=%q SSH_IPV6=1 bash scripts/mlf/launch_agentic_training.sh ' \
+        "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${REPO_DIR}" "${RAY_CUDA_VISIBLE_DEVICES}" "${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}}" "/home/${SSH_USER}/.ssh/byte_id_rsa"
       printf '%q ' --role head --env "${ENV_NAME}" --nodes "${NODES_FILE}" --env-port "${ENV_PORT}" --router-port "${ROUTER_PORT}" --ray-port "${RAY_PORT}" --data-size "${DATA_SIZE}"
       [ -z "${ENV_POOL_SIZE}" ] || printf '%q ' --env-pool-size "${ENV_POOL_SIZE}"
       [ -z "${TRAIN_CMD}" ] || printf '%q ' --train-cmd "${TRAIN_CMD}"
     )
-    # shellcheck disable=SC2046
-    ssh $(ssh_args "${head}") "${remote_cmd}"
+    remote_start_tmux "${head}" mlf_multi_head /tmp/mlf_multi_head.log "${remote_cmd} > /tmp/mlf_multi_head.log 2>&1"
+    echo "Head orchestration submitted."
+    echo "Head log: ${head}:/tmp/mlf_multi_head.log"
     exit 0
   fi
 fi
@@ -555,9 +723,12 @@ case "${ROLE}" in
     start_router
     wait_http "http://127.0.0.1:${ROUTER_PORT}/health"
     if [ -n "${TRAIN_CMD}" ]; then
-      export AGENT_ENV_ROUTER_URL="http://127.0.0.1:${ROUTER_PORT}"
+      export AGENT_ENV_ROUTER_URL="http://$(http_host "$(hostname -I | tr ' ' '\n' | grep -m1 .)"):${ROUTER_PORT}"
       export WEBSHOP_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"
       export ALFWORLD_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"
+      export TAU2_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"
+      export APPWORLD_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"
+      export WEBSHOP_DATA_SIZE="${DATA_SIZE}"
       echo "+ ${TRAIN_CMD}"
       [ "${DRY_RUN}" -eq 1 ] || bash -lc "${TRAIN_CMD}"
     else

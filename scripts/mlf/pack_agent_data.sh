@@ -3,7 +3,7 @@ set -euo pipefail
 
 MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
 PACK_DIR=${PACK_DIR:-${MLF_NAS_ROOT}/packs}
-DATASETS=${DATASETS:-alfworld webshop}
+DATASETS=${DATASETS:-alfworld webshop tau2 appworld}
 
 mkdir -p "${PACK_DIR}"
 

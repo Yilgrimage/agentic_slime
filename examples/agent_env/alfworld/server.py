@@ -198,7 +198,7 @@ class ALFWorldBackend:
         self.loaded_split = split
         self.registered_game_file = None
         self.game_file = None
-        return {"num_games": len(self.base_game_files)}
+        return {"num_tasks": len(self.base_game_files)}
 
     def start(self) -> dict[str, Any]:
         return self._load_wrapper(self.split)

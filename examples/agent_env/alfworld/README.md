@@ -85,7 +85,7 @@ decoupled:
   `train_async.py` plus fully-async rollout so slow ALFWorld episodes do not
   block the next training batch.
 
-Server-side knobs live in `alfworld_config.yaml` and `smoke_config.yaml`:
+Server-side knobs live in `alfworld_config.yaml` and `train_config.yaml`:
 
 ```yaml
 alfworld_server_pool_size: 8
@@ -182,10 +182,11 @@ PYTHONPATH=/tmp/mlf-runtime/alfworld/pythonlibs/alfworld_text:. \
   final generated token of each turn; the environment outcome reward is placed on
   the final token of the rollout. `sample.reward` is the sum of this list for
   compatibility with slime's current scalar GRPO reward path.
-- Generated `<think>...</think>` content is parsed for the current action but is
-  not retained in the multi-turn training context. If action-format parsing
-  fails, only the last `format_error_context_tokens` generated tokens are kept in
-  context; the default is 20.
+- Generated `<think>...</think>` content is parsed for the current action. By
+  default it is not retained in the multi-turn training context; set
+  `keep_think_in_context: true` to keep the full assistant response. If
+  action-format parsing fails, only the last `format_error_context_tokens`
+  generated tokens are kept in context; the default is 20.
 - The default reward scale is `outcome_reward: 10.0` for success and
   `format_penalty: -0.1` for malformed action output.
 - Per-rollout metadata is intentionally small: `actions`, `turn_count`,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import os
 import re
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 InfoFn = Callable[[dict], list[str]]
 TextFn = Callable[[Any, str, dict], str]
 PromptFn = Callable[[Any, Sample, str, dict], str]
-ChooseFn = Callable[[Any, str, list[str], Sample], str]
+ChooseFn = Callable[[Any, Any, list[str], Sample], Any]
 SuccessFn = Callable[[dict, float], bool]
 MetadataFn = Callable[[dict, int, str, str | None], dict]
 
@@ -88,19 +89,98 @@ def tokenizer(args: Any):
     return GenerateState(args).tokenizer
 
 
-def parse_action(response_text: str) -> tuple[str, bool, str]:
-    text = response_text.replace(chr(96) * 3, "").strip()
+def _strip_outer_code_fences(text: str) -> str:
+    text = text.strip()
+    fence = chr(96) * 3
+    if not text.startswith(fence) or not text.endswith(fence):
+        return text
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return text.strip(fence).strip()
+    return "\n".join(lines[1:-1]).strip()
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    text = _strip_outer_code_fences(text)
+    if text.lower().startswith("json\n"):
+        text = text.split("\n", 1)[1].strip()
+    if not text:
+        return {}
+    try:
+        value = json.loads(text)
+    except Exception:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _parse_tool_call(response_text: str) -> tuple[dict[str, Any] | None, bool, str]:
+    call_match = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", response_text, flags=re.IGNORECASE | re.DOTALL)
+    if not call_match:
+        args_match = re.search(r"<arguments>\s*(.*?)\s*</arguments>", response_text, flags=re.IGNORECASE | re.DOTALL)
+        if args_match:
+            arguments = _parse_json_object(args_match.group(1))
+            if isinstance(arguments, dict):
+                name_match = re.search(r"<name>\s*(.*?)\s*</name>", response_text, flags=re.IGNORECASE | re.DOTALL)
+                name = str(name_match.group(1)).strip() if name_match else ""
+                if not name:
+                    if any(key in arguments for key in ("code", "python", "command")):
+                        name = "execute"
+                    elif any(key in arguments for key in ("answer", "message", "status")):
+                        name = "finish"
+                if name:
+                    return {"type": "tool_call", "name": name, "arguments": arguments}, False, "orphan_tool_arguments"
+        return None, False, "no_tool_call"
+
+    body = call_match.group(1).strip()
+    object_call = _parse_json_object(body)
+    if object_call is not None and "name" in object_call:
+        name = str(object_call.get("name") or "").strip()
+        arguments = object_call.get("arguments", {})
+        if not name:
+            return None, False, "empty_tool_name"
+        if not isinstance(arguments, dict):
+            return None, False, "invalid_tool_arguments"
+        return {"type": "tool_call", "name": name, "arguments": arguments}, True, "tool_call_json"
+
+    name_match = re.search(r"<name>\s*(.*?)\s*</name>", body, flags=re.IGNORECASE | re.DOTALL)
+    args_match = re.search(r"<arguments>\s*(.*?)\s*</arguments>", body, flags=re.IGNORECASE | re.DOTALL)
+    if not name_match:
+        return None, False, "missing_tool_name"
+
+    name = name_match.group(1).strip()
+    if not name:
+        return None, False, "empty_tool_name"
+
+    args_text = args_match.group(1) if args_match else "{}"
+    arguments = _parse_json_object(args_text)
+    if arguments is None:
+        return None, False, "invalid_tool_arguments"
+
+    return {"type": "tool_call", "name": name, "arguments": arguments}, True, "tool_call"
+
+
+def parse_action(response_text: str) -> tuple[Any, bool, str]:
+    tool_action, tool_valid, tool_mode = _parse_tool_call(response_text)
+    if tool_action is not None or tool_mode != "no_tool_call":
+        return tool_action or "", tool_valid, tool_mode
+
+    text = _strip_outer_code_fences(response_text)
     action_match = re.search(r"<action>\s*(.*?)\s*</action>", text, flags=re.IGNORECASE | re.DOTALL)
     if action_match:
         action = action_match.group(1).strip().strip(chr(34)).strip(chr(39))
         if action:
             return action, True, "action_tag"
+        return "", False, "empty_action_tag"
 
     unterminated_action = re.search(r"<action>\s*(.*)", text, flags=re.IGNORECASE | re.DOTALL)
     if unterminated_action:
-        action = unterminated_action.group(1).strip().splitlines()[0].strip().strip(chr(34)).strip(chr(39))
+        action_lines = unterminated_action.group(1).strip().splitlines()
+        if not action_lines:
+            return "", False, "empty_unterminated_action_tag"
+        action = action_lines[0].strip().strip(chr(34)).strip(chr(39))
         if action:
             return action, False, "unterminated_action_tag"
+        return "", False, "empty_unterminated_action_tag"
 
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
     for line in text.splitlines() or [text]:
@@ -111,6 +191,14 @@ def parse_action(response_text: str) -> tuple[str, bool, str]:
         if line:
             return line, False, "legacy"
     return "look", False, "fallback"
+
+
+def action_text(action: Any) -> str:
+    if isinstance(action, str):
+        return action
+    if isinstance(action, dict):
+        return json.dumps(action, ensure_ascii=False, sort_keys=True)
+    return str(action)
 
 
 def append_tokens(
@@ -147,33 +235,58 @@ def add_last_token_reward(sample: Sample, value: float) -> None:
 
 
 def ensure_rollout_shapes(args: Any, sample: Sample, spec: AgentEnvSpec) -> None:
+    token_count = len(sample.tokens)
+    if token_count == 0:
+        sample.tokens = [0]
+        sample.remove_sample = True
+        metadata(sample)["shape_inserted_dummy_token"] = True
+        token_count = 1
     response_length = int(sample.response_length or 0)
+    if response_length >= token_count and token_count > 0:
+        corrected = max(0, token_count - 1)
+        metadata(sample)["shape_corrected_response_length"] = {
+            "old": response_length,
+            "new": corrected,
+            "token_count": token_count,
+        }
+        response_length = corrected
+        sample.response_length = corrected
     sample_metadata = metadata(sample)
     token_rewards = list(sample_metadata.get("token_rewards") or [])
+    if len(token_rewards) > response_length:
+        token_rewards = token_rewards[-response_length:] if response_length > 0 else []
     if len(token_rewards) < response_length:
         token_rewards.extend([0.0] * (response_length - len(token_rewards)))
     sample_metadata["token_rewards"] = token_rewards[:response_length]
 
     if sample.loss_mask is None:
         sample.loss_mask = [0] * response_length
+    elif len(sample.loss_mask) > response_length:
+        sample.loss_mask = sample.loss_mask[-response_length:] if response_length > 0 else []
     elif len(sample.loss_mask) < response_length:
         sample.loss_mask.extend([0] * (response_length - len(sample.loss_mask)))
-    elif len(sample.loss_mask) > response_length:
-        sample.loss_mask = sample.loss_mask[:response_length]
 
     if cfg(args, "return_logprob", spec.legacy("return_logprob"), True):
         if sample.rollout_log_probs is None:
             sample.rollout_log_probs = [0.0] * response_length
+        elif len(sample.rollout_log_probs) > response_length:
+            sample.rollout_log_probs = sample.rollout_log_probs[-response_length:] if response_length > 0 else []
         elif len(sample.rollout_log_probs) < response_length:
             sample.rollout_log_probs.extend([0.0] * (response_length - len(sample.rollout_log_probs)))
-        elif len(sample.rollout_log_probs) > response_length:
-            sample.rollout_log_probs = sample.rollout_log_probs[:response_length]
 
 
 def _decode_tokens(tok: Any, token_ids: list[int], fallback_text: str) -> str:
     if hasattr(tok, "decode"):
         return tok.decode(token_ids, skip_special_tokens=False)
     return fallback_text
+
+
+def _aligned_log_probs(token_ids: list[int], source_ids: list[int], source_log_probs: list[float]) -> list[float]:
+    if not token_ids:
+        return []
+    if source_log_probs and len(source_ids) >= len(token_ids) and source_ids[-len(token_ids) :] == token_ids:
+        return source_log_probs[-len(token_ids) :]
+    return [0.0] * len(token_ids)
 
 
 def response_context(
@@ -183,16 +296,19 @@ def response_context(
     response_token_ids: list[int],
     response_log_probs: list[float],
     tok: Any,
-    action: str,
+    action: Any,
     format_valid: bool,
 ) -> tuple[str, list[int], list[float]]:
     if format_valid:
-        text = re.sub(r"<think>.*?</think>\s*", "", response_text, flags=re.IGNORECASE | re.DOTALL).strip()
-        text = re.sub(r"<think>.*", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+        if cfg(args, "keep_think_in_context", spec.legacy("keep_think_in_context"), True):
+            text = response_text.strip()
+        else:
+            text = re.sub(r"<think>.*?</think>\s*", "", response_text, flags=re.IGNORECASE | re.DOTALL).strip()
+            text = re.sub(r"<think>.*", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
         if not text:
-            text = f"<action>{action}</action>"
+            text = action_text(action)
         ids = tok.encode(text, add_special_tokens=False)
-        return text, ids, [0.0] * len(ids)
+        return text, ids, _aligned_log_probs(ids, response_token_ids, response_log_probs)
 
     keep = max(0, int(cfg(args, "format_error_context_tokens", spec.legacy("format_error_context_tokens"), 20)))
     if keep == 0:
@@ -237,7 +353,7 @@ async def call_policy(args: Any, spec: AgentEnvSpec, sample: Sample, sampling_pa
 
 
 def env_server_url(args: Any, spec: AgentEnvSpec) -> str:
-    return str(arg(args, spec.env_url_arg, None) or os.environ.get(spec.env_url_envvar, spec.default_env_url)).rstrip("/")
+    return str(os.environ.get(spec.env_url_envvar) or arg(args, spec.env_url_arg, None) or spec.default_env_url).rstrip("/")
 
 
 async def post_env(args: Any, spec: AgentEnvSpec, endpoint: str, payload: dict, max_retries: int = 60) -> dict:
@@ -256,6 +372,16 @@ def lease_request_id(sample: Sample) -> str:
 async def allocate_env(args: Any, spec: AgentEnvSpec, sample: Sample) -> dict:
     split = metadata(sample).get("split") or cfg(args, "env_split", spec.legacy("env_split"), spec.default_split)
     index = task_index(sample)
+    logger.debug(
+        "%s allocate split=%s task_index=%s url=%s envvar=%s arg_%s=%s",
+        spec.name,
+        split,
+        index,
+        env_server_url(args, spec),
+        os.environ.get(spec.env_url_envvar),
+        spec.env_url_arg,
+        arg(args, spec.env_url_arg, None),
+    )
     return await post_env(
         args,
         spec,
@@ -277,7 +403,7 @@ async def reset_env(args: Any, spec: AgentEnvSpec, sample: Sample, lease_id: str
     return await post_env(args, spec, "/reset", payload)
 
 
-async def step_env(args: Any, spec: AgentEnvSpec, lease_id: str, action: str) -> dict:
+async def step_env(args: Any, spec: AgentEnvSpec, lease_id: str, action: Any) -> dict:
     return await post_env(args, spec, "/step", {"lease_id": lease_id, "action": action})
 
 
@@ -307,7 +433,7 @@ def outcome_reward(args: Any, spec: AgentEnvSpec, success: bool, score: float) -
 def format_reward(args: Any, valid: bool) -> float:
     if valid:
         return float(arg(args, "format_reward", 0.0))
-    return float(arg(args, "format_penalty", 0.0))
+    return float(arg(args, "format_penalty", -0.1))
 
 
 def remaining_context(args: Any, sample: Sample) -> int | None:

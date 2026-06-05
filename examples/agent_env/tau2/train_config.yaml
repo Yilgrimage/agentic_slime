@@ -1,0 +1,26 @@
+env_server:
+  pool_size: 8
+  prewarm_splits: ["train"]
+  shared_pool: true
+  worker_start_timeout_s: 300
+  worker_request_timeout_s: 180
+
+tau2:
+  # Data root should normally be /tmp/mlf-runtime/data/tau2/data after materialization.
+  data_dir: ${TAU2_DATA_DIR}
+  domain: retail
+  task_set: retail
+  split: null
+  num_tasks: null
+  max_turns: 20
+  solo_mode: false
+  include_policy: true
+  include_tools: true
+  # "all" may call NL assertion judges through LiteLLM/OpenAI for some tasks.
+  # Use "action" by default for local RL runs that should not depend on external LLM credentials.
+  evaluation_type: action
+
+max_turns: 20
+action_max_tokens: 512
+policy_timeout_s: 120
+env_request_timeout_s: 660

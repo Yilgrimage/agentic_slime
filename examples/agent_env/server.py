@@ -375,6 +375,14 @@ class ProcessPoolEnvServer:
     def health(self) -> dict[str, Any]:
         ready_values = [worker.ready for workers in self.created.values() for worker in workers]
         worker_splits = sorted({worker.split for workers in self.created.values() for worker in workers})
+        num_tasks = next(
+            (
+                ready.get("num_tasks")
+                for ready in ready_values
+                if ready.get("num_tasks") is not None
+            ),
+            None,
+        )
         payload: dict[str, Any] = {
             "ok": True,
             "leases": len(self.leases),
@@ -386,10 +394,8 @@ class ProcessPoolEnvServer:
             "lease_ttl_s": self.lease_ttl_s,
             "worker_request_timeout_s": self.worker_request_timeout_s,
         }
-        for key in ("num_goals", "num_games"):
-            value = next((ready.get(key) for ready in ready_values if ready.get(key) is not None), None)
-            if value is not None:
-                payload[key] = value
+        if num_tasks is not None:
+            payload["num_tasks"] = num_tasks
         return payload
 
     def status(self) -> dict[str, Any]:

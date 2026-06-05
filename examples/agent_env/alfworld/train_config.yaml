@@ -1,4 +1,5 @@
-# Small ALFWorld config for a real GRPO wiring smoke.
+# ALFWorld env config for Qwen3-8B GRPO training.
+
 alfworld_config_path: null
 alfworld_data_dir: /mnt/bn/jixf-nas-lq/mlf/data/alfworld
 alfworld_training_method: dqn
@@ -6,9 +7,10 @@ alfworld_num_train_games: -1
 alfworld_num_eval_games: -1
 alfworld_env_type: AlfredTWEnv
 alfworld_split: train
-max_turns: 50
+max_turns: 30
 action_max_tokens: 512
 format_error_context_tokens: 20
+keep_think_in_context: true
 policy_timeout_s: 120
 env_request_timeout_s: 660
 alfworld_eval_stop_worker_timeout_s: 60

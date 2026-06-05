@@ -24,10 +24,10 @@ Usage: materialize_node_runtime.sh [options]
 Materialize conda packs, data packs, models, and source mirrors on the current node.
 
 Options:
-  --envs LIST        Comma list: slime,alfworld,webshop,none
-  --data LIST        Comma list: alfworld,webshop,none
+  --envs LIST        Comma list: slime,alfworld,webshop,tau2,appworld,none
+  --data LIST        Comma list: alfworld,webshop,tau2,appworld,none
   --models LIST      Comma list: qwen3-8b,none
-  --sources LIST     Comma list: webshop,none
+  --sources LIST     Comma list: webshop,tau2,appworld,none
   --force            Reinstall/copy even if local stamp matches
   --no-check-hash    Use existence checks only
   --skip-envs
@@ -131,6 +131,16 @@ copy_dir_once() {
   fi
 }
 
+copy_dir_once_excluding_data() {
+  local src=$1
+  local dst=$2
+  if [ -d "${src}" ] && { [ "${FORCE}" -eq 1 ] || [ ! -d "${dst}" ]; }; then
+    rm -rf "${dst}"
+    mkdir -p "${dst}"
+    tar -C "${src}" --exclude='./data' --exclude='data' -cf - . | tar -C "${dst}" -xf -
+  fi
+}
+
 materialize_data() {
   local name=$1
   local src_dir="${MLF_NAS_ROOT}/data/${name}"
@@ -180,7 +190,7 @@ mirror_webshop_runtime_data() {
 }
 
 if [ "${SKIP_ENVS}" -eq 0 ]; then
-  for env_name in slime alfworld webshop; do
+  for env_name in slime alfworld webshop tau2 appworld; do
     if contains_item "${ENVS}" "${env_name}"; then
       materialize_pack "${env_name}"
     fi
@@ -190,6 +200,12 @@ fi
 if [ "${SKIP_SOURCES}" -eq 0 ]; then
   if contains_item "${SOURCES}" "webshop"; then
     copy_dir_once "${MLF_NAS_ROOT}/code/WebShop" "${MLF_LOCAL_ROOT}/code/WebShop"
+  fi
+  if contains_item "${SOURCES}" "tau2"; then
+    copy_dir_once_excluding_data "${MLF_NAS_ROOT}/code/tau2-bench" "${MLF_LOCAL_ROOT}/code/tau2-bench"
+  fi
+  if contains_item "${SOURCES}" "appworld"; then
+    copy_dir_once "${MLF_NAS_ROOT}/code/appworld" "${MLF_LOCAL_ROOT}/code/appworld"
   fi
 fi
 
@@ -201,7 +217,7 @@ if [ "${SKIP_MODELS}" -eq 0 ]; then
 fi
 
 if [ "${SKIP_DATA}" -eq 0 ]; then
-  for data_name in alfworld webshop; do
+  for data_name in alfworld webshop tau2 appworld; do
     if contains_item "${DATASETS}" "${data_name}"; then
       materialize_data "${data_name}"
     fi
@@ -218,3 +234,7 @@ echo "QWEN3_8B_TORCH_DIST=${MLF_LOCAL_ROOT}/models/Qwen3-8B_torch_dist"
 echo "ALFWORLD_DATA=${MLF_LOCAL_ROOT}/data/alfworld"
 echo "WEBSHOP_DATA=${MLF_LOCAL_ROOT}/data/webshop"
 echo "WEBSHOP_LIB=${MLF_LOCAL_ROOT}/code/WebShop"
+echo "TAU2_LIB=${MLF_LOCAL_ROOT}/code/tau2-bench"
+echo "TAU2_DATA_DIR=${MLF_LOCAL_ROOT}/data/tau2/data"
+echo "APPWORLD_ROOT=${MLF_LOCAL_ROOT}/data/appworld"
+echo "APPWORLD_LIB=${MLF_LOCAL_ROOT}/code/appworld"

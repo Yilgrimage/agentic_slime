@@ -179,7 +179,7 @@ class WebShopBackend:
         self.split = split
         self.config = config
         self.env: Any | None = None
-        self.num_goals = 0
+        self.num_tasks = 0
         self.task_index = 0
         self.reset_count = 0
         self.step_count = 0
@@ -222,8 +222,8 @@ class WebShopBackend:
         if self.config.get("env_id", "WebAgentTextEnv-v0") != "WebAgentTextEnv-v0":
             raise ValueError(f"Unsupported WebShop env_id={self.config.get('env_id')}")
         self.env = WebAgentTextEnv(**kwargs)
-        self.num_goals = len(getattr(getattr(self.env, "server", None), "goals", []) or [])
-        return {"num_goals": self.num_goals}
+        self.num_tasks = len(getattr(getattr(self.env, "server", None), "goals", []) or [])
+        return {"num_tasks": self.num_tasks}
 
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         assert self.env is not None
@@ -240,7 +240,7 @@ class WebShopBackend:
             "info": self.last_info,
             "split": self.split,
             "task_index": self.task_index,
-            "num_goals": self.num_goals,
+            "num_tasks": self.num_tasks,
             "reset_count": self.reset_count,
             "step_count": self.step_count,
         }
@@ -262,7 +262,7 @@ class WebShopBackend:
             "success": self.final_score > 0,
             "info": self.last_info,
             "task_index": self.task_index,
-            "num_goals": self.num_goals,
+            "num_tasks": self.num_tasks,
             "reset_count": self.reset_count,
             "step_count": self.step_count,
         }
@@ -274,7 +274,7 @@ class WebShopBackend:
             "done": self.done,
             "info": self.last_info,
             "task_index": self.task_index,
-            "num_goals": self.num_goals,
+            "num_tasks": self.num_tasks,
             "reset_count": self.reset_count,
             "step_count": self.step_count,
         }

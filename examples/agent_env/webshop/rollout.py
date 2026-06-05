@@ -91,8 +91,8 @@ WEBSHOP_SPEC = AgentEnvSpec(
     choose_action=_choose_action,
     success=_success,
     env_metadata=_env_metadata,
-    default_max_turns=20,
-    default_action_max_tokens=128,
+    default_max_turns=15,
+    default_action_max_tokens=512,
     default_reward_source="score",
 )
 

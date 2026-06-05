@@ -11,7 +11,7 @@ Directory layout:
 - `rollout.py`: WebShop prompt/action/success spec for the shared rollout loop.
 - `server.py`: WebShop backend for the shared process-pool lease server.
 - `prompt_data.py`: WebShop prompt metadata generation.
-- `scripts/`: WebShop shell entrypoints.
+- `scripts/`: WebShop training entrypoints.
 
 Expected packs:
 
@@ -29,11 +29,11 @@ Runtime setup:
 
 1. Ensure the WebShop pack exists at `/mnt/bn/jixf-nas-lq/mlf/packs/webshop.tar.gz`.
 2. Ensure the WebShop data backup exists at `/mnt/bn/jixf-nas-lq/mlf/data/webshop`.
-3. Materialize the runtime with `examples/agent_env/webshop/scripts/materialize_webshop_runtime.sh`.
+3. Materialize node-local runtime with `scripts/mlf/prepare_agentic_runtime.sh`.
 
-`examples/agent_env/webshop/scripts/prepare_webshop_data.sh` is only for rebuilding the
-NAS data backup from public sources. It is not part of normal machine migration
-or training startup.
+Use `scripts/mlf/build_webshop_env.sh`, `scripts/mlf/pack_webshop_env.sh`, and
+`scripts/mlf/pack_agent_data.sh` only when rebuilding NAS packs/data. They are
+not part of normal training startup.
 
 ## Data scope
 
@@ -44,9 +44,8 @@ WebShop has two practical data scopes:
 - `full`: full product data, `items_shuffle.json`, `items_ins_v2.json`, and
   `indexes_100k`.
 
-The launch script defaults to `WEBSHOP_DATA_SIZE=small` for smoke runs. Use
-`WEBSHOP_DATA_SIZE=full` only after the NAS/runtime contains the full product
-JSON and matching `indexes_100k`.
+The launch script defaults to `WEBSHOP_DATA_SIZE=full` for training. Use
+`WEBSHOP_DATA_SIZE=small` only for conservative local checks.
 
 Previously verified on node0 for the full setup:
 

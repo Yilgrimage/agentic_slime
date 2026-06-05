@@ -71,6 +71,7 @@ async def main():
         env_split="train",
         format_reward=0.0,
         format_penalty=-0.1,
+        keep_think_in_context=False,
         use_opd=False,
         opd_type=None,
     )
@@ -90,6 +91,12 @@ async def main():
     assert "<action>take apple</action>" in result.response
     assert all(logp == 0.0 for logp, mask in zip(result.rollout_log_probs, result.loss_mask) if mask == 0)
     assert sum(result.loss_mask) == len(FakeTokenizer().encode("<action>take apple</action>"))
+
+    keep_args = SimpleNamespace(**vars(args))
+    keep_args.keep_think_in_context = True
+    keep_result = await alf_gen.generate(keep_args, Sample(prompt="", metadata={"task_index": 0}), sampling_params={})
+    assert "<think>" in keep_result.response
+    assert "<action>take apple</action>" in keep_result.response
     print("ALFWorld smoke test passed")
 
 

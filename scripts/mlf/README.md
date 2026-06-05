@@ -14,6 +14,8 @@ Normal pack refresh is:
 bash scripts/mlf/publish_slime_pack.sh
 bash scripts/mlf/build_webshop_env.sh
 bash scripts/mlf/build_alfworld_env.sh
+bash scripts/mlf/build_tau2_env.sh
+bash scripts/mlf/build_appworld_env.sh
 bash scripts/mlf/pack_agent_data.sh
 ```
 
@@ -29,12 +31,23 @@ bash scripts/mlf/prepare_agentic_runtime.sh \
   --models qwen3-8b
 ```
 
+Prepare only the lightweight text/tool-use envs:
+
+```bash
+bash scripts/mlf/prepare_agentic_runtime.sh \
+  --local-only \
+  --envs tau2,appworld \
+  --data tau2,appworld \
+  --sources tau2,appworld \
+  --models none
+```
+
 Prepare every node listed in a node file from the current machine:
 
 ```bash
 bash scripts/mlf/prepare_agentic_runtime.sh \
   --all-nodes \
-  --nodes configs/nodes/webshop_4x8.txt \
+  --nodes configs/nodes/agent_env_4x8.txt \
   --envs slime,webshop \
   --data webshop \
   --models qwen3-8b
@@ -48,7 +61,7 @@ Training launch is separate:
 ```bash
 bash scripts/mlf/launch_agentic_training.sh \
   --env webshop \
-  --nodes configs/nodes/webshop_4x8.txt \
+  --nodes configs/nodes/agent_env_4x8.txt \
   --env-pool-size 32 \
   --train-cmd '...'
 ```
@@ -58,15 +71,19 @@ The env packs are intentionally independent:
 - `slime.tar.gz`: training, Ray, SGLang, Megatron, torch, CUDA toolkit.
 - `webshop.tar.gz`: WebShop HTTP environment server dependencies.
 - `alfworld.tar.gz`: ALFWorld/TextWorld HTTP environment server dependencies.
+- `tau2.tar.gz`: tau2/tau3 text-mode and gym tool-use dependencies.
+- `appworld.tar.gz`: AppWorld package dependencies.
 - `webshop-data.tar.gz`: WebShop product JSON, human goals/attributes, and Lucene indexes.
 - `alfworld-data.tar.gz`: ALFWorld/TextWorld game files and environment data.
+- `tau2-data.tar.gz`: tau2/tau3 domain data bundled with tau2-bench.
+- `appworld-data.tar.gz`: AppWorld databases and task assets.
 
 The adapter code in `examples/` should consume these packs. It should not install
 Python packages during normal training startup.
 
 ## Materialization checks
 
-Conda env packs are installed under `/tmp/mlf-envs/{slime,alfworld,webshop}`.
+Conda env packs are installed under `/tmp/mlf-envs/{slime,alfworld,webshop,tau2,appworld}`.
 Data/source/model runtime assets are copied under `/tmp/mlf-runtime`.
 
 The materializer keeps simple local stamps for conda and data packs:

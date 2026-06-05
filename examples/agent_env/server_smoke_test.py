@@ -20,7 +20,7 @@ class FakeBackend:
         self.done = False
 
     def start(self) -> dict:
-        return {"num_games": int(self.config.get("num_games", 3))}
+        return {"num_tasks": int(self.config.get("num_tasks", 3))}
 
     def reset(self, payload: dict) -> dict:
         self.reset_count += 1
@@ -74,7 +74,7 @@ def _post(base_url: str, endpoint: str, payload: dict) -> dict:
 def main() -> None:
     store = ProcessPoolEnvServer(
         backend_cls=FakeBackend,
-        env_config={"num_games": 7},
+        env_config={"num_tasks": 7},
         server_config={"pool_size": 1, "prewarm_splits": ["train"], "worker_start_timeout_s": 30},
         env_name="fake",
     )
@@ -86,7 +86,7 @@ def main() -> None:
     try:
         health = json.loads(_OPENER.open(f"{base_url}/health", timeout=10).read().decode())
         assert health["ok"] is True
-        assert health["num_games"] == 7
+        assert health["num_tasks"] == 7
         lease = _post(base_url, "/allocate", {"split": "train", "task_key": "train:0", "request_id": "r0"})
         assert lease["ok"] is True
         lease_id = lease["lease_id"]

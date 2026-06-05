@@ -78,6 +78,7 @@ async def main():
         env_split="train",
         format_reward=0.0,
         format_penalty=-0.1,
+        keep_think_in_context=False,
         use_opd=False,
         opd_type=None,
     )
@@ -97,6 +98,12 @@ async def main():
     assert len(result.rollout_log_probs) == result.response_length
     assert "<think>" not in result.response
     assert "<action>search[red ceramic mug]</action>" in result.response
+
+    keep_args = SimpleNamespace(**vars(args))
+    keep_args.keep_think_in_context = True
+    keep_result = await rollout.generate(keep_args, Sample(prompt="", metadata={"task_index": 0}), sampling_params={})
+    assert "<think>" in keep_result.response
+    assert "<action>search[red ceramic mug]</action>" in keep_result.response
     print("WebShop smoke test passed")
 
 

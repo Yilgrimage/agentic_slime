@@ -3,7 +3,7 @@ eval:
     input_key: prompt
     metadata_key: metadata
     n_samples_per_eval_prompt: 1
-    max_response_len: 384
+    max_response_len: 512
     temperature: 0.0
     top_p: 1.0
     top_k: -1

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -ex
+set -euo pipefail
 
 export PYTHONUNBUFFERED=1
 
@@ -9,11 +9,29 @@ MLF_LOCAL_ROOT=${MLF_LOCAL_ROOT:-/tmp/mlf-runtime}
 MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
 LOCAL_RUNTIME_ROOT=${LOCAL_RUNTIME_ROOT:-${MLF_LOCAL_ROOT}}
 NAS_MLF_ROOT=${NAS_MLF_ROOT:-${MLF_NAS_ROOT}}
+WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${MLF_NAS_ROOT}/secrets/wandb.env}
+export PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-1}
 
 USER_SLIME_ENV=${SLIME_ENV:-}
 USER_WEBSHOP_ENV=${WEBSHOP_ENV:-}
 if [ -f "${MLF_LOCAL_ROOT}/env.sh" ]; then
   source "${MLF_LOCAL_ROOT}/env.sh"
+fi
+if [ -f "${WANDB_SECRET_FILE}" ]; then
+  # Expected keys: WANDB_API_KEY, optionally WANDB_BASE_URL/WANDB_ENTITY.
+  # Keep this file out of git and chmod it to 600 on NAS.
+  # shellcheck disable=SC1090
+  case "$-" in
+    *x*) _restore_xtrace=1; set +x ;;
+    *) _restore_xtrace=0 ;;
+  esac
+  set -a
+  source "${WANDB_SECRET_FILE}"
+  set +a
+  if [ "${_restore_xtrace}" = "1" ]; then
+    set -x
+  fi
+  unset _restore_xtrace
 fi
 
 NAS_SLIME_ENV=${NAS_SLIME_ENV:-${MLF_NAS_ROOT}/envs/slime-official}
@@ -71,8 +89,8 @@ WEBSHOP_PROMPT_NUM_TASKS=${WEBSHOP_PROMPT_NUM_TASKS:-}
 USER_DATA_PATH=${DATA_PATH:-}
 USER_EVAL_VALID_PATH=${EVAL_VALID_PATH:-}
 
-BASE_WEBSHOP_CONFIG=${BASE_WEBSHOP_CONFIG:-${REPO_DIR}/examples/agent_env/webshop/smoke_config.yaml}
-WEBSHOP_CONFIG=${WEBSHOP_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/webshop_smoke_config.yaml}
+BASE_WEBSHOP_CONFIG=${BASE_WEBSHOP_CONFIG:-${REPO_DIR}/examples/agent_env/webshop/train_config.yaml}
+WEBSHOP_CONFIG=${WEBSHOP_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/webshop_train_config.yaml}
 BASE_WEBSHOP_EVAL_CONFIG=${BASE_WEBSHOP_EVAL_CONFIG:-${REPO_DIR}/examples/agent_env/webshop/eval_config.yaml}
 WEBSHOP_EVAL_CONFIG=${WEBSHOP_EVAL_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/webshop_eval_config.yaml}
 WEBSHOP_SERVER_HOST=${WEBSHOP_SERVER_HOST:-127.0.0.1}
@@ -89,8 +107,12 @@ LOCAL_MODEL_DIR=${LOCAL_MODEL_DIR:-${LOCAL_RUNTIME_ROOT}/models/Qwen3-8B}
 LOCAL_TORCH_DIST_DIR=${LOCAL_TORCH_DIST_DIR:-${LOCAL_RUNTIME_ROOT}/models/Qwen3-8B_torch_dist}
 MODEL_DIR=${MODEL_DIR:-$([ -d "${LOCAL_MODEL_DIR}" ] && echo "${LOCAL_MODEL_DIR}" || echo "${NAS_MLF_ROOT}/models/Qwen3-8B")}
 TORCH_DIST_DIR=${TORCH_DIST_DIR:-$([ -d "${LOCAL_TORCH_DIST_DIR}" ] && echo "${LOCAL_TORCH_DIST_DIR}" || echo "${NAS_MLF_ROOT}/models/Qwen3-8B_torch_dist")}
-SAVE_DIR=${SAVE_DIR:-${LOCAL_RUNTIME_ROOT}/outputs/Qwen3-8B_webshop_slime_smoke}
 RAY_TEMP_DIR=${RAY_TEMP_DIR:-${LOCAL_RUNTIME_ROOT}/ray/webshop_${USER}}
+
+EXP_PROJECT=${EXP_PROJECT:-${PROJECT_NAME:-Qwen3-8B_webshop_grpo}}
+EXP_NAME=${EXP_NAME:-${RUN_NAME:-${WANDB_GROUP:-qwen3-8b-webshop-grpo}}}
+OUTPUT_ROOT=${OUTPUT_ROOT:-${LOCAL_RUNTIME_ROOT}/outputs}
+SAVE_DIR=${SAVE_DIR:-${OUTPUT_ROOT}/${EXP_PROJECT}/${EXP_NAME}}
 
 export TMPDIR=${TMPDIR:-${LOCAL_RUNTIME_ROOT}/tmp}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-${LOCAL_RUNTIME_ROOT}/cache/xdg}
@@ -126,6 +148,14 @@ webshop["data_dir"] = "${WEBSHOP_DATA_DIR}"
 webshop["product_file"] = "${WEBSHOP_PRODUCT_FILE}"
 webshop["attr_file"] = "${WEBSHOP_ATTR_FILE}"
 webshop["num_products"] = int("${WEBSHOP_NUM_PRODUCTS}")
+if os.environ.get("WANDB_PROJECT"):
+    cfg["wandb_project"] = os.environ["WANDB_PROJECT"]
+if os.environ.get("WANDB_GROUP"):
+    cfg["wandb_group"] = os.environ["WANDB_GROUP"]
+if os.environ.get("WANDB_ENTITY"):
+    cfg["wandb_team"] = os.environ["WANDB_ENTITY"]
+elif os.environ.get("WANDB_TEAM"):
+    cfg["wandb_team"] = os.environ["WANDB_TEAM"]
 server = cfg.setdefault("env_server", {})
 overrides = {
     "pool_size": os.environ.get("WEBSHOP_ENV_POOL_SIZE"),
@@ -139,6 +169,28 @@ for key, value in overrides.items():
     server[key] = int(value) if key == "pool_size" else float(value)
 path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 PYH
+
+config_value() {
+  local path=$1
+  local key=$2
+  local default=$3
+  "${SLIME_PYTHON}" - "${path}" "${key}" "${default}" <<'PY'
+import sys
+import yaml
+
+path, key, default = sys.argv[1:4]
+with open(path) as f:
+    cfg = yaml.safe_load(f) or {}
+value = cfg.get(key, default)
+if value is None:
+    value = default
+print(value)
+PY
+}
+
+WANDB_PROJECT=${WANDB_PROJECT:-${EXP_PROJECT}}
+WANDB_GROUP=${WANDB_GROUP:-${EXP_NAME}}
+WANDB_TEAM=${WANDB_TEAM:-$(config_value "${WEBSHOP_CONFIG}" wandb_team "")}
 
 WEBSHOP_SERVER_PID=""
 cleanup() {
@@ -195,16 +247,16 @@ import json
 import urllib.request
 base_url = "${WEBSHOP_ENV_SERVER_URL}".rstrip("/")
 data = json.loads(urllib.request.urlopen(f"{base_url}/health", timeout=5).read().decode())
-num_goals = data.get("num_goals")
-if not num_goals:
+num_tasks = data.get("num_tasks")
+if not num_tasks:
     status = json.loads(urllib.request.urlopen(f"{base_url}/status", timeout=5).read().decode())
     workers = status.get("workers") or []
-    worker_goals = [int(w["num_goals"]) for w in workers if w.get("num_goals")]
-    if worker_goals:
-        num_goals = min(worker_goals)
-if not num_goals:
-    raise SystemExit("WebShop server did not report num_goals")
-print(int(num_goals))
+    worker_tasks = [int(w["num_tasks"]) for w in workers if w.get("num_tasks")]
+    if worker_tasks:
+        num_tasks = min(worker_tasks)
+if not num_tasks:
+    raise SystemExit("WebShop server did not report num_tasks")
+print(int(num_tasks))
 PYH
 )
   DATA_PATH=${DATA_PATH:-${WEBSHOP_DATA_DIR}/train_${WEBSHOP_PROMPT_NUM_TASKS}.jsonl}
@@ -238,9 +290,10 @@ export CPLUS_INCLUDE_PATH="${CUDA_HOME}/include:${SLIME_ENV}/include:${CPLUS_INC
 export LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${SLIME_ENV}/lib:${LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${SLIME_ENV}/lib:${SLIME_ENV}/lib64:${LD_LIBRARY_PATH:-}"
 
-NUM_GPUS=${NUM_GPUS:-4}
-ACTOR_GPUS=${ACTOR_GPUS:-2}
-ROLLOUT_GPUS=${ROLLOUT_GPUS:-$((NUM_GPUS - ACTOR_GPUS))}
+NUM_GPUS=${NUM_GPUS:-8}
+ACTOR_NUM_NODES=${ACTOR_NUM_NODES:-1}
+ACTOR_GPUS=${ACTOR_GPUS:-8}
+ROLLOUT_GPUS=${ROLLOUT_GPUS:-8}
 RAY_PORT=${RAY_PORT:-8265}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 
@@ -256,12 +309,33 @@ fi
 cd "${REPO_DIR}"
 source scripts/models/qwen3-8B.sh
 
+if [ "${USE_EXISTING_AGENT_INFRA}" != "1" ]; then
+  "${SLIME_PYTHON}" -m ray.scripts.scripts start --head \
+     --node-ip-address "${MASTER_ADDR}" \
+     --num-gpus "${NUM_GPUS}" \
+     --disable-usage-stats \
+     --dashboard-host=0.0.0.0 \
+     --dashboard-port="${RAY_PORT}" \
+     --temp-dir "${RAY_TEMP_DIR}"
+fi
+
 CKPT_ARGS=(
    --hf-checkpoint "${MODEL_DIR}"
-   --ref-load "${TORCH_DIST_DIR}"
    --save "${SAVE_DIR}"
    --save-interval "${SAVE_INTERVAL:-9999}"
 )
+USE_KL_LOSS=${USE_KL_LOSS:-1}
+if [ -n "${LOAD_DIR:-}" ]; then
+  REF_LOAD_DIR=${REF_LOAD_DIR:-${LOAD_DIR}}
+else
+  REF_LOAD_DIR=${REF_LOAD_DIR:-${TORCH_DIST_DIR}}
+fi
+if [ "${USE_KL_LOSS}" = "1" ] || [ "${KL_LOSS_COEF:-0.00}" != "0.00" ]; then
+  CKPT_ARGS+=(--ref-load "${REF_LOAD_DIR}")
+fi
+if [ -n "${LOAD_DIR:-}" ]; then
+  CKPT_ARGS+=(--load "${LOAD_DIR}")
+fi
 
 ROLLOUT_ARGS=(
    --rollout-function-path slime.rollout.fully_async_rollout.generate_rollout_fully_async
@@ -273,13 +347,13 @@ ROLLOUT_ARGS=(
    --input-key prompt
    --metadata-key metadata
    --rollout-shuffle
-   --num-rollout "${NUM_ROLLOUT:-${NUM_STEPS:-1}}"
-   --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-2}"
-   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-2}"
-   --rollout-max-context-len "${ROLLOUT_MAX_CONTEXT_LEN:-8192}"
+   --num-rollout "${NUM_ROLLOUT:-${NUM_STEPS:-100}}"
+   --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-8}"
+   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-8}"
+   --rollout-max-context-len "${ROLLOUT_MAX_CONTEXT_LEN:-10240}"
    --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN:-512}"
    --rollout-temperature 1
-   --global-batch-size "${GLOBAL_BATCH_SIZE:-4}"
+   --global-batch-size "${GLOBAL_BATCH_SIZE:-64}"
    --balance-data
 )
 
@@ -305,18 +379,18 @@ PERF_ARGS=(
    --expert-model-parallel-size 1
    --expert-tensor-parallel-size 1
    --use-dynamic-batch-size
-   --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-4096}"
+   --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-20480}"
 )
 
 GRPO_ARGS=(
    --advantage-estimator grpo
-   --use-kl-loss
-   --kl-loss-coef 0.00
-   --kl-loss-type low_var_kl
    --entropy-coef 0.00
    --eps-clip 0.2
    --eps-clip-high 0.28
 )
+if [ "${USE_KL_LOSS}" = "1" ] || [ "${KL_LOSS_COEF:-0.00}" != "0.00" ]; then
+  GRPO_ARGS+=(--use-kl-loss --kl-loss-coef "${KL_LOSS_COEF:-0.00}" --kl-loss-type "${KL_LOSS_TYPE:-low_var_kl}")
+fi
 
 OPTIMIZER_ARGS=(
    --optimizer adam
@@ -326,22 +400,72 @@ OPTIMIZER_ARGS=(
    --adam-beta1 0.9
    --adam-beta2 0.98
 )
+if [ -n "${LOAD_DIR:-}" ] && [ "${RESUME_OVERRIDE_OPT_SCHEDULER:-1}" = "1" ]; then
+  OPTIMIZER_ARGS+=(--override-opt-param-scheduler)
+fi
 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine "${ROLLOUT_TP_SIZE:-1}"
    --rollout-gpu-memory-utilization "${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.7}"
-   --sglang-server-concurrency "${SGLANG_SERVER_CONCURRENCY:-8}"
+   --sglang-server-concurrency "${SGLANG_SERVER_CONCURRENCY:-16}"
 )
 
 MISC_ARGS=(
-   --num-steps "${NUM_STEPS:-1}"
+   --num-steps "${NUM_STEPS:-100}"
    --log-interval 1
    --seed "${SEED:-42}"
    --ray-temp-dir "${RAY_TEMP_DIR}"
-   --actor-num-nodes "${ACTOR_NUM_NODES:-1}"
+   --actor-num-nodes "${ACTOR_NUM_NODES}"
    --actor-num-gpus-per-node "${ACTOR_GPUS}"
    --rollout-num-gpus "${ROLLOUT_GPUS}"
+   --num-gpus-per-node "${NUM_GPUS}"
 )
+
+WANDB_ARGS=()
+if [ "${ENABLE_WANDB:-0}" = "1" ] || [ "${USE_WANDB:-0}" = "1" ]; then
+  WANDB_ARGS=(
+     --use-wandb
+     --wandb-project "${WANDB_PROJECT}"
+     --wandb-group "${WANDB_GROUP}"
+     --wandb-dir "${WANDB_DIR:-${LOCAL_RUNTIME_ROOT}/wandb/${EXP_PROJECT}/${EXP_NAME}}"
+  )
+  if [ "${WANDB_RANDOM_SUFFIX:-0}" != "1" ]; then
+    WANDB_ARGS+=(--disable-wandb-random-suffix)
+  fi
+  if [ -n "${WANDB_BASE_URL:-}" ]; then
+    WANDB_ARGS+=(--wandb-host "${WANDB_BASE_URL}")
+  fi
+  if [ -n "${WANDB_ENTITY:-${WANDB_TEAM}}" ]; then
+    WANDB_ARGS+=(--wandb-team "${WANDB_ENTITY:-${WANDB_TEAM}}")
+  fi
+fi
+
+if [ -z "${TRAIN_ENV_VARS_JSON:-}" ]; then
+  TRAIN_ENV_VARS_JSON=$("${SLIME_PYTHON}" - <<'PYH'
+import json
+import os
+
+keys = [
+    "PYTHONPATH",
+    "PYTHONNOUSERSITE",
+    "CUDA_DEVICE_MAX_CONNECTIONS",
+    "CUDA_HOME",
+    "PATH",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
+    "WEBSHOP_LIB",
+    "WEBSHOP_DATA",
+    "JAVA_HOME",
+    "JVM_PATH",
+]
+print(json.dumps({key: os.environ[key] for key in keys if key in os.environ}))
+PYH
+)
+fi
+TRAIN_ENV_ARGS=(--train-env-vars "${TRAIN_ENV_VARS_JSON}")
 
 TRAIN_ENTRY=(
    "${SLIME_PYTHON}" "${REPO_DIR}/train_async.py"
@@ -350,9 +474,11 @@ TRAIN_ENTRY=(
    "${ROLLOUT_ARGS[@]}"
    "${EVAL_ARGS[@]}"
    "${PERF_ARGS[@]}"
+   "${TRAIN_ENV_ARGS[@]}"
    "${GRPO_ARGS[@]}"
    "${OPTIMIZER_ARGS[@]}"
    "${SGLANG_ARGS[@]}"
+   "${WANDB_ARGS[@]}"
    "${MISC_ARGS[@]}"
 )
 
@@ -376,8 +502,12 @@ env = {
     "WEBSHOP_DATA": "${WEBSHOP_DATA_DIR}",
     "JAVA_HOME": "${JAVA_HOME}",
     "JVM_PATH": "${JVM_PATH}",
+    "WANDB_API_KEY": "${WANDB_API_KEY:-}",
+    "WANDB_BASE_URL": "${WANDB_BASE_URL:-}",
+    "WANDB_ENTITY": "${WANDB_ENTITY:-}",
     "no_proxy": "127.0.0.1,localhost,10.136.98.20,10.136.98.214,10.136.101.70,10.136.101.154",
 }
+env = {key: value for key, value in env.items() if value != ""}
 print(json.dumps({"env_vars": env}))
 PYH
 )

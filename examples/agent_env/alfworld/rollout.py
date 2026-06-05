@@ -93,13 +93,14 @@ ALFWORLD_SPEC = AgentEnvSpec(
         "action_max_tokens": "alfworld_action_max_tokens",
         "generation_stop": "alfworld_stop",
         "format_error_context_tokens": "alfworld_format_error_context_tokens",
+        "keep_think_in_context": "alfworld_keep_think_in_context",
         "env_request_timeout_s": "alfworld_env_request_timeout_s",
         "policy_timeout_s": "alfworld_policy_timeout_s",
         "outcome_reward": "alfworld_outcome_reward",
         "reward_source": "alfworld_reward_source",
     },
-    default_max_turns=50,
-    default_action_max_tokens=16,
+    default_max_turns=30,
+    default_action_max_tokens=512,
     default_reward_source="won",
 )
 

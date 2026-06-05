@@ -1,12 +1,13 @@
 #!/bin/bash
 
-set -ex
+set -euo pipefail
 
 export PYTHONUNBUFFERED=1
 
 MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
 MLF_LOCAL_ROOT=${MLF_LOCAL_ROOT:-/tmp/mlf-runtime}
 MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
+WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${MLF_NAS_ROOT}/secrets/wandb.env}
 USER_SLIME_ENV=${SLIME_ENV:-}
 USER_ALFWORLD_CONFIG=${ALFWORLD_CONFIG:-}
 USER_ALFWORLD_SERVER_PORT=${ALFWORLD_SERVER_PORT:-}
@@ -17,6 +18,22 @@ USER_RAY_PORT=${RAY_PORT:-}
 USER_ALFWORLD_EVAL_CONFIG=${ALFWORLD_EVAL_CONFIG:-}
 if [ -f "${MLF_LOCAL_ROOT}/env.sh" ]; then
   source "${MLF_LOCAL_ROOT}/env.sh"
+fi
+if [ -f "${WANDB_SECRET_FILE}" ]; then
+  # Expected keys: WANDB_API_KEY, optionally WANDB_BASE_URL/WANDB_ENTITY.
+  # Keep this file out of git and chmod it to 600 on NAS.
+  # shellcheck disable=SC1090
+  case "$-" in
+    *x*) _restore_xtrace=1; set +x ;;
+    *) _restore_xtrace=0 ;;
+  esac
+  set -a
+  source "${WANDB_SECRET_FILE}"
+  set +a
+  if [ "${_restore_xtrace}" = "1" ]; then
+    set -x
+  fi
+  unset _restore_xtrace
 fi
 if [ -n "${USER_SLIME_ENV}" ]; then
   SLIME_ENV="${USER_SLIME_ENV}"
@@ -78,8 +95,8 @@ ALFWORLD_LIB=${ALFWORLD_LIB:-${LOCAL_ALFWORLD_LIB}}
 DATA_PATH=${DATA_PATH:-${ALFWORLD_DATA_DIR}/train_${ALFWORLD_TRAIN_NUM_TASKS}.jsonl}
 EVAL_VALID_SEEN_PATH=${EVAL_VALID_SEEN_PATH:-${ALFWORLD_DATA_DIR}/valid_seen_${ALFWORLD_EVAL_NUM_TASKS}.jsonl}
 EVAL_VALID_UNSEEN_PATH=${EVAL_VALID_UNSEEN_PATH:-${ALFWORLD_DATA_DIR}/valid_unseen_${ALFWORLD_EVAL_NUM_TASKS}.jsonl}
-BASE_ALFWORLD_CONFIG=${BASE_ALFWORLD_CONFIG:-${REPO_DIR}/examples/agent_env/alfworld/smoke_config.yaml}
-ALFWORLD_CONFIG=${ALFWORLD_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/alfworld_smoke_config.yaml}
+BASE_ALFWORLD_CONFIG=${BASE_ALFWORLD_CONFIG:-${REPO_DIR}/examples/agent_env/alfworld/train_config.yaml}
+ALFWORLD_CONFIG=${ALFWORLD_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/alfworld_train_config.yaml}
 BASE_ALFWORLD_EVAL_CONFIG=${BASE_ALFWORLD_EVAL_CONFIG:-${REPO_DIR}/examples/agent_env/alfworld/eval_config.yaml}
 ALFWORLD_EVAL_CONFIG=${ALFWORLD_EVAL_CONFIG:-${LOCAL_RUNTIME_ROOT}/configs/alfworld_eval_config.yaml}
 ALFWORLD_SERVER_HOST=${ALFWORLD_SERVER_HOST:-127.0.0.1}
@@ -106,7 +123,10 @@ else
 fi
 MODEL_DIR=${MODEL_DIR:-${DEFAULT_MODEL_DIR}}
 TORCH_DIST_DIR=${TORCH_DIST_DIR:-${DEFAULT_TORCH_DIST_DIR}}
-SAVE_DIR=${SAVE_DIR:-${LOCAL_RUNTIME_ROOT}/outputs/Qwen3-8B_alfworld_slime_smoke}
+EXP_PROJECT=${EXP_PROJECT:-${PROJECT_NAME:-Qwen3-8B_alfworld_grpo}}
+EXP_NAME=${EXP_NAME:-${RUN_NAME:-${WANDB_GROUP:-qwen3-8b-alfworld-grpo}}}
+OUTPUT_ROOT=${OUTPUT_ROOT:-${LOCAL_RUNTIME_ROOT}/outputs}
+SAVE_DIR=${SAVE_DIR:-${OUTPUT_ROOT}/${EXP_PROJECT}/${EXP_NAME}}
 RAY_TEMP_DIR=${RAY_TEMP_DIR:-${LOCAL_RUNTIME_ROOT}/ray/alfworld_${USER}}
 
 export TMPDIR=${TMPDIR:-${LOCAL_RUNTIME_ROOT}/tmp}
@@ -132,7 +152,46 @@ fi
 if [ -z "${USER_ALFWORLD_CONFIG}" ]; then
   mkdir -p "$(dirname "${ALFWORLD_CONFIG}")"
   sed "s|^alfworld_data_dir:.*|alfworld_data_dir: ${ALFWORLD_DATA_DIR}|" "${BASE_ALFWORLD_CONFIG}" > "${ALFWORLD_CONFIG}"
+  "${PYTHON_BIN}" - <<PYH
+from pathlib import Path
+import os
+import yaml
+
+path = Path("${ALFWORLD_CONFIG}")
+cfg = yaml.safe_load(path.read_text()) or {}
+if os.environ.get("WANDB_PROJECT"):
+    cfg["wandb_project"] = os.environ["WANDB_PROJECT"]
+if os.environ.get("WANDB_GROUP"):
+    cfg["wandb_group"] = os.environ["WANDB_GROUP"]
+if os.environ.get("WANDB_ENTITY"):
+    cfg["wandb_team"] = os.environ["WANDB_ENTITY"]
+elif os.environ.get("WANDB_TEAM"):
+    cfg["wandb_team"] = os.environ["WANDB_TEAM"]
+path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+PYH
 fi
+
+config_value() {
+  local path=$1
+  local key=$2
+  local default=$3
+  "${PYTHON_BIN}" - "${path}" "${key}" "${default}" <<'PY'
+import sys
+import yaml
+
+path, key, default = sys.argv[1:4]
+with open(path) as f:
+    cfg = yaml.safe_load(f) or {}
+value = cfg.get(key, default)
+if value is None:
+    value = default
+print(value)
+PY
+}
+
+WANDB_PROJECT=${WANDB_PROJECT:-${EXP_PROJECT}}
+WANDB_GROUP=${WANDB_GROUP:-${EXP_NAME}}
+WANDB_TEAM=${WANDB_TEAM:-$(config_value "${ALFWORLD_CONFIG}" wandb_team "")}
 
 if [ ! -f "${DATA_PATH}" ]; then
   "${PYTHON_BIN}" "${REPO_DIR}/examples/agent_env/alfworld/prompt_data.py" \
@@ -205,9 +264,10 @@ if [ "${ALFWORLD_SERVER_READY}" -ne 1 ]; then
   exit 1
 fi
 
-NUM_GPUS=${NUM_GPUS:-4}
-ACTOR_GPUS=${ACTOR_GPUS:-2}
-ROLLOUT_GPUS=${ROLLOUT_GPUS:-$((NUM_GPUS - ACTOR_GPUS))}
+NUM_GPUS=${NUM_GPUS:-8}
+ACTOR_NUM_NODES=${ACTOR_NUM_NODES:-1}
+ACTOR_GPUS=${ACTOR_GPUS:-8}
+ROLLOUT_GPUS=${ROLLOUT_GPUS:-8}
 RAY_PORT=${RAY_PORT:-8265}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 
@@ -229,10 +289,21 @@ echo "HAS_NVLINK: ${HAS_NVLINK} (detected ${NVLINK_COUNT} NVLink references)"
 
 CKPT_ARGS=(
    --hf-checkpoint "${MODEL_DIR}"
-   --ref-load "${TORCH_DIST_DIR}"
    --save "${SAVE_DIR}"
    --save-interval "${SAVE_INTERVAL:-9999}"
 )
+USE_KL_LOSS=${USE_KL_LOSS:-1}
+if [ -n "${LOAD_DIR:-}" ]; then
+  REF_LOAD_DIR=${REF_LOAD_DIR:-${LOAD_DIR}}
+else
+  REF_LOAD_DIR=${REF_LOAD_DIR:-${TORCH_DIST_DIR}}
+fi
+if [ "${USE_KL_LOSS}" = "1" ] || [ "${KL_LOSS_COEF:-0.00}" != "0.00" ]; then
+  CKPT_ARGS+=(--ref-load "${REF_LOAD_DIR}")
+fi
+if [ -n "${LOAD_DIR:-}" ]; then
+  CKPT_ARGS+=(--load "${LOAD_DIR}")
+fi
 
 ROLLOUT_ARGS=(
    --rollout-function-path slime.rollout.fully_async_rollout.generate_rollout_fully_async
@@ -244,23 +315,23 @@ ROLLOUT_ARGS=(
    --input-key prompt
    --metadata-key metadata
    --rollout-shuffle
-   --num-rollout "${NUM_ROLLOUT:-1}"
-   --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-2}"
-   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-2}"
-   --rollout-max-context-len "${ROLLOUT_MAX_CONTEXT_LEN:-8192}"
+   --num-rollout "${NUM_ROLLOUT:-${NUM_STEPS:-100}}"
+   --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-8}"
+   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-8}"
+   --rollout-max-context-len "${ROLLOUT_MAX_CONTEXT_LEN:-10240}"
    --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN:-512}"
    --rollout-temperature 1
-   --global-batch-size "${GLOBAL_BATCH_SIZE:-4}"
+   --global-batch-size "${GLOBAL_BATCH_SIZE:-64}"
    --balance-data
 )
 
 EVAL_ARGS=()
-if [ "${ENABLE_ALFWORLD_EVAL:-1}" = "1" ]; then
+if [ "${ENABLE_ALFWORLD_EVAL:-0}" = "1" ]; then
   EVAL_ARGS=(
      --eval-function-path "${ALFWORLD_EVAL_FUNCTION_PATH:-slime.rollout.sglang_rollout.generate_rollout}"
      --eval-interval "${EVAL_INTERVAL:-1}"
      --eval-config "${ALFWORLD_EVAL_CONFIG}"
-     --eval-max-response-len "${EVAL_MAX_RESPONSE_LEN:-${ROLLOUT_MAX_RESPONSE_LEN:-384}}"
+     --eval-max-response-len "${EVAL_MAX_RESPONSE_LEN:-${ROLLOUT_MAX_RESPONSE_LEN:-512}}"
      --n-samples-per-eval-prompt "${N_SAMPLES_PER_EVAL_PROMPT:-1}"
      --eval-temperature "${EVAL_TEMPERATURE:-0.0}"
      --eval-top-p "${EVAL_TOP_P:-1.0}"
@@ -276,18 +347,18 @@ PERF_ARGS=(
    --expert-model-parallel-size 1
    --expert-tensor-parallel-size 1
    --use-dynamic-batch-size
-   --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-4096}"
+   --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU:-20480}"
 )
 
 GRPO_ARGS=(
    --advantage-estimator grpo
-   --use-kl-loss
-   --kl-loss-coef 0.00
-   --kl-loss-type low_var_kl
    --entropy-coef 0.00
    --eps-clip 0.2
    --eps-clip-high 0.28
 )
+if [ "${USE_KL_LOSS}" = "1" ] || [ "${KL_LOSS_COEF:-0.00}" != "0.00" ]; then
+  GRPO_ARGS+=(--use-kl-loss --kl-loss-coef "${KL_LOSS_COEF:-0.00}" --kl-loss-type "${KL_LOSS_TYPE:-low_var_kl}")
+fi
 
 OPTIMIZER_ARGS=(
    --optimizer adam
@@ -297,21 +368,25 @@ OPTIMIZER_ARGS=(
    --adam-beta1 0.9
    --adam-beta2 0.98
 )
+if [ -n "${LOAD_DIR:-}" ] && [ "${RESUME_OVERRIDE_OPT_SCHEDULER:-1}" = "1" ]; then
+  OPTIMIZER_ARGS+=(--override-opt-param-scheduler)
+fi
 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 1
    --sglang-mem-fraction-static "${SGLANG_MEM_FRACTION_STATIC:-0.45}"
-   --sglang-server-concurrency "${SGLANG_SERVER_CONCURRENCY:-4}"
+   --sglang-server-concurrency "${SGLANG_SERVER_CONCURRENCY:-16}"
 )
 
 MISC_ARGS=(
-   --num-steps "${NUM_STEPS:-1}"
+   --num-steps "${NUM_STEPS:-100}"
    --log-interval 1
    --seed "${SEED:-42}"
    --ray-temp-dir "${RAY_TEMP_DIR}"
-   --actor-num-nodes "${ACTOR_NUM_NODES:-1}"
+   --actor-num-nodes "${ACTOR_NUM_NODES}"
    --actor-num-gpus-per-node "${ACTOR_GPUS}"
    --rollout-num-gpus "${ROLLOUT_GPUS}"
+   --num-gpus-per-node "${NUM_GPUS}"
    --attention-dropout 0.0
    --hidden-dropout 0.0
    --accumulate-allreduce-grads-in-fp32
@@ -319,10 +394,53 @@ MISC_ARGS=(
    --attention-backend flash
 )
 
+WANDB_ARGS=()
+if [ "${ENABLE_WANDB:-0}" = "1" ] || [ "${USE_WANDB:-0}" = "1" ]; then
+  WANDB_ARGS=(
+     --use-wandb
+     --wandb-project "${WANDB_PROJECT}"
+     --wandb-group "${WANDB_GROUP}"
+     --wandb-dir "${WANDB_DIR:-${LOCAL_RUNTIME_ROOT}/wandb/${EXP_PROJECT}/${EXP_NAME}}"
+  )
+  if [ "${WANDB_RANDOM_SUFFIX:-0}" != "1" ]; then
+    WANDB_ARGS+=(--disable-wandb-random-suffix)
+  fi
+  if [ -n "${WANDB_BASE_URL:-}" ]; then
+    WANDB_ARGS+=(--wandb-host "${WANDB_BASE_URL}")
+  fi
+  if [ -n "${WANDB_ENTITY:-${WANDB_TEAM}}" ]; then
+    WANDB_ARGS+=(--wandb-team "${WANDB_ENTITY:-${WANDB_TEAM}}")
+  fi
+fi
+
 export PYTHONPATH="${MEGATRON_PATH}:${REPO_DIR}:${SLIME_ENV}/lib/python3.12/site-packages"
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NCCL_NVLS_ENABLE="${HAS_NVLINK}"
 export RAY_ADDRESS=127.0.0.1:6379
+
+if [ -z "${TRAIN_ENV_VARS_JSON:-}" ]; then
+  TRAIN_ENV_VARS_JSON=$("${PYTHON_BIN}" - <<'PYH'
+import json
+import os
+
+keys = [
+    "PYTHONPATH",
+    "PYTHONNOUSERSITE",
+    "CUDA_DEVICE_MAX_CONNECTIONS",
+    "CUDA_HOME",
+    "PATH",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "LIBRARY_PATH",
+    "LD_LIBRARY_PATH",
+]
+print(json.dumps({key: os.environ[key] for key in keys if key in os.environ}))
+PYH
+)
+fi
+TRAIN_ENV_ARGS=(--train-env-vars "${TRAIN_ENV_VARS_JSON}")
+
 if [ "${USE_EXISTING_AGENT_INFRA}" != "1" ]; then
   "${PYTHON_BIN}" -m ray.scripts.scripts start --head \
      --node-ip-address "${MASTER_ADDR}" \
@@ -341,8 +459,10 @@ TRAIN_ENTRY=(
    "${OPTIMIZER_ARGS[@]}" \
    "${GRPO_ARGS[@]}" \
    "${PERF_ARGS[@]}" \
+   "${TRAIN_ENV_ARGS[@]}" \
    "${EVAL_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
+   "${WANDB_ARGS[@]}" \
    "${MISC_ARGS[@]}"
 )
 
@@ -364,8 +484,12 @@ env = {
     "ALFWORLD_ENV_SERVER_URL": "${ALFWORLD_ENV_SERVER_URL}",
     "ALFWORLD_LIB": "${ALFWORLD_LIB}",
     "ALFWORLD_DATA": "${ALFWORLD_DATA_DIR}",
+    "WANDB_API_KEY": "${WANDB_API_KEY:-}",
+    "WANDB_BASE_URL": "${WANDB_BASE_URL:-}",
+    "WANDB_ENTITY": "${WANDB_ENTITY:-}",
     "no_proxy": "127.0.0.1,localhost,10.136.98.20,10.136.98.214,10.136.101.70,10.136.101.154",
 }
+env = {key: value for key, value in env.items() if value != ""}
 print(json.dumps({"env_vars": env}))
 PYH
 )
