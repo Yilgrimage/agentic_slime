@@ -10,6 +10,7 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     format_error_counts = []
     success_count = 0
     env_rewards = []
+    truncated_reasons: dict[str, int] = {}
 
     for sample in samples:
         metadata = sample.metadata or {}
@@ -20,6 +21,9 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         success_count += int(bool(metadata.get("env_success", False)))
         if "env_reward" in metadata:
             env_rewards.append(float(metadata["env_reward"]))
+        reason = metadata.get("truncated_reason")
+        if reason:
+            truncated_reasons[str(reason)] = truncated_reasons.get(str(reason), 0) + 1
 
     total_turns = sum(turn_counts)
     total_format_errors = sum(format_error_counts)
@@ -31,6 +35,8 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     }
     if env_rewards:
         metrics[f"{prefix}/env_reward_mean"] = sum(env_rewards) / len(env_rewards)
+    for reason, count in truncated_reasons.items():
+        metrics[f"{prefix}/truncated_{reason}_rate"] = count / len(samples)
     return metrics
 
 

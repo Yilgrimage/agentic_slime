@@ -18,7 +18,15 @@ Briefly reason about the task, available apps, and next code snippet.
 <arguments>{"code": "print(dir(apis.spotify))"}</arguments>
 </tool_call>
 
-Use `execute` to run Python code against the AppWorld `apis` object. Inspect available app APIs with `dir(apis.<app>)`, then call the APIs needed to solve the task. When the task is complete, either execute `apis.supervisor.complete_task(...)` yourself or call:
+Use `execute` to run Python code against the AppWorld `apis` object. Inspect available app APIs with `dir(apis.<app>)`, then call the APIs needed to solve the task.
+Important rules:
+- Use the existing `apis` object only. Do not import `apis`, instantiate hidden classes, or access the real file system.
+- Do not guess usernames, passwords, emails, dates, contacts, or payment cards. Personal information and app credentials are available through the supervisor app APIs.
+- If an app API says you are unauthorized, inspect `apis.supervisor` for the relevant account information before trying to log in.
+- For temporal requests, compute exact time boundaries. Use the phone app or task state for current date/time when needed.
+- For paginated APIs, inspect all pages before deciding.
+- When the task asks for an answer, finish with just the entity or number, not a full sentence.
+When the task is complete, either execute `apis.supervisor.complete_task(...)` yourself or call:
 <tool_call>
 <name>finish</name>
 <arguments>{"answer": "concise answer if the task asks a question"}</arguments>
@@ -91,8 +99,8 @@ APPWORLD_SPEC = AgentEnvSpec(
     choose_action=_choose_action,
     success=_success,
     env_metadata=_env_metadata,
-    default_max_turns=20,
-    default_action_max_tokens=512,
+    default_max_turns=40,
+    default_action_max_tokens=1024,
     default_reward_source="score",
 )
 

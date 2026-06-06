@@ -4,7 +4,7 @@ set -euo pipefail
 
 export PYTHONUNBUFFERED=1
 
-ENV_NAME=${ENV_NAME:?Set ENV_NAME to tau2 or appworld}
+ENV_NAME=${ENV_NAME:?Set ENV_NAME to alfworld, webshop, tau2, or appworld}
 CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:?Set CUSTOM_GENERATE_FUNCTION_PATH}
 CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:?Set CUSTOM_CONFIG_PATH}
 ENV_SERVER_URL_VAR=${ENV_SERVER_URL_VAR:?Set ENV_SERVER_URL_VAR}
@@ -15,7 +15,17 @@ MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
 WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${MLF_NAS_ROOT}/secrets/wandb.env}
 REPO_DIR=${REPO_DIR:-${MLF_NAS_ROOT}/code/slime}
 MEGATRON_PATH=${MEGATRON_PATH:-${MLF_NAS_ROOT}/code/Megatron-LM}
-SLIME_ENV=${SLIME_ENV:-${MLF_LOCAL_ENVS}/slime}
+if [ -z "${SLIME_ENV:-}" ]; then
+  if [ -x "${MLF_LOCAL_ENVS}/slime-official/bin/python" ]; then
+    SLIME_ENV="${MLF_LOCAL_ENVS}/slime-official"
+  elif [ -x "${MLF_LOCAL_ENVS}/slime/bin/python" ]; then
+    SLIME_ENV="${MLF_LOCAL_ENVS}/slime"
+  elif [ -x "${MLF_NAS_ROOT}/envs/slime-official/bin/python" ]; then
+    SLIME_ENV="${MLF_NAS_ROOT}/envs/slime-official"
+  else
+    SLIME_ENV="${MLF_NAS_ROOT}/envs/slime"
+  fi
+fi
 SLIME_PYTHON=${SLIME_PYTHON:-${SLIME_ENV}/bin/python}
 TRAIN_ENTRYPOINT=${TRAIN_ENTRYPOINT:-train.py}
 
@@ -60,6 +70,7 @@ RAY_TEMP_DIR=${RAY_TEMP_DIR:-${MLF_LOCAL_ROOT}/ray/${ENV_NAME}_${USER}}
 DATA_DIR=${DATA_DIR:-${MLF_LOCAL_ROOT}/data/${ENV_NAME}}
 PROMPT_NUM_TASKS=${PROMPT_NUM_TASKS:-}
 DATA_PATH=${DATA_PATH:-}
+PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/scripts/prompt_data.py}
 
 export TMPDIR=${TMPDIR:-${MLF_LOCAL_ROOT}/tmp}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-${MLF_LOCAL_ROOT}/cache/xdg}
@@ -103,7 +114,7 @@ fi
 
 DATA_PATH=${DATA_PATH:-${DATA_DIR}/train_${PROMPT_NUM_TASKS}.jsonl}
 if [ ! -f "${DATA_PATH}" ]; then
-  "${SLIME_PYTHON}" "${REPO_DIR}/examples/agent_env/scripts/prompt_data.py" \
+  "${SLIME_PYTHON}" "${PROMPT_DATA_SCRIPT}" \
     --output "${DATA_PATH}" \
     --split train \
     --num-tasks "${PROMPT_NUM_TASKS}"
@@ -244,7 +255,9 @@ import json, os
 keys = [
     "PYTHONPATH", "PYTHONNOUSERSITE", "CUDA_DEVICE_MAX_CONNECTIONS", "CUDA_HOME",
     "PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH",
-    "LD_LIBRARY_PATH", "RAY_ADDRESS", "${ENV_SERVER_URL_VAR}", "TAU2_DATA_DIR", "APPWORLD_ROOT",
+    "LD_LIBRARY_PATH", "RAY_ADDRESS", "${ENV_SERVER_URL_VAR}", "ALFWORLD_ENV_SERVER_URL",
+    "WEBSHOP_ENV_SERVER_URL", "TAU2_ENV_SERVER_URL", "APPWORLD_ENV_SERVER_URL",
+    "TAU2_DATA_DIR", "APPWORLD_ROOT",
     "WANDB_API_KEY", "WANDB_BASE_URL", "WANDB_ENTITY",
 ]
 print(json.dumps({key: os.environ[key] for key in keys if key in os.environ and os.environ[key] != ""}))

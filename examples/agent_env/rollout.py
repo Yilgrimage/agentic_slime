@@ -100,6 +100,14 @@ def _strip_outer_code_fences(text: str) -> str:
     return "\n".join(lines[1:-1]).strip()
 
 
+def _strip_chat_special_tokens(text: str) -> str:
+    # Qwen chat delimiters can appear as literal text when rollout prompts are raw strings.
+    text = re.sub(r"<\|im_start\|>\s*(?:system|user|assistant)?", "", text)
+    text = text.replace("<|im_end|>", "")
+    text = text.replace("<|endoftext|>", "")
+    return text.strip()
+
+
 def _parse_json_object(text: str) -> dict[str, Any] | None:
     text = _strip_outer_code_fences(text)
     if text.lower().startswith("json\n"):
@@ -114,6 +122,7 @@ def _parse_json_object(text: str) -> dict[str, Any] | None:
 
 
 def _parse_tool_call(response_text: str) -> tuple[dict[str, Any] | None, bool, str]:
+    response_text = _strip_chat_special_tokens(response_text)
     call_match = re.search(r"<tool_call>\s*(.*?)\s*</tool_call>", response_text, flags=re.IGNORECASE | re.DOTALL)
     if not call_match:
         args_match = re.search(r"<arguments>\s*(.*?)\s*</arguments>", response_text, flags=re.IGNORECASE | re.DOTALL)
@@ -160,6 +169,7 @@ def _parse_tool_call(response_text: str) -> tuple[dict[str, Any] | None, bool, s
 
 
 def parse_action(response_text: str) -> tuple[Any, bool, str]:
+    response_text = _strip_chat_special_tokens(response_text)
     tool_action, tool_valid, tool_mode = _parse_tool_call(response_text)
     if tool_action is not None or tool_mode != "no_tool_call":
         return tool_action or "", tool_valid, tool_mode
@@ -226,12 +236,21 @@ def append_tokens(
         assert len(sample.rollout_log_probs) == sample.response_length
 
 
-def add_last_token_reward(sample: Sample, value: float) -> None:
+def add_last_token_reward(sample: Sample, value: float) -> bool:
     if value == 0:
-        return
+        return True
     token_rewards = metadata(sample).setdefault("token_rewards", [])
     if token_rewards:
         token_rewards[-1] += float(value)
+        return True
+    return False
+
+
+def add_reward(sample: Sample, value: float) -> None:
+    if add_last_token_reward(sample, value):
+        return
+    sample_metadata = metadata(sample)
+    sample_metadata["unassigned_token_reward"] = float(sample_metadata.get("unassigned_token_reward", 0.0)) + float(value)
 
 
 def ensure_rollout_shapes(args: Any, sample: Sample, spec: AgentEnvSpec) -> None:
@@ -299,6 +318,7 @@ def response_context(
     action: Any,
     format_valid: bool,
 ) -> tuple[str, list[int], list[float]]:
+    response_text = _strip_chat_special_tokens(response_text)
     if format_valid:
         if cfg(args, "keep_think_in_context", spec.legacy("keep_think_in_context"), True):
             text = response_text.strip()
@@ -315,7 +335,11 @@ def response_context(
         return "", [], []
     ids = response_token_ids[-keep:]
     log_probs = response_log_probs[-len(ids) :] if response_log_probs else [0.0] * len(ids)
-    text = _decode_tokens(tok, ids, response_text[-200:])
+    text = _strip_chat_special_tokens(_decode_tokens(tok, ids, response_text[-200:]))
+    if not text:
+        return "", [], []
+    ids = tok.encode(text, add_special_tokens=False)
+    log_probs = _aligned_log_probs(ids, response_token_ids, response_log_probs)
     return text, ids, log_probs
 
 
@@ -486,11 +510,13 @@ async def generate_agent_rollout(
             remaining = remaining_context(args, sample)
             if remaining is not None and remaining <= 0:
                 sample.status = Sample.Status.TRUNCATED
+                sample_metadata["truncated_reason"] = "context_limit"
                 break
 
             params = turn_params(args, spec, sampling_params, remaining)
             if params["max_new_tokens"] <= 0:
                 sample.status = Sample.Status.TRUNCATED
+                sample_metadata["truncated_reason"] = "context_limit"
                 break
 
             response_text, response_token_ids, response_log_probs, finish_type = await call_policy(args, spec, sample, params)
@@ -510,7 +536,7 @@ async def generate_agent_rollout(
                 format_valid,
             )
             append_tokens(sample, context_text, context_token_ids, 1, tok, context_log_probs)
-            add_last_token_reward(sample, format_reward(args, format_valid))
+            add_reward(sample, format_reward(args, format_valid))
             sample_metadata.setdefault("action_parse_modes", []).append(parse_mode)
             if not format_valid:
                 sample_metadata["format_errors"] = int(sample_metadata.get("format_errors", 0)) + 1
@@ -520,6 +546,7 @@ async def generate_agent_rollout(
                 break
             if finish_type == "length":
                 sample.status = Sample.Status.TRUNCATED
+                sample_metadata["truncated_reason"] = "action_max_tokens"
                 break
 
             action = spec.choose_action(args, action, spec.info_actions(info), sample)
@@ -544,9 +571,10 @@ async def generate_agent_rollout(
                 break
         else:
             sample.status = Sample.Status.TRUNCATED
+            sample_metadata["truncated_reason"] = "max_turns"
 
         env_reward = outcome_reward(args, spec, success, final_score)
-        add_last_token_reward(sample, env_reward)
+        add_reward(sample, env_reward)
         env_meta = spec.env_metadata(reset, index, split, lease_id)
         env_meta.setdefault("server_url", env_server_url(args, spec))
         sample_metadata.update(
@@ -565,7 +593,9 @@ async def generate_agent_rollout(
         elif arg(args, "use_opd", False) and arg(args, "opd_type") == "sglang":
             sample.reward = None
         else:
-            sample.reward = float(sum(sample_metadata.get("token_rewards", [])))
+            sample.reward = float(sum(sample_metadata.get("token_rewards", []))) + float(
+                sample_metadata.get("unassigned_token_reward", 0.0)
+            )
         ensure_rollout_shapes(args, sample, spec)
         return sample
     except Exception as exc:

@@ -131,8 +131,11 @@ fill_ssh_args() {
     SSH_ARGS+=("-6")
   fi
   SSH_ARGS+=(
+    "-o" "BatchMode=yes"
     "-o" "StrictHostKeyChecking=no"
     "-o" "UserKnownHostsFile=/dev/null"
+    "-o" "GlobalKnownHostsFile=/dev/null"
+    "-o" "CheckHostIP=no"
     "-o" "IdentitiesOnly=yes"
     "-i" "${SSH_KEY}"
     "-p" "${SSH_PORT}"
@@ -146,6 +149,13 @@ fill_ssh_args() {
 print_ssh_cmd() {
   printf 'ssh '
   printf '%q ' "${SSH_ARGS[@]}"
+}
+
+debug_ssh_cmd() {
+  [ "${DEBUG_SSH:-0}" = "1" ] || return 0
+  printf '+ '
+  print_ssh_cmd
+  printf '%q\n' "$1"
 }
 
 run_cmd() {
@@ -510,7 +520,7 @@ remote_start_tmux() {
   local command=$4
   local remote_cmd
   local attempt
-  remote_cmd=$(printf 'tmux kill-session -t %q 2>/dev/null || true; tmux new-session -d -s %q %q; tmux ls 2>/dev/null | grep %q' "${session}" "${session}" "${command}" "${session}")
+  remote_cmd=$(printf 'tmux kill-session -t %q 2>/dev/null || true; tmux new-session -d -s %q %q' "${session}" "${session}" "${command}")
   echo "Starting ${session} on ${host}"
   fill_ssh_args "${host}"
   if [ "${DRY_RUN}" -eq 1 ]; then
@@ -519,6 +529,7 @@ remote_start_tmux() {
     printf '%q\n' "${remote_cmd}"
     return
   fi
+  debug_ssh_cmd "${remote_cmd}"
   for attempt in 1 2 3; do
     if ssh "${SSH_ARGS[@]}" "${remote_cmd}"; then
       return 0
@@ -697,6 +708,9 @@ if [ "${ROLE}" = "auto" ]; then
   head=$(first_node)
   if [ -z "${NODES_FILE}" ] || is_current_node "${head}" || [ "${head}" = "this" ]; then
     ROLE=head
+    # Once running on the cluster head, worker nodes are reached directly.
+    # Keeping the local-machine jump proxy here breaks node-to-node SSH.
+    SSH_JUMP=${INTERNAL_SSH_JUMP:-}
   else
     # Delegate orchestration to the first node.
     # From the head, workers are reached directly with the node-local key; the

@@ -15,12 +15,15 @@ appworld:
   num_tasks_per_scenario: null
   only_tagged: null
   num_tasks: null
-  max_interactions: 20
+  max_interactions: 40
   raise_on_failure: false
   experiment_prefix: slime_agent_env
   include_api_overview: true
 
-max_turns: 20
-action_max_tokens: 512
+max_turns: 40
+action_max_tokens: 1024
+format_error_context_tokens: 0
+generation_stop:
+  - "<|im_end|>"
 policy_timeout_s: 120
 env_request_timeout_s: 660
