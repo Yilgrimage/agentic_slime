@@ -76,11 +76,13 @@ def main() -> None:
     s1, u1 = start_fake_worker(w1)
     try:
         router = EnvRouter([u0, u1], request_timeout_s=5, allocate_timeout_s=5)
-        task_key = next(f"train:{i}" for i in range(1000) if router.select_worker_idx(f"train:{i}") == 0)
-        allocation, status = router.allocate({"task_key": task_key, "request_id": "req-0"})
+        task_key = "train:fixed"
+        request_id = next(f"req-{i}" for i in range(1000) if router.select_worker_idx(f"req-{i}") == 0)
+        allocation, status = router.allocate({"task_key": task_key, "request_id": request_id})
         assert status == 200, allocation
         assert allocation["ok"] is True
         assert allocation["worker_idx"] == 1
+        assert allocation["routing_key"] == request_id
         assert allocation["worker_lease_id"].startswith("w1-lease")
 
         reset, status = router.lease_proxy("/reset", {"lease_id": allocation["lease_id"]})

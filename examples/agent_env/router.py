@@ -136,8 +136,12 @@ class EnvRouter:
         return retry_capacity and any(marker in error for marker in capacity_markers)
 
     def allocate(self, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        task_key = str(payload.get("task_key") or payload.get("request_id") or time.time_ns())
-        primary_idx = self.select_worker_idx(task_key)
+        task_key = str(payload.get("task_key") or "")
+        # task_key identifies the environment task and can repeat for GRPO samples from
+        # the same prompt. Use request_id for routing so independent samples spread
+        # across env workers while remaining stable across HTTP retries.
+        routing_key = str(payload.get("request_id") or task_key or time.time_ns())
+        primary_idx = self.select_worker_idx(routing_key)
         upstream_errors: list[dict[str, Any]] = []
 
         for worker in self.iter_candidates(primary_idx):
@@ -172,6 +176,7 @@ class EnvRouter:
                 result["worker_url"] = worker.url
                 result["worker_lease_id"] = worker_lease_id
                 result["primary_worker_idx"] = primary_idx
+                result["routing_key"] = routing_key
                 return result, _payload_status(result, status)
 
             upstream_errors.append(
@@ -190,6 +195,7 @@ class EnvRouter:
                 "ok": False,
                 "error": "No env worker could allocate a lease",
                 "task_key": task_key,
+                "routing_key": routing_key,
                 "primary_worker_idx": primary_idx,
                 "upstream_errors": upstream_errors,
             },
