@@ -1,0 +1,3 @@
+# node0 / head by default; tau2 aux node is intentionally not listed here.
+fdbd:dc03:9:520::206
+fdbd:dc03:9:521::28

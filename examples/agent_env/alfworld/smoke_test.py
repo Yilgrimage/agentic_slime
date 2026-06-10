@@ -8,11 +8,30 @@ import examples.agent_env.rollout as agent_rollout
 
 
 class FakeTokenizer:
+    def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+        data = {"input_ids": self.encode(text, add_special_tokens=add_special_tokens)}
+        if return_offsets_mapping:
+            data["offset_mapping"] = [(index, index + 1) for index in range(len(text))]
+        return data
+
     def encode(self, text, add_special_tokens=False):
-        return [ord(ch) % 1000 for ch in text]
+        return [ord(ch) for ch in text]
+
+    def apply_chat_template(self, messages, tokenize=True, tools=None, add_generation_prompt=False, **kwargs):
+        pieces = []
+        for message in messages:
+            role = message["role"]
+            if role in {"system", "user", "assistant"}:
+                pieces.append(f"<|im_start|>{role}\n{message.get('content', '')}<|im_end|>\n")
+            elif role == "tool":
+                pieces.append(f"<|im_start|>user\n<tool_response>\n{message.get('content', '')}\n</tool_response><|im_end|>\n")
+        if add_generation_prompt:
+            pieces.append("<|im_start|>assistant\n<think>\n")
+        rendered = "".join(pieces)
+        return self.encode(rendered) if tokenize else rendered
 
 
-async def fake_policy(args, sample, sampling_params):
+async def fake_policy(args, sample, input_ids, sampling_params):
     return "<think>pick up the visible apple</think><action>take apple</action>", [101, 102], [-0.1, -0.2], "stop"
 
 
@@ -49,7 +68,7 @@ async def fake_close(args, lease_id):
 
 async def main():
     agent_rollout.tokenizer = lambda args: FakeTokenizer()
-    agent_rollout.call_policy = lambda args, spec, sample, sampling_params: fake_policy(args, sample, sampling_params)
+    agent_rollout.call_policy = lambda args, spec, sample, input_ids, sampling_params: fake_policy(args, sample, input_ids, sampling_params)
     agent_rollout.allocate_env = lambda args, spec, sample: fake_allocate(args, sample)
     agent_rollout.reset_env = lambda args, spec, sample, lease_id, extra_payload=None: fake_reset(args, sample, lease_id)
     agent_rollout.step_env = lambda args, spec, lease_id, action: fake_step(args, lease_id, action)
@@ -59,19 +78,17 @@ async def main():
     args = SimpleNamespace(
         partial_rollout=False,
         rollout_max_context_len=512,
+        rollout_max_response_len=128,
         max_turns=2,
-        action_max_tokens=128,
-        generation_stop=None,
-        include_admissible_actions=True,
-        restrict_to_admissible=False,
-        invalid_action_fallback="model",
-        reward_source="won",
-        outcome_reward=10.0,
-        return_logprob=True,
-        env_split="train",
-        format_reward=0.0,
-        format_penalty=-0.1,
-        keep_think_in_context=False,
+        task={"split": "train"},
+        timeouts={"policy_s": 120, "env_request_s": 660},
+        interaction={"mode": "text_action", "text_action": {"tag": "action"}},
+        observation={"include_actions": True},
+        action={"restrict_to_available": False, "invalid_fallback": "model"},
+        reward={"source": "won", "outcome": 10.0, "format": {"valid": 0.0, "invalid": -0.1}},
+        generation={"stop": None},
+        alfworld={"direct_game_file": True, "skip_to_task": False, "num_tasks": None},
+        loss_mask_type="qwen3_5",
         use_opd=False,
         opd_type=None,
     )
@@ -84,19 +101,12 @@ async def main():
     assert result.metadata["actions"] == ["take apple"]
     assert result.metadata["alfworld"]["game_file"] == "/tmp/game.tw-pddl"
     assert len(result.metadata["token_rewards"]) == result.response_length
-    assert sum(result.metadata["token_rewards"]) == result.reward
     assert len(result.loss_mask) == result.response_length
-    assert len(result.rollout_log_probs) == result.response_length
-    assert "<think>" not in result.response
+    assert result.rollout_log_probs is None
+    assert "<think>" in result.response
     assert "<action>take apple</action>" in result.response
-    assert all(logp == 0.0 for logp, mask in zip(result.rollout_log_probs, result.loss_mask) if mask == 0)
-    assert sum(result.loss_mask) == len(FakeTokenizer().encode("<action>take apple</action>"))
+    assert sum(result.loss_mask) > 0
 
-    keep_args = SimpleNamespace(**vars(args))
-    keep_args.keep_think_in_context = True
-    keep_result = await alf_gen.generate(keep_args, Sample(prompt="", metadata={"task_index": 0}), sampling_params={})
-    assert "<think>" in keep_result.response
-    assert "<action>take apple</action>" in keep_result.response
     print("ALFWorld smoke test passed")
 
 

@@ -1,26 +1,72 @@
+task:
+  split: train
+max_turns: 40
+
+timeouts:
+  policy_s: 300
+  env_request_s: 660
+
+interaction:
+  mode: tool_call
+  enable_thinking: true
+  reasoning:
+    parser: qwen3-thinking
+    fallback_to_raw: false
+
+observation:
+  include_actions: true
+
+action:
+  restrict_to_available: false
+  invalid_fallback: assistant_message
+
+reward:
+  source: score
+  outcome: 10.0
+  format:
+    valid: 0.0
+    invalid: 0.0
+
 env_server:
-  pool_size: 8
+  pool_size: 32
   prewarm_splits: ["train"]
   shared_pool: true
   worker_start_timeout_s: 300
   worker_request_timeout_s: 180
 
+agent_prompt_data:
+  source: areal_synthetic
+  data_dir: ${TAU2_DATA_DIR}
+  areal_root: ${TAU2_AREAL_ROOT}
+  areal_input: tau2_rl_train.jsonl
+  task_file_dir: ''
+  domains: [retail, airline, telecom]
+  task_sets: ''
+  domain_weights: ''
+  split: train
+  num_tasks: all
+  seed: 42
+  output_dir: /tmp/mlf-runtime/data/tau2/areal_synthetic_prompt
+
 tau2:
-  # Data root should normally be /tmp/mlf-runtime/data/tau2/data after materialization.
   data_dir: ${TAU2_DATA_DIR}
   domain: retail
   task_set: retail
   split: null
   num_tasks: null
-  max_turns: 20
+  max_turns: 40
   solo_mode: false
+  user_sim_enabled: true
+  user_model: ${TAU2_USER_MODEL}
+  user_model_base_url: ${TAU2_USER_MODEL_BASE_URL}
+  user_model_api_key_path: ${TAU2_USER_MODEL_API_KEY_PATH}
+  user_model_timeout_s: 120
+  user_model_max_tokens: 512
+  user_model_temperature: 0.0
+  user_model_top_p: 1.0
+  user_model_enable_thinking: false
+  user_model_separate_reasoning: true
+  max_user_tool_rounds: 4
   include_policy: true
   include_tools: true
-  # "all" may call NL assertion judges through LiteLLM/OpenAI for some tasks.
-  # Use "action" by default for local RL runs that should not depend on external LLM credentials.
   evaluation_type: action
-
-max_turns: 20
-action_max_tokens: 512
-policy_timeout_s: 120
-env_request_timeout_s: 660

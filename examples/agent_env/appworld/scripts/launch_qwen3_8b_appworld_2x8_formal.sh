@@ -44,6 +44,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+LOAD_ASSIGNMENT=""
+if [ -n "${RESUME_FROM}" ]; then
+  LOAD_ASSIGNMENT="LOAD_DIR=${RESUME_FROM} \\"
+fi
+
 TRAIN_CMD=$(
   cat <<EOF
 SLIME_ENV=/tmp/mlf-envs/slime \
@@ -52,7 +57,7 @@ RAY_CUDA_VISIBLE_DEVICES=${RAY_CUDA_VISIBLE_DEVICES} \
 NUM_GPUS=4 \
 EXP_PROJECT=${EXP_PROJECT} \
 EXP_NAME=${EXP_NAME} \
-LOAD_DIR=${RESUME_FROM} \
+${LOAD_ASSIGNMENT}
 USE_EXISTING_AGENT_INFRA=1 \
 SUBMIT_VIA_RAY_JOB=1 \
 ENABLE_WANDB=1 \
@@ -72,7 +77,7 @@ ACTOR_GPUS=4 \
 ROLLOUT_GPUS=8 \
 TP_SIZE=4 \
 CP_SIZE=1 \
-SAVE_INTERVAL=9999 \
+SAVE_INTERVAL=${SAVE_INTERVAL:-${TOTAL_NUM_STEPS}} \
 bash examples/agent_env/appworld/scripts/run_qwen3_8b_appworld_grpo.sh
 EOF
 )

@@ -5,13 +5,10 @@ from typing import Any
 from slime.utils.types import Sample
 
 from examples.agent_env.metrics import log_eval_rollout_data_for_env, log_rollout_data_for_env
-from examples.agent_env.rollout import AgentEnvSpec, cfg, first, generate_agent_rollout, metadata
+from examples.agent_env.rollout import AgentEnvSpec, cfg_path, first, generate_agent_rollout, metadata
 
 DEFAULT_PROMPT = """You are an expert household task agent in ALFWorld.
 At each turn, read the current observation and valid actions, then respond in exactly this format:
-<think>
-Briefly reason about the goal, the current state, and the best next action.
-</think>
 <action>one valid action</action>
 
 The action text must exactly match one of the valid actions when possible."""
@@ -30,7 +27,7 @@ def _format_actions(commands: list[str]) -> str:
 
 def _observation_text(args: Any, observation: str, info: dict) -> str:
     text = f"Observation:\n{observation.strip()}\n"
-    if cfg(args, "include_admissible_actions", "alfworld_include_admissible_actions", True):
+    if cfg_path(args, "observation.include_actions", True):
         text += _format_actions(_admissible(info))
     return text
 
@@ -40,17 +37,17 @@ def _initial_prompt(args: Any, sample: Sample, observation: str, info: dict) -> 
     admissible = _format_actions(_admissible(info)).strip()
     if "{observation}" in base or "{admissible_actions}" in base:
         return base.format(observation=observation.strip(), admissible_actions=admissible)
-    return f"{base}\n\n{_observation_text(args, observation, info)}Response:"
+    return f"{base}\n\n{_observation_text(args, observation, info)}"
 
 
 def _choose_action(args: Any, action: str, commands: list[str], sample: Sample) -> str:
-    if not cfg(args, "restrict_to_admissible", "alfworld_restrict_to_admissible", False) or not commands:
+    if not cfg_path(args, "action.restrict_to_available", False) or not commands:
         return action
     norm = {cmd.lower(): cmd for cmd in commands}
     if action.lower() in norm:
         return norm[action.lower()]
     metadata(sample).setdefault("invalid_actions", []).append(action)
-    fallback = cfg(args, "invalid_action_fallback", "alfworld_invalid_action_fallback", "model")
+    fallback = cfg_path(args, "action.invalid_fallback", "model")
     if fallback == "first_admissible":
         return commands[0]
     if fallback == "look" and "look" in norm:
@@ -86,30 +83,18 @@ ALFWORLD_SPEC = AgentEnvSpec(
     choose_action=_choose_action,
     success=_success,
     env_metadata=_env_metadata,
-    arg_legacy={
-        "env_split": "alfworld_split",
-        "return_logprob": "alfworld_return_logprob",
-        "max_turns": "alfworld_max_turns",
-        "action_max_tokens": "alfworld_action_max_tokens",
-        "generation_stop": "alfworld_stop",
-        "format_error_context_tokens": "alfworld_format_error_context_tokens",
-        "keep_think_in_context": "alfworld_keep_think_in_context",
-        "env_request_timeout_s": "alfworld_env_request_timeout_s",
-        "policy_timeout_s": "alfworld_policy_timeout_s",
-        "outcome_reward": "alfworld_outcome_reward",
-        "reward_source": "alfworld_reward_source",
-    },
     default_max_turns=30,
-    default_action_max_tokens=512,
+    default_response_max_tokens=512,
     default_reward_source="won",
+    default_interaction_mode="text_action",
 )
 
 
 async def generate(args: Any, sample: Sample, sampling_params: dict, evaluation: bool = False) -> Sample:
     reset_payload = {
-        "direct_game_file": getattr(args, "alfworld_direct_game_file", True),
-        "skip_to_task": getattr(args, "alfworld_skip_to_task", False),
-        "num_tasks": getattr(args, "alfworld_num_tasks", None),
+        "direct_game_file": cfg_path(args, "alfworld.direct_game_file", True),
+        "skip_to_task": cfg_path(args, "alfworld.skip_to_task", False),
+        "num_tasks": cfg_path(args, "alfworld.num_tasks", None),
     }
     return await generate_agent_rollout(args, sample, sampling_params, spec=ALFWORLD_SPEC, reset_payload=reset_payload)
 

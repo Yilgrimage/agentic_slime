@@ -34,6 +34,17 @@ def _deep_update(base: dict, override: dict) -> dict:
     return base
 
 
+def _deep_get(data: dict, *keys: str, default: Any = None) -> Any:
+    value: Any = data
+    for key in keys:
+        if not isinstance(value, dict):
+            return default
+        value = value.get(key)
+        if value is None:
+            return default
+    return value
+
+
 def _parse_scalar(value: str) -> Any:
     text = value.strip()
     lowered = text.lower()
@@ -87,44 +98,46 @@ def _safe_load_config(path: str) -> dict:
 
 
 def _server_config(raw: dict) -> dict:
+    env_server = raw.get("env_server") if isinstance(raw.get("env_server"), dict) else {}
     return {
-        "pool_size": int(raw.get("alfworld_server_pool_size", 8)),
-        "acquire_timeout_s": float(raw.get("alfworld_server_acquire_timeout_s", 30.0)),
-        "lease_ttl_s": float(raw.get("alfworld_server_lease_ttl_s", raw.get("alfworld_server_session_ttl_s", 1800.0))),
-        "idempotency_ttl_s": float(raw.get("alfworld_server_idempotency_ttl_s", 300.0)),
-        "reuse_workers": bool(raw.get("alfworld_server_reuse_envs", True)),
-        "reset_on_release": bool(raw.get("alfworld_server_reset_on_release", False)),
-        "worker_start_timeout_s": float(raw.get("alfworld_server_worker_start_timeout_s", 120.0)),
-        "worker_request_timeout_s": float(raw.get("alfworld_server_worker_request_timeout_s", 120.0)),
-        "prewarm_splits": list(raw.get("alfworld_server_prewarm_splits", ["train"])),
-        "honor_direct_game_file": bool(raw.get("alfworld_server_honor_direct_game_file", True)),
+        "pool_size": int(env_server.get("pool_size", 8)),
+        "acquire_timeout_s": float(env_server.get("acquire_timeout_s", 30.0)),
+        "lease_ttl_s": float(env_server.get("lease_ttl_s", 1800.0)),
+        "idempotency_ttl_s": float(env_server.get("idempotency_ttl_s", 300.0)),
+        "reuse_workers": bool(env_server.get("reuse_workers", True)),
+        "reset_on_release": bool(env_server.get("reset_on_release", False)),
+        "worker_start_timeout_s": float(env_server.get("worker_start_timeout_s", 120.0)),
+        "worker_request_timeout_s": float(env_server.get("worker_request_timeout_s", 120.0)),
+        "prewarm_splits": list(env_server.get("prewarm_splits", ["train"])),
+        "honor_direct_game_file": bool(env_server.get("honor_direct_game_file", True)),
     }
 
 
 def _default_alfworld_config(raw: dict) -> dict:
-    data_dir = str(raw.get("alfworld_data_dir") or "$ALFWORLD_DATA").rstrip("/")
-    max_steps = int(raw.get("max_turns", raw.get("alfworld_max_turns", 50)))
+    alfworld = raw.get("alfworld") if isinstance(raw.get("alfworld"), dict) else {}
+    data_dir = str(alfworld.get("data_dir") or "$ALFWORLD_DATA").rstrip("/")
+    max_steps = int(raw.get("max_turns", alfworld.get("max_turns", 50)))
     return {
         "dataset": {
-            "data_path": raw.get("alfworld_data_path") or f"{data_dir}/json_2.1.1/train",
-            "eval_id_data_path": raw.get("alfworld_eval_id_data_path") or f"{data_dir}/json_2.1.1/valid_seen",
-            "eval_ood_data_path": raw.get("alfworld_eval_ood_data_path") or f"{data_dir}/json_2.1.1/valid_unseen",
-            "num_train_games": int(raw.get("alfworld_num_train_games", -1)),
-            "num_eval_games": int(raw.get("alfworld_num_eval_games", -1)),
+            "data_path": alfworld.get("data_path") or f"{data_dir}/json_2.1.1/train",
+            "eval_id_data_path": alfworld.get("eval_id_data_path") or f"{data_dir}/json_2.1.1/valid_seen",
+            "eval_ood_data_path": alfworld.get("eval_ood_data_path") or f"{data_dir}/json_2.1.1/valid_unseen",
+            "num_train_games": int(alfworld.get("num_train_games", -1)),
+            "num_eval_games": int(alfworld.get("num_eval_games", -1)),
         },
         "env": {
-            "type": raw.get("alfworld_env_type") or "AlfredTWEnv",
-            "domain_randomization": bool(raw.get("alfworld_domain_randomization", False)),
-            "task_types": list(raw.get("alfworld_task_types", [1, 2, 3, 4, 5, 6])),
-            "expert_type": raw.get("alfworld_expert_type") or "handcoded",
-            "goal_desc_human_anns_prob": float(raw.get("alfworld_goal_desc_human_anns_prob", 0.0)),
+            "type": alfworld.get("env_type") or "AlfredTWEnv",
+            "domain_randomization": bool(alfworld.get("domain_randomization", False)),
+            "task_types": list(alfworld.get("task_types", [1, 2, 3, 4, 5, 6])),
+            "expert_type": alfworld.get("expert_type") or "handcoded",
+            "goal_desc_human_anns_prob": float(alfworld.get("goal_desc_human_anns_prob", 0.0)),
         },
-        "general": {"training_method": raw.get("alfworld_training_method") or "dqn"},
+        "general": {"training_method": alfworld.get("training_method") or "dqn"},
         "rl": {"training": {"max_nb_steps_per_episode": max_steps}},
         "dagger": {"training": {"max_nb_steps_per_episode": max_steps}},
         "logic": {
-            "domain": raw.get("alfworld_domain_path") or f"{data_dir}/logic/alfred.pddl",
-            "grammar": raw.get("alfworld_grammar_path") or f"{data_dir}/logic/alfred.twl2",
+            "domain": alfworld.get("domain_path") or f"{data_dir}/logic/alfred.pddl",
+            "grammar": alfworld.get("grammar_path") or f"{data_dir}/logic/alfred.twl2",
         },
     }
 
@@ -132,8 +145,9 @@ def _default_alfworld_config(raw: dict) -> dict:
 def _load_configs(path: str, overrides: dict | None = None) -> tuple[dict, dict]:
     raw = _safe_load_config(path)
     server_config = _server_config(raw)
-    if raw.get("alfworld_config_path"):
-        config = _safe_load_config(raw["alfworld_config_path"])
+    config_path = _deep_get(raw, "alfworld", "config_path")
+    if config_path:
+        config = _safe_load_config(config_path)
     elif "dataset" in raw and "env" in raw:
         config = raw
     else:

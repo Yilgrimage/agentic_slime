@@ -8,7 +8,7 @@ PACK_DIR=${PACK_DIR:-${MLF_NAS_ROOT}/packs}
 
 ENVS=${ENVS:-slime,alfworld,webshop}
 DATASETS=${DATASETS:-alfworld,webshop}
-MODELS=${MODELS:-qwen3-8b}
+MODELS=${MODELS:-none}
 SOURCES=${SOURCES:-webshop}
 FORCE=0
 CHECK_HASH=1
@@ -21,12 +21,13 @@ usage() {
   cat <<'EOF'
 Usage: materialize_node_runtime.sh [options]
 
-Materialize conda packs, data packs, models, and source mirrors on the current node.
+Materialize conda packs, data packs, and source mirrors on the current node.
+Models are intentionally read from NAS and are not copied to node-local disk.
 
 Options:
   --envs LIST        Comma list: slime,alfworld,webshop,tau2,appworld,none
   --data LIST        Comma list: alfworld,webshop,tau2,appworld,none
-  --models LIST      Comma list: qwen3-8b,none
+  --models none      Kept for compatibility. Model copying is disabled.
   --sources LIST     Comma list: webshop,tau2,appworld,none
   --force            Reinstall/copy even if local stamp matches
   --no-check-hash    Use existence checks only
@@ -56,6 +57,11 @@ while [ $# -gt 0 ]; do
 done
 
 mkdir -p "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}"
+
+if [ "${MODELS}" != "none" ]; then
+  echo "Model materialization is disabled. Use --models none and read model checkpoints from ${MLF_NAS_ROOT}/models." >&2
+  exit 2
+fi
 
 contains_item() {
   local list=$1
@@ -209,13 +215,6 @@ if [ "${SKIP_SOURCES}" -eq 0 ]; then
   fi
 fi
 
-if [ "${SKIP_MODELS}" -eq 0 ]; then
-  if contains_item "${MODELS}" "qwen3-8b"; then
-    copy_dir_once "${MLF_NAS_ROOT}/models/Qwen3-8B" "${MLF_LOCAL_ROOT}/models/Qwen3-8B"
-    copy_dir_once "${MLF_NAS_ROOT}/models/Qwen3-8B_torch_dist" "${MLF_LOCAL_ROOT}/models/Qwen3-8B_torch_dist"
-  fi
-fi
-
 if [ "${SKIP_DATA}" -eq 0 ]; then
   for data_name in alfworld webshop tau2 appworld; do
     if contains_item "${DATASETS}" "${data_name}"; then
@@ -229,8 +228,7 @@ fi
 
 echo "MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS}"
 echo "MLF_LOCAL_ROOT=${MLF_LOCAL_ROOT}"
-echo "QWEN3_8B=${MLF_LOCAL_ROOT}/models/Qwen3-8B"
-echo "QWEN3_8B_TORCH_DIST=${MLF_LOCAL_ROOT}/models/Qwen3-8B_torch_dist"
+echo "MODEL_ROOT=${MLF_NAS_ROOT}/models"
 echo "ALFWORLD_DATA=${MLF_LOCAL_ROOT}/data/alfworld"
 echo "WEBSHOP_DATA=${MLF_LOCAL_ROOT}/data/webshop"
 echo "WEBSHOP_LIB=${MLF_LOCAL_ROOT}/code/WebShop"

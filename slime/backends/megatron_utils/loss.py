@@ -568,6 +568,50 @@ def apply_opd_kl_to_advantages(
     rollout_data["opd_reverse_kl"] = reverse_kls
 
 
+def _zero_kl_from_loss_masks(
+    args: Namespace,
+    *,
+    loss_masks: list[torch.Tensor],
+    total_lengths: list[int],
+    response_lengths: list[int],
+    max_seq_lens: list[int] | None,
+) -> list[torch.Tensor]:
+    """Build zero KL tensors when no log-prob/value tensor is available.
+
+    This happens in the optimized actor path where the current forward pass
+    reuses freshly computed log-probs in the policy loss. With context
+    parallelism, the zero tensors must match each rank's response chunk.
+    """
+    cp_size = mpu.get_context_parallel_world_size()
+    if cp_size == 1:
+        return [torch.zeros_like(mask, dtype=torch.float32, device=mask.device) for mask in loss_masks]
+
+    kl: list[torch.Tensor] = []
+    for i, (loss_mask, total_len, response_len) in enumerate(
+        zip(loss_masks, total_lengths, response_lengths, strict=False)
+    ):
+        prompt_len = total_len - response_len
+        max_seq_len = max_seq_lens[i] if max_seq_lens is not None else None
+        _, _, _, token_offsets = get_logits_and_tokens_offset_with_cp(
+            total_len,
+            response_len,
+            args.qkv_format,
+            max_seq_len,
+        )
+        local_parts = []
+        for start, end in token_offsets:
+            res_start = max(0, start - prompt_len)
+            res_end = max(0, end - prompt_len)
+            if res_end > res_start:
+                local_parts.append(loss_mask[res_start:res_end])
+        if local_parts:
+            local_mask = torch.cat(local_parts, dim=0)
+        else:
+            local_mask = loss_mask.new_empty((0,))
+        kl.append(torch.zeros_like(local_mask, dtype=torch.float32, device=loss_mask.device))
+    return kl
+
+
 def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) -> None:
     """Compute advantages and returns in-place based on `args.advantage_estimator`.
 
@@ -612,7 +656,16 @@ def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) 
     if args.kl_coef == 0 or not log_probs:
         # when kl_coef is 0, we won't compute ref_log_prob
         xs = log_probs or rollout_log_probs or values
-        kl = [torch.zeros_like(x, dtype=torch.float32, device=x.device) for x in xs]
+        if xs is not None:
+            kl = [torch.zeros_like(x, dtype=torch.float32, device=x.device) for x in xs]
+        else:
+            kl = _zero_kl_from_loss_masks(
+                args,
+                loss_masks=loss_masks,
+                total_lengths=total_lengths,
+                response_lengths=response_lengths,
+                max_seq_lens=max_seq_lens,
+            )
     else:
         kl = [
             compute_approx_kl(

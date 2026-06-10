@@ -4,10 +4,11 @@ This example plugs ALFWorld into slime through `--custom-generate-function-path`
 One rollout sample is one ALFWorld episode. `rollout.py` now only
 declares ALFWorld-specific prompt/action/success behavior and delegates the
 common agent loop to `examples.agent_env.rollout`. Model action tokens use
-`loss_mask=1`; environment observations and formatting tokens use `loss_mask=0`.
-When `return_logprob: true`, model action tokens keep SGLang rollout logprobs
-and environment tokens get dummy `0.0` logprobs so OPD/GRPO tensor lengths stay
-aligned.
+`loss_mask=1`; environment observations use `loss_mask=0`. The shared rollout
+keeps semantic `messages` during interaction and lets slime's native
+`MultiTurnLossMaskGenerator` build final `tokens` and `loss_mask` at episode
+end. Rollout logprobs are not emitted by the env wrapper; the training backend
+recomputes old logprobs when needed.
 
 Directory layout:
 
@@ -85,27 +86,27 @@ decoupled:
   `train_async.py` plus fully-async rollout so slow ALFWorld episodes do not
   block the next training batch.
 
-Server-side knobs live in `alfworld_config.yaml` and `train_config.yaml`:
+Server-side knobs live in `train_config.yaml`:
 
 ```yaml
-alfworld_server_pool_size: 8
-alfworld_server_acquire_timeout_s: 30
-alfworld_server_session_ttl_s: 1800
-alfworld_server_lease_ttl_s: 1800
-alfworld_server_idempotency_ttl_s: 300
-alfworld_server_reuse_envs: true
-alfworld_server_reset_on_release: false
-alfworld_server_worker_start_timeout_s: 120
-alfworld_server_worker_request_timeout_s: 120
-alfworld_server_prewarm_splits:
-  - train
-alfworld_server_honor_direct_game_file: true
+env_server:
+  pool_size: 8
+  acquire_timeout_s: 30
+  lease_ttl_s: 1800
+  idempotency_ttl_s: 300
+  reuse_workers: true
+  reset_on_release: false
+  worker_start_timeout_s: 120
+  worker_request_timeout_s: 120
+  prewarm_splits:
+    - train
+  honor_direct_game_file: true
 ```
 
-When `alfworld_server_honor_direct_game_file: true`, direct-game reset retargets
+When `env_server.honor_direct_game_file: true`, direct-game reset retargets
 a pooled worker to a single `game.tw-pddl`, so `task_index -> game_file` mapping
 is exact while still reusing warm workers. Set it to `false` to use TextWorld's
-native seeded shuffle/reset sequence. Set `alfworld_server_reuse_envs: false` if
+native seeded shuffle/reset sequence. Set `env_server.reuse_workers: false` if
 you explicitly want dedicated envs.
 
 
@@ -141,7 +142,7 @@ Add these rollout arguments to a normal slime GRPO script:
 --custom-generate-function-path examples.agent_env.alfworld.rollout.generate \
 --custom-rollout-log-function-path examples.agent_env.alfworld.rollout.log_rollout_data \
 --custom-eval-rollout-log-function-path examples.agent_env.alfworld.rollout.log_eval_rollout_data \
---custom-config-path examples/agent_env/alfworld/alfworld_config.yaml \
+--custom-config-path examples/agent_env/alfworld/train_config.yaml \
 --advantage-estimator grpo
 ```
 
@@ -175,26 +176,25 @@ PYTHONPATH=/tmp/mlf-runtime/alfworld/pythonlibs/alfworld_text:. \
 
 ## Notes
 
-- `alfworld_direct_game_file: true` is the default path for training. It selects
+- `alfworld.direct_game_file: true` is the default path for training. It selects
   the episode file directly from the cached split wrapper.
 - The canonical dense reward channel is `metadata["token_rewards"]`, a
   `response_length`-aligned list. Format rewards/penalties are placed on the
   final generated token of each turn; the environment outcome reward is placed on
   the final token of the rollout. `sample.reward` is the sum of this list for
   compatibility with slime's current scalar GRPO reward path.
-- Generated `<think>...</think>` content is parsed for the current action. By
-  default it is not retained in the multi-turn training context; set
-  `keep_think_in_context: true` to keep the full assistant response. If
-  action-format parsing fails, only the last `format_error_context_tokens`
-  generated tokens are kept in context; the default is 20.
-- The default reward scale is `outcome_reward: 10.0` for success and
-  `format_penalty: -0.1` for malformed action output.
+- Generated assistant output is kept in the multi-turn training context as the
+  token sequence returned by rollout. The current action is parsed from that
+  generated turn, but invalid-format turns are not shortened or rewritten before
+  being appended to context.
+- The default reward scale is `reward.outcome: 10.0` for success and
+  `reward.format.invalid: -0.1` for malformed action output.
 - Per-rollout metadata is intentionally small: `actions`, `turn_count`,
   `format_ok`, `format_errors`, `env_score`, `env_success`, `env_reward`, and an
   `alfworld` block for task/server identifiers.
 - `examples.agent_env.alfworld.rollout` aggregates metadata into slime's tracking path,
   including `alfworld/format_error_rate`, `alfworld/success_rate`, and eval
   variants under `eval/<dataset>/...`.
-- Set `restrict_to_admissible: true` only if you want invalid model
+- Set `action.restrict_to_available: true` only if you want invalid model
   actions rewritten before `env.step()`.
 - Partial rollout is intentionally disabled for this adapter.

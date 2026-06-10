@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
+
 def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     if not samples:
         return {}
 
     turn_counts = []
     format_error_counts = []
+    max_response_tokens_hit_counts = []
     success_count = 0
     env_rewards = []
     truncated_reasons: dict[str, int] = {}
@@ -16,8 +18,10 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         metadata = sample.metadata or {}
         turn_count = int(metadata.get("turn_count", 0) or 0)
         format_errors = int(metadata.get("format_errors", 0) or 0)
+        max_response_tokens_hits = int(metadata.get("max_response_tokens_hits", 0) or 0)
         turn_counts.append(turn_count)
         format_error_counts.append(format_errors)
+        max_response_tokens_hit_counts.append(max_response_tokens_hits)
         success_count += int(bool(metadata.get("env_success", False)))
         if "env_reward" in metadata:
             env_rewards.append(float(metadata["env_reward"]))
@@ -30,6 +34,9 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     metrics = {
         f"{prefix}/format_error_rate": total_format_errors / total_turns if total_turns else 0.0,
         f"{prefix}/format_error_per_sample": total_format_errors / len(samples),
+        f"{prefix}/max_response_tokens_hit_rate": sum(1 for count in max_response_tokens_hit_counts if count > 0)
+        / len(samples),
+        f"{prefix}/max_response_tokens_hits_per_sample": sum(max_response_tokens_hit_counts) / len(samples),
         f"{prefix}/success_rate": success_count / len(samples),
         f"{prefix}/turn_count_mean": total_turns / len(samples),
     }

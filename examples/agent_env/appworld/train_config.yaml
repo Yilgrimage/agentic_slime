@@ -1,3 +1,33 @@
+task:
+  split: train
+max_turns: 40
+
+timeouts:
+  policy_s: 120
+  env_request_s: 660
+
+interaction:
+  mode: text_action
+  text_action:
+    tag: code
+
+generation:
+  stop:
+    - "<|im_end|>"
+
+observation:
+  include_actions: false
+
+action:
+  legacy_text_as_code: false
+
+reward:
+  source: score
+  outcome: 10.0
+  format:
+    valid: 0.0
+    invalid: -0.1
+
 env_server:
   pool_size: 4
   prewarm_splits: ["train"]
@@ -6,10 +36,8 @@ env_server:
   worker_request_timeout_s: 180
 
 appworld:
-  # Root should normally be /tmp/mlf-runtime/data/appworld after materialization.
   root: ${APPWORLD_ROOT}
   dataset_name: train
-  # AppWorld commonly uses dev/test_normal/test_challenge for evaluation, depending on release data.
   eval_dataset_name: dev
   difficulty: null
   num_tasks_per_scenario: null
@@ -19,11 +47,3 @@ appworld:
   raise_on_failure: false
   experiment_prefix: slime_agent_env
   include_api_overview: true
-
-max_turns: 40
-action_max_tokens: 1024
-format_error_context_tokens: 0
-generation_stop:
-  - "<|im_end|>"
-policy_timeout_s: 120
-env_request_timeout_s: 660

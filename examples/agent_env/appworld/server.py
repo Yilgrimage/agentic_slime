@@ -249,10 +249,13 @@ class AppWorldBackend:
             observation = self._finish(arguments)
             self.done = True
         elif name in {"format_error", "invalid_format"}:
-            observation = "Invalid response format. Respond with exactly one <tool_call> containing <name>execute</name> or <name>finish</name> and JSON <arguments>."
+            observation = (
+                "Invalid response format. Respond with exactly one <code>...</code> block "
+                "containing Python code to execute."
+            )
             info["format_error"] = True
         else:
-            observation = f"Unknown AppWorld tool `{name}`. Use `execute` with {{\"code\": \"...\"}} or `finish`."
+            observation = f"Unknown AppWorld tool `{name}`. Respond with a <code>...</code> block that calls AppWorld APIs."
             info["tool_error"] = observation
 
         if not self.done:

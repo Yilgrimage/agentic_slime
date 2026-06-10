@@ -1,24 +1,29 @@
-# WebShop config for Qwen3-8B GRPO training.
-wandb_project: agentic-slime
-wandb_group: qwen3-8b-webshop-grpo
-wandb_team: yilgrimage-bytedance
-
-env_split: train
+task:
+  split: train
 max_turns: 15
-action_max_tokens: 512
-format_error_context_tokens: 20
-keep_think_in_context: true
-policy_timeout_s: 120
-env_request_timeout_s: 660
-include_available_actions: true
-restrict_to_available: false
-invalid_action_fallback: model
-reward_source: score
-outcome_reward: 10.0
-return_logprob: true
-generation_stop: null
-format_reward: 0.0
-format_penalty: -0.1
+
+timeouts:
+  policy_s: 120
+  env_request_s: 660
+
+interaction:
+  mode: text_action
+  text_action:
+    tag: action
+
+observation:
+  include_actions: true
+
+action:
+  restrict_to_available: false
+  invalid_fallback: model
+
+reward:
+  source: score
+  outcome: 10.0
+  format:
+    valid: 0.0
+    invalid: -0.1
 
 webshop:
   env_id: WebAgentTextEnv-v0

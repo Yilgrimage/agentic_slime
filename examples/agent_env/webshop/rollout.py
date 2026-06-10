@@ -5,13 +5,10 @@ from typing import Any
 from slime.utils.types import Sample
 
 from examples.agent_env.metrics import log_eval_rollout_data_for_env, log_rollout_data_for_env
-from examples.agent_env.rollout import AgentEnvSpec, cfg, generate_agent_rollout, metadata
+from examples.agent_env.rollout import AgentEnvSpec, cfg_path, generate_agent_rollout, metadata
 
 DEFAULT_PROMPT = """You are an expert shopping agent in WebShop.
 At each turn, read the current webpage observation and available actions, then respond in exactly this format:
-<think>
-Briefly reason about the shopping instruction, current page, and best next action.
-</think>
 <action>one valid action</action>
 
 Actions must use WebShop syntax:
@@ -43,7 +40,7 @@ def _format_actions(actions: list[str]) -> str:
 
 def _observation_text(args: Any, observation: str, info: dict) -> str:
     text = f"Observation:\n{observation.strip()}\n"
-    if cfg(args, "include_available_actions", None, True):
+    if cfg_path(args, "observation.include_actions", True):
         text += _format_actions(_available_actions(info))
     return text
 
@@ -53,17 +50,17 @@ def _initial_prompt(args: Any, sample: Sample, observation: str, info: dict) -> 
     available = _format_actions(_available_actions(info)).strip()
     if "{observation}" in base or "{available_actions}" in base:
         return base.format(observation=observation.strip(), available_actions=available)
-    return f"{base}\n\n{_observation_text(args, observation, info)}Response:"
+    return f"{base}\n\n{_observation_text(args, observation, info)}"
 
 
 def _choose_action(args: Any, action: str, actions: list[str], sample: Sample) -> str:
-    if not cfg(args, "restrict_to_available", None, False) or not actions:
+    if not cfg_path(args, "action.restrict_to_available", False) or not actions:
         return action
     norm = {cmd.lower(): cmd for cmd in actions}
     if action.lower() in norm:
         return norm[action.lower()]
     metadata(sample).setdefault("invalid_actions", []).append(action)
-    fallback = cfg(args, "invalid_action_fallback", None, "model")
+    fallback = cfg_path(args, "action.invalid_fallback", "model")
     if fallback == "first_available":
         return actions[0]
     return action
@@ -92,8 +89,9 @@ WEBSHOP_SPEC = AgentEnvSpec(
     success=_success,
     env_metadata=_env_metadata,
     default_max_turns=15,
-    default_action_max_tokens=512,
+    default_response_max_tokens=512,
     default_reward_source="score",
+    default_interaction_mode="text_action",
 )
 
 

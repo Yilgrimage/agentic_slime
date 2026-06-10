@@ -1,0 +1,2 @@
+# Dedicated tau2 aux inference node. Do not use this file as a Ray/env-server nodes file.
+fdbd:dc03:9:530::66

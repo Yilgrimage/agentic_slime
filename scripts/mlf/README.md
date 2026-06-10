@@ -4,9 +4,10 @@ These scripts keep code, reusable packs, and node-local runtime state separate.
 
 - NAS root: `/mnt/bn/jixf-nas-lq/mlf`
 - reusable packs: `${MLF_NAS_ROOT}/packs`
-- reusable source/data/model backups: `${MLF_NAS_ROOT}/{code,data,models}`
+- reusable source/data/model assets: `${MLF_NAS_ROOT}/{code,data,models}`
 - node-local envs: `/tmp/mlf-envs`
-- node-local source/data/model runtime: `/tmp/mlf-runtime`
+- node-local source/data runtime: `/tmp/mlf-runtime`
+- model checkpoints stay on NAS and are read from `${MLF_NAS_ROOT}/models`
 
 Normal pack refresh is:
 
@@ -28,7 +29,7 @@ bash scripts/mlf/prepare_agentic_runtime.sh \
   --local-only \
   --envs slime,alfworld,webshop \
   --data alfworld,webshop \
-  --models qwen3-8b
+  --models none
 ```
 
 Prepare only the lightweight text/tool-use envs:
@@ -50,7 +51,7 @@ bash scripts/mlf/prepare_agentic_runtime.sh \
   --nodes configs/nodes/agent_env_4x8.txt \
   --envs slime,webshop \
   --data webshop \
-  --models qwen3-8b
+  --models none
 ```
 
 `prepare_agentic_runtime.sh` calls `materialize_node_runtime.sh` on each target
@@ -84,7 +85,7 @@ Python packages during normal training startup.
 ## Materialization checks
 
 Conda env packs are installed under `/tmp/mlf-envs/{slime,alfworld,webshop,tau2,appworld}`.
-Data/source/model runtime assets are copied under `/tmp/mlf-runtime`.
+Data/source runtime assets are copied under `/tmp/mlf-runtime`.
 
 The materializer keeps simple local stamps for conda and data packs:
 
@@ -93,8 +94,9 @@ The materializer keeps simple local stamps for conda and data packs:
 - `--force` removes and recreates selected targets even when hashes match.
 - `--no-check-hash` falls back to existence checks only.
 
-Model and source mirrors currently use existence checks unless `--force` is
-given.
+Source mirrors currently use existence checks unless `--force` is given.
+Model mirroring is disabled; pass `--models none` and point training scripts at
+`${MLF_NAS_ROOT}/models`.
 
 Data packs are deliberately separate from conda packs:
 

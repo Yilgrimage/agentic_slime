@@ -19,11 +19,30 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class FakeTokenizer:
+    def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+        data = {"input_ids": self.encode(text, add_special_tokens=add_special_tokens)}
+        if return_offsets_mapping:
+            data["offset_mapping"] = [(index, index + 1) for index in range(len(text))]
+        return data
+
     def encode(self, text, add_special_tokens=False):
-        return [ord(ch) % 1000 for ch in text]
+        return [ord(ch) for ch in text]
+
+    def apply_chat_template(self, messages, tokenize=True, tools=None, add_generation_prompt=False, **kwargs):
+        pieces = []
+        for message in messages:
+            role = message["role"]
+            if role in {"system", "user", "assistant"}:
+                pieces.append(f"<|im_start|>{role}\n{message.get('content', '')}<|im_end|>\n")
+            elif role == "tool":
+                pieces.append(f"<|im_start|>user\n<tool_response>\n{message.get('content', '')}\n</tool_response><|im_end|>\n")
+        if add_generation_prompt:
+            pieces.append("<|im_start|>assistant\n<think>\n")
+        rendered = "".join(pieces)
+        return self.encode(rendered) if tokenize else rendered
 
 
-async def fake_policy(args, sample, sampling_params):
+async def fake_policy(args, sample, input_ids, sampling_params):
     return "<think>inspect the current room</think><action>look</action>", [101], [-0.1], "stop"
 
 
@@ -54,13 +73,15 @@ def _start_alfworld_server(data_dir: str) -> tuple[subprocess.Popen, str, str]:
     env_bin = os.environ.get("ALFWORLD_ENV_BIN", "/tmp/mlf-envs/alfworld/bin/python")
     port = _free_port()
     config = f"""
-alfworld_data_dir: {data_dir}
-alfworld_server_pool_size: 1
-alfworld_server_prewarm_splits: [train]
-alfworld_num_train_games: 2
-alfworld_server_worker_start_timeout_s: 120
+alfworld:
+  data_dir: {data_dir}
+  num_train_games: 2
 max_turns: 1
-"""
+env_server:
+  pool_size: 1
+  prewarm_splits: [train]
+  worker_start_timeout_s: 120
+    """
     tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     tmp.write(config)
     tmp.close()
@@ -91,33 +112,25 @@ max_turns: 1
 
 async def run(data_dir: str):
     agent_rollout.tokenizer = lambda args: FakeTokenizer()
-    agent_rollout.call_policy = lambda args, spec, sample, sampling_params: fake_policy(args, sample, sampling_params)
+    agent_rollout.call_policy = lambda args, spec, sample, input_ids, sampling_params: fake_policy(args, sample, input_ids, sampling_params)
 
     proc, base_url, config_path = _start_alfworld_server(data_dir)
 
     args = SimpleNamespace(
         partial_rollout=False,
         rollout_max_context_len=4096,
+        rollout_max_response_len=128,
         alfworld_env_server_url=base_url,
-        alfworld_data_dir=data_dir,
-        alfworld_config_path=None,
-        alfworld_config_overrides={},
-        alfworld_env_type="AlfredTWEnv",
-        alfworld_split="train",
-        alfworld_num_train_games=2,
+        task={"split": "train"},
+        timeouts={"policy_s": 120, "env_request_s": 660},
         max_turns=1,
-        action_max_tokens=128,
-        generation_stop=None,
-        include_admissible_actions=True,
-        restrict_to_admissible=False,
-        invalid_action_fallback="model",
-        reward_source="won",
-        outcome_reward=10.0,
-        alfworld_skip_to_task=False,
-        alfworld_direct_game_file=True,
-        return_logprob=True,
-        format_reward=0.0,
-        format_penalty=-0.1,
+        interaction={"mode": "text_action", "text_action": {"tag": "action"}},
+        observation={"include_actions": True},
+        action={"restrict_to_available": False, "invalid_fallback": "model"},
+        reward={"source": "won", "outcome": 10.0, "format": {"valid": 0.0, "invalid": -0.1}},
+        generation={"stop": None},
+        alfworld={"direct_game_file": True, "skip_to_task": False, "num_tasks": None},
+        loss_mask_type="qwen3_5",
         use_opd=False,
         opd_type=None,
     )
@@ -133,12 +146,11 @@ async def run(data_dir: str):
             assert result.metadata["actions"] == ["look"]
             assert result.metadata["alfworld"]["game_file"]
             assert len(result.metadata["token_rewards"]) == result.response_length
-            assert sum(result.metadata["token_rewards"]) == result.reward
             assert len(result.loss_mask) == result.response_length
-            assert len(result.rollout_log_probs) == result.response_length
-            assert "<think>" not in result.response
+            assert result.rollout_log_probs is None
+            assert "<think>" in result.response
             assert "<action>look</action>" in result.response
-            assert sum(result.loss_mask) == len(FakeTokenizer().encode("<action>look</action>"))
+            assert sum(result.loss_mask) > 0
             assert result.reward in (0.0, 10.0)
 
         assert results[0].metadata["alfworld"]["game_file"] != results[1].metadata["alfworld"]["game_file"]

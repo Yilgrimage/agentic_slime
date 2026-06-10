@@ -9,8 +9,8 @@ Shared modules:
 - `router.py`: generic multi-worker lease router.
 - `server.py`: generic process-pool lease server and HTTP protocol.
 - `rollout.py`: generic Slime custom-generate agent loop, including policy
-  calls, `<think>/<action>` parsing, context trimming, env HTTP calls, token
-  reward alignment, and lease cleanup.
+  calls, text-action/tool-call parsing, context accounting, env HTTP calls,
+  token reward alignment, and lease cleanup.
 - `metrics.py`: generic rollout/eval metric aggregation for Slime
   logging.
 

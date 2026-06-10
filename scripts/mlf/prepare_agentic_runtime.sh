@@ -9,11 +9,10 @@ ALL_NODES=0
 ORCHESTRATOR=${ORCHESTRATOR:-head}
 ENVS=${ENVS:-slime,alfworld,webshop}
 DATASETS=${DATASETS:-alfworld,webshop}
-MODELS=${MODELS:-qwen3-8b}
+MODELS=${MODELS:-none}
 SOURCES=${SOURCES:-webshop}
 FORCE=0
 CHECK_HASH=1
-SERIAL=0
 DRY_RUN=0
 POLL_INTERVAL=${POLL_INTERVAL:-15}
 SSH_CONNECT_TIMEOUT=${SSH_CONNECT_TIMEOUT:-10}
@@ -41,11 +40,10 @@ Options:
   --nodes FILE        Node list, one host/IP per line; comments allowed
   --envs LIST         Comma list: slime,alfworld,webshop,tau2,appworld,none
   --data LIST         Comma list: alfworld,webshop,tau2,appworld,none
-  --models LIST       Comma list: qwen3-8b,none
+  --models none       Kept for compatibility. Model copying is disabled; training reads models from NAS.
   --sources LIST      Comma list: webshop,tau2,appworld,none
   --force             Reinstall/copy even if local stamp matches
   --no-check-hash     Use existence checks only
-  --serial            Prepare nodes one by one instead of parallel tmux jobs
   --dry-run           Print actions only
   -h, --help
 
@@ -67,7 +65,6 @@ while [ $# -gt 0 ]; do
     --sources) SOURCES=$2; shift 2 ;;
     --force) FORCE=1; shift ;;
     --no-check-hash) CHECK_HASH=0; shift ;;
-    --serial) SERIAL=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -82,6 +79,11 @@ materialize_args=(
 )
 [ "${FORCE}" -eq 0 ] || materialize_args+=(--force)
 [ "${CHECK_HASH}" -eq 1 ] || materialize_args+=(--no-check-hash)
+
+if [ "${MODELS}" != "none" ]; then
+  echo "Model materialization is disabled. Use --models none and read model checkpoints from ${MLF_NAS_ROOT}/models." >&2
+  exit 2
+fi
 
 run_local() {
   cd "${REPO_DIR}"
@@ -279,7 +281,6 @@ submit_head_prepare() {
     printf '%q ' --all-nodes --orchestrator local --nodes "${NODES_FILE}" --envs "${ENVS}" --data "${DATASETS}" --models "${MODELS}" --sources "${SOURCES}"
     [ "${FORCE}" -eq 0 ] || printf '%q ' --force
     [ "${CHECK_HASH}" -eq 1 ] || printf '%q ' --no-check-hash
-    [ "${SERIAL}" -eq 0 ] || printf '%q ' --serial
   )
   local wrapped
   wrapped=$(printf 'rm -f /tmp/mlf_prepare_head.exit; tmux kill-session -t mlf_prepare_head 2>/dev/null || true; tmux new-session -d -s mlf_prepare_head %q; tmux ls 2>/dev/null | grep mlf_prepare_head' "bash -lc '${remote_cmd} > /tmp/mlf_prepare_head.log 2>&1; echo \$? > /tmp/mlf_prepare_head.exit'")
@@ -320,18 +321,12 @@ if [ "${ALL_NODES}" -eq 1 ]; then
     SSH_JUMP=${SSH_JUMP_ON_HEAD:-}
     SSH_KEY=${SSH_KEY_ON_HEAD:-/home/${SSH_USER}/.ssh/byte_id_rsa}
   fi
-  if [ "${SERIAL}" -eq 1 ]; then
-    for host in $(read_nodes "${NODES_FILE}"); do
-      run_remote "${host}"
-    done
-  else
-    hosts=()
-    read_nodes_array "${NODES_FILE}"
-    for host in "${hosts[@]}"; do
-      start_remote_prepare "${host}"
-    done
-    wait_remote_prepares "${hosts[@]}"
-  fi
+  hosts=()
+  read_nodes_array "${NODES_FILE}"
+  for host in "${hosts[@]}"; do
+    start_remote_prepare "${host}"
+  done
+  wait_remote_prepares "${hosts[@]}"
   exit 0
 fi
 

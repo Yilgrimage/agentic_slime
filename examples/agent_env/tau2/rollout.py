@@ -1,38 +1,23 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from slime.utils.types import Sample
 
 from examples.agent_env.metrics import log_eval_rollout_data_for_env, log_rollout_data_for_env
-from examples.agent_env.rollout import AgentEnvSpec, cfg, generate_agent_rollout
+from examples.agent_env.rollout import AgentEnvSpec, cfg_path, generate_agent_rollout
 
 DEFAULT_PROMPT = """You are an expert task-solving assistant in tau2.
-At each turn, inspect the task, policy, and tool results, then respond in exactly this format:
-<think>
-Briefly reason about the state and the next tool call.
-</think>
-<tool_call>
-<name>tool_name</name>
-<arguments>{"argument_name": "argument_value"}</arguments>
-</tool_call>
-
-Use domain tools when you need information or need to mutate the environment. When the task is complete, call:
-<tool_call>
-<name>respond</name>
-<arguments>{"message": "concise final response"}</arguments>
-</tool_call>"""
+Use the available tools to inspect information and mutate the environment according to the domain policy.
+Send a normal assistant message when you need to talk to the user. Make a tool call when you need to inspect or update the environment.
+Do not send a natural-language message and make a tool call in the same turn."""
 
 
 def _available_actions(info: dict) -> list[str]:
     tools = info.get("tools") if info else None
-    finish_tools = info.get("finish_tools") if info else None
     actions = []
     if isinstance(tools, list):
         actions.extend(str(tool) for tool in tools)
-    if isinstance(finish_tools, list):
-        actions.extend(str(tool) for tool in finish_tools)
     return actions
 
 
@@ -44,7 +29,7 @@ def _format_tools(actions: list[str]) -> str:
 
 def _observation_text(args: Any, observation: str, info: dict) -> str:
     text = f"Observation:\n{observation.strip()}\n"
-    if cfg(args, "include_available_actions", None, True):
+    if cfg_path(args, "observation.include_actions", True):
         text += _format_tools(_available_actions(info))
     return text
 
@@ -54,25 +39,23 @@ def _initial_prompt(args: Any, sample: Sample, observation: str, info: dict) -> 
     tools = _format_tools(_available_actions(info)).strip()
     if "{observation}" in base or "{available_tools}" in base:
         return base.format(observation=observation.strip(), available_tools=tools)
-    return f"{base}\n\n{_observation_text(args, observation, info)}Response:"
+    return f"{base}\n\n{_observation_text(args, observation, info)}"
 
 
 def _choose_action(args: Any, action: Any, actions: list[str], sample: Sample) -> Any:
     if isinstance(action, dict):
         name = str(action.get("name") or "")
-        if not cfg(args, "restrict_to_available", None, False) or name in actions or not actions:
+        if not cfg_path(args, "action.restrict_to_available", False) or name in actions or not actions:
             return action
-        return {"type": "tool_call", "name": "respond", "arguments": {"message": f"Unable to use unavailable tool: {name}"}}
+        return {"type": "assistant_message", "content": f"Unable to use unavailable tool: {name}"}
     text = str(action)
-    if not cfg(args, "legacy_text_as_respond", None, True):
-        return {"type": "tool_call", "name": text, "arguments": {}}
-    return {"type": "tool_call", "name": "respond", "arguments": {"message": text}}
+    return {"type": "assistant_message", "content": text}
 
 
 def _success(info: dict, score: float) -> bool:
     if info and "success" in info:
         return bool(info["success"])
-    return score > 0
+    return score >= 1.0
 
 
 def _env_metadata(reset: dict, task_index: int, split: str, lease_id: str | None) -> dict:
@@ -100,8 +83,10 @@ TAU2_SPEC = AgentEnvSpec(
     success=_success,
     env_metadata=_env_metadata,
     default_max_turns=20,
-    default_action_max_tokens=512,
+    default_response_max_tokens=512,
     default_reward_source="score",
+    default_interaction_mode="tool_call",
+    allow_assistant_message=True,
 )
 
 
@@ -115,10 +100,3 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_t
 
 def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool:
     return log_eval_rollout_data_for_env("tau2", rollout_id, args, data, extra_metrics)
-
-
-def tool_call(name: str, arguments: dict[str, Any]) -> str:
-    return "<tool_call>\n<name>{}</name>\n<arguments>{}</arguments>\n</tool_call>".format(
-        name,
-        json.dumps(arguments, ensure_ascii=False),
-    )

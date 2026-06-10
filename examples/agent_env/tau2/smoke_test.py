@@ -28,9 +28,8 @@ def main() -> None:
     step = backend.step(
         {
             "action": {
-                "type": "tool_call",
-                "name": "respond",
-                "arguments": {"message": "Smoke test final response."},
+                "type": "assistant_message",
+                "content": "Smoke test final response.",
             }
         }
     )
