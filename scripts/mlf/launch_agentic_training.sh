@@ -14,8 +14,18 @@ export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,${NO_PROXY:-}"
 if [ -f "${WANDB_SECRET_FILE}" ]; then
   # Expected keys: WANDB_API_KEY, optionally WANDB_BASE_URL/WANDB_ENTITY.
   # Keep this file out of git and chmod it to 600 on NAS.
+  case "$-" in
+    *x*) _restore_xtrace=1; set +x ;;
+    *) _restore_xtrace=0 ;;
+  esac
+  set -a
   # shellcheck disable=SC1090
   source "${WANDB_SECRET_FILE}"
+  set +a
+  if [ "${_restore_xtrace}" = "1" ]; then
+    set -x
+  fi
+  unset _restore_xtrace
 fi
 
 ENV_NAME=webshop

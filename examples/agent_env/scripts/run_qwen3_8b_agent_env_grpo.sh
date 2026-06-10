@@ -289,9 +289,6 @@ if [ "${ENABLE_WANDB:-0}" = "1" ] || [ "${USE_WANDB:-0}" = "1" ]; then
      --wandb-dir "${WANDB_DIR}"
      --disable-wandb-random-suffix
   )
-  if [ -n "${WANDB_API_KEY:-}" ]; then
-    WANDB_ARGS+=(--wandb-key "${WANDB_API_KEY}")
-  fi
   if [ -n "${WANDB_BASE_URL:-}" ]; then
     WANDB_ARGS+=(--wandb-host "${WANDB_BASE_URL}")
   fi
@@ -311,7 +308,7 @@ keys = [
     "TAU2_DATA_DIR", "TAU2_AREAL_ROOT", "APPWORLD_ROOT", "RUN_ROOT", "LOG_DIR", "WANDB_DIR",
     "AGENT_ENV_ROLLOUT_DUMP_N", "AGENT_ENV_ROLLOUT_DUMP_TRACE",
     "LITELLM_LOCAL_MODEL_COST_MAP",
-    "WANDB_API_KEY", "WANDB_BASE_URL", "WANDB_ENTITY", "WANDB_HTTP_TIMEOUT", "WANDB_INIT_TIMEOUT",
+    "WANDB_BASE_URL", "WANDB_ENTITY", "WANDB_HTTP_TIMEOUT", "WANDB_INIT_TIMEOUT",
 ]
 print(json.dumps({key: os.environ[key] for key in keys if key in os.environ and os.environ[key] != ""}))
 PYH
