@@ -29,6 +29,7 @@ reward:
 
 env_server:
   pool_size: 32
+  acquire_timeout_s: 1
   prewarm_splits: ["train"]
   shared_pool: true
   worker_start_timeout_s: 300

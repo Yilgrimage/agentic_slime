@@ -210,6 +210,65 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _is_env_infra_exception(exc: BaseException) -> bool:
+    """Classify transport/capacity failures separately from model behavior.
+
+    These failures mean the rollout did not actually run in the environment,
+    so treating them as zero-reward policy samples corrupts GRPO groups.
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    exc_name = type(exc).__name__.lower()
+    text = repr(exc).lower()
+    markers = (
+        "capacityerror",
+        "connecterror",
+        "connecttimeout",
+        "httpstatuserror",
+        "no env worker could allocate",
+        "pooltimeout",
+        "readtimeout",
+        "remoteprotocolerror",
+        "service unavailable",
+        "timed out",
+        "worker available",
+    )
+    return any(marker in exc_name or marker in text for marker in markers)
+
+
+def _record_rollout_infra_failure(
+    args: Any,
+    spec: AgentEnvSpec,
+    sample: Sample,
+    phase: str,
+    exc: BaseException,
+    tok: Any | None,
+) -> Sample:
+    sample_metadata = metadata(sample)
+    sample_metadata["infra_error"] = {
+        "phase": phase,
+        "type": type(exc).__name__,
+        "message": str(exc),
+    }
+    sample_metadata.setdefault("error", repr(exc))
+    sample.reward = 0.0
+    sample.remove_sample = True
+    # Allocation failures are pure capacity/backpressure events; in fully async
+    # mode ABORTED groups are requeued instead of being shipped to training.
+    sample.status = Sample.Status.ABORTED if phase == "allocate" else Sample.Status.FAILED
+    ensure_rollout_shapes(args, sample, spec)
+    dump_completed_sample_case(args, spec, sample, tok)
+    logger.warning(
+        "%s rollout infra failure phase=%s status=%s remove_sample=%s error=%r",
+        spec.name,
+        phase,
+        sample.status.value,
+        sample.remove_sample,
+        exc,
+    )
+    return sample
+
+
 def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, tok: Any | None = None) -> None:
     limit = int(_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_N", "0") or 0)
     if limit <= 0:
@@ -1314,10 +1373,16 @@ async def generate_agent_rollout(
     lease_id = None
     sample_metadata = metadata(sample)
     split = sample_metadata.get("split") or cfg_path(args, "task.split", spec.default_split)
+    phase = "start"
+    if sample.status == Sample.Status.ABORTED:
+        sample.status = Sample.Status.PENDING
+    sample.remove_sample = False
 
     try:
+        phase = "allocate"
         lease = await allocate_env(args, spec, sample)
         lease_id = lease["lease_id"]
+        phase = "reset"
         reset = await reset_env(args, spec, sample, lease_id, reset_payload)
         observation = str(reset.get("observation", ""))
         info = reset.get("info") or {}
@@ -1372,6 +1437,7 @@ async def generate_agent_rollout(
                 sample_metadata["truncated_reason"] = "context_limit"
                 break
 
+            phase = "policy"
             response_text, _response_token_ids, _response_log_probs, finish_type = await call_policy(
                 args,
                 spec,
@@ -1474,6 +1540,7 @@ async def generate_agent_rollout(
             if turn_trace is not None:
                 turn_trace["token_count_after_assistant"] = len(ledger.tokens)
 
+            phase = "step"
             step = await step_env(args, spec, lease_id, action)
             observation = str(step.get("observation", ""))
             final_score = float(step.get("score", 0.0) or 0.0)
@@ -1569,6 +1636,8 @@ async def generate_agent_rollout(
         ensure_rollout_shapes(args, sample, spec)
         return sample
     except Exception as exc:
+        if phase in {"allocate", "reset", "step"} and _is_env_infra_exception(exc):
+            return _record_rollout_infra_failure(args, spec, sample, phase, exc, tok)
         sample.status = Sample.Status.FAILED
         sample.reward = 0.0
         ensure_rollout_shapes(args, sample, spec)
