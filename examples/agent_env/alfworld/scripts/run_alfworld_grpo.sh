@@ -8,4 +8,4 @@ export ENV_SERVER_URL_VAR=ALFWORLD_ENV_SERVER_URL
 export DATA_DIR=${DATA_DIR:-${MLF_LOCAL_ROOT:-/tmp/mlf-runtime}/data/alfworld}
 export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR:-/mnt/bn/jixf-nas-lq/mlf/code/slime}/examples/agent_env/alfworld/prompt_data.py}
 
-exec bash "${REPO_DIR:-/mnt/bn/jixf-nas-lq/mlf/code/slime}/examples/agent_env/scripts/run_qwen3_8b_agent_env_grpo.sh"
+exec bash "${REPO_DIR:-/mnt/bn/jixf-nas-lq/mlf/code/slime}/examples/agent_env/scripts/run_agent_env_grpo.sh"

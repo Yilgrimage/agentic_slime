@@ -1,0 +1,16 @@
+diff --git a/python/sglang/srt/configs/qwen3_5.py b/python/sglang/srt/configs/qwen3_5.py
+index 2ac42e2..0000000 100644
+--- a/python/sglang/srt/configs/qwen3_5.py
++++ b/python/sglang/srt/configs/qwen3_5.py
+@@ -113,6 +113,11 @@ class Qwen3_5MoeVisionConfig(Qwen3_5VisionConfig):
+ class Qwen3_5MoeTextConfig(Qwen3_5TextConfig):
+     model_type = "qwen3_5_moe_text"
+ 
++    def __init__(self, norm_topk_prob=True, **kwargs):
++        super().__init__(**kwargs)
++        self.norm_topk_prob = norm_topk_prob
++
++
+ 
+ class Qwen3_5MoeConfig(Qwen3_5Config):
+     model_type = "qwen3_5_moe"

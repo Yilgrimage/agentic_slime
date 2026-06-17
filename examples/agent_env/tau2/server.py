@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import inspect
 import urllib.error
 import urllib.request
@@ -52,6 +54,21 @@ def _env_path(value: Any, envvar: str) -> str:
     return os.path.expandvars(text)
 
 
+def _csv_values(value: Any) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _stable_int(text: str) -> int:
+    return int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "big")
+
+
+def _worker_route_seed(worker_id: str) -> int:
+    match = re.search(r"(?:^|[-_])(\d+)$", worker_id)
+    if match:
+        return int(match.group(1))
+    return _stable_int(worker_id)
+
+
 def _environment_config(raw: dict) -> dict:
     data_dir = _env_path(_deep_get(raw, "tau2", "data_dir", os.environ.get("TAU2_DATA_DIR", "")), "TAU2_DATA_DIR")
     return {
@@ -66,6 +83,7 @@ def _environment_config(raw: dict) -> dict:
         "include_tools": bool(_deep_get(raw, "tau2", "include_tools", True)),
         "evaluation_type": str(_deep_get(raw, "tau2", "evaluation_type", "action")),
         "user_sim_enabled": bool(_deep_get(raw, "tau2", "user_sim_enabled", False)),
+        "user_model_provider": str(_deep_get(raw, "tau2", "user_model_provider", "sglang")),
         "user_model": _env_path(_deep_get(raw, "tau2", "user_model", "local-user-sim"), "TAU2_USER_MODEL") or "local-user-sim",
         "user_model_base_url": _env_path(_deep_get(raw, "tau2", "user_model_base_url", ""), "TAU2_USER_MODEL_BASE_URL"),
         "user_model_api_key": _env_path(_deep_get(raw, "tau2", "user_model_api_key", ""), "TAU2_USER_MODEL_API_KEY"),
@@ -76,7 +94,9 @@ def _environment_config(raw: dict) -> dict:
         "user_model_top_p": float(_deep_get(raw, "tau2", "user_model_top_p", 1.0)),
         "user_model_enable_thinking": bool(_deep_get(raw, "tau2", "user_model_enable_thinking", False)),
         "user_model_separate_reasoning": bool(_deep_get(raw, "tau2", "user_model_separate_reasoning", True)),
-        "max_user_tool_rounds": int(_deep_get(raw, "tau2", "max_user_tool_rounds", 4)),
+        "user_model_reasoning_effort": str(_deep_get(raw, "tau2", "user_model_reasoning_effort", "") or ""),
+        "max_user_tool_rounds": int(_deep_get(raw, "tau2", "max_user_tool_rounds", 20)),
+        "user_sim_trace": bool(_deep_get(raw, "tau2", "user_sim_trace", False)),
     }
 
 
@@ -102,6 +122,15 @@ def _strip_model_artifacts(text: str) -> str:
 def _visible_model_text(text: str) -> str:
     """Best-effort fallback for APIs that do not return reasoning_content."""
     return _strip_model_artifacts(str(text or ""))
+
+
+_USER_CONTROL_TOKEN_PROTOCOL = """
+Protocol for task-control tokens:
+- ###STOP###, ###TRANSFER###, and ###OUT-OF-SCOPE### are plain text tokens in the user message content.
+- Never emit these control tokens as tool calls or function calls.
+- User tools are only for real user-side actions requested by the agent.
+- When the task is complete, transferred, or out of scope, send a normal text message containing the control token and no tool call.
+""".strip()
 
 
 def _tool_action(payload: Any) -> tuple[str, dict[str, Any], bool]:
@@ -206,6 +235,84 @@ def _strip_none(value: Any) -> Any:
     return value
 
 
+def _openai_tool_arguments(arguments: Any) -> str:
+    if isinstance(arguments, str):
+        return arguments
+    if not isinstance(arguments, dict):
+        arguments = {}
+    return json.dumps(arguments, ensure_ascii=False)
+
+
+def _make_openai_user_simulator(
+    *,
+    llm: str,
+    instructions: str,
+    tools: list[Any],
+    call_model: Callable[[list[dict[str, Any]], list[dict[str, Any]]], dict[str, Any]],
+    message_to_openai: Callable[[Any], dict[str, Any] | None],
+    tool_call_from_openai: Callable[[dict[str, Any], str], Any],
+    separate_reasoning: bool,
+) -> Any:
+    from tau2.data_model.message import MultiToolMessage, ToolMessage, UserMessage
+    from tau2.user.user_simulator import UserSimulator
+
+    class OpenAIUserSimulator(UserSimulator):
+        @property
+        def system_prompt(self) -> str:
+            return f"{super().system_prompt}\n\n{_USER_CONTROL_TOKEN_PROTOCOL}"
+
+        def _generate_next_message(self, message: Any, state: Any) -> Any:
+            if isinstance(message, MultiToolMessage):
+                state.messages.extend(message.tool_messages)
+            elif isinstance(message, ToolMessage):
+                state.messages.append(message)
+            elif message.has_content() or message.is_tool_call():
+                state.messages.append(message)
+
+            openai_messages = []
+            for item in state.system_messages + state.flip_roles():
+                converted = message_to_openai(item)
+                if converted is not None:
+                    openai_messages.append(converted)
+
+            openai_tools = []
+            for tool in self.tools or []:
+                schema = _openai_tool_schema(tool)
+                if schema is not None:
+                    openai_tools.append(schema)
+            raw_message = call_model(openai_messages, openai_tools)
+            content = str(raw_message.get("content") or "")
+            if raw_message.get("reasoning_content") and separate_reasoning:
+                content = _strip_model_artifacts(content)
+            else:
+                content = _visible_model_text(content)
+
+            user_message = UserMessage(
+                role="user",
+                content=content,
+                usage=raw_message.get("_usage"),
+                raw_data={k: v for k, v in raw_message.items() if not str(k).startswith("_")},
+                generation_time_seconds=raw_message.get("_latency_s"),
+            )
+            raw_tool_calls = raw_message.get("tool_calls") or []
+            if raw_tool_calls:
+                tool_calls = [
+                    tool_call_from_openai(raw_tool_call, "user")
+                    for raw_tool_call in raw_tool_calls
+                    if isinstance(raw_tool_call, dict)
+                ]
+                if tool_calls:
+                    user_message.tool_calls = tool_calls
+            return user_message
+
+    return OpenAIUserSimulator(
+        llm=llm,
+        instructions=instructions,
+        tools=tools or None,
+        llm_args={},
+    )
+
+
 class Tau2Backend:
     def __init__(self, worker_id: str, split: str, config: dict[str, Any]) -> None:
         self.worker_id = worker_id
@@ -224,6 +331,10 @@ class Tau2Backend:
         self.final_score = 0.0
         self.done = False
         self.last_info: dict[str, Any] = {}
+        self.user_simulator: Any | None = None
+        self.user_state: Any | None = None
+        self.user_model_call_index = _worker_route_seed(worker_id)
+        self.user_model_endpoint: dict[str, str] | None = None
 
     @property
     def user_sim_enabled(self) -> bool:
@@ -381,6 +492,22 @@ class Tau2Backend:
                 schemas.append(schema)
         return schemas
 
+    def _user_tools(self) -> list[Any]:
+        if self.env is None or not self.config.get("include_tools", True):
+            return []
+        try:
+            return list(self.env.get_user_tools() or [])
+        except Exception:
+            return []
+
+    def _tool_schema_names(self, tools: list[dict[str, Any]]) -> set[str]:
+        names = set()
+        for tool in tools:
+            name = str((tool.get("function") or {}).get("name") or "")
+            if name:
+                names.add(name)
+        return names
+
     def _tool_schemas(self) -> list[dict[str, Any]]:
         if self.env is None or not self.config.get("include_tools", True):
             return []
@@ -420,11 +547,11 @@ class Tau2Backend:
             parts.append("Use tools to solve the task.")
         return "\n\n".join(parts)
 
-    def _api_key(self) -> str:
-        explicit = str(self.config.get("user_model_api_key") or "").strip()
+    def _api_key(self, explicit_key: str | None = None, key_path: str | None = None) -> str:
+        explicit = str(explicit_key if explicit_key is not None else self.config.get("user_model_api_key") or "").strip()
         if explicit:
             return explicit
-        path = str(self.config.get("user_model_api_key_path") or "").strip()
+        path = str(key_path if key_path is not None else self.config.get("user_model_api_key_path") or "").strip()
         if path:
             try:
                 return Path(path).expanduser().read_text(encoding="utf-8").strip()
@@ -432,16 +559,54 @@ class Tau2Backend:
                 logger.warning("Failed to read tau2 user model api key path: %s", path, exc_info=True)
         return os.environ.get("TAU2_USER_MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY") or "dummy"
 
-    def _chat_completions_url(self) -> str:
-        base = str(self.config.get("user_model_base_url") or os.environ.get("TAU2_USER_MODEL_BASE_URL") or "").strip()
+    def _chat_completions_url(self, base_url: str | None = None, provider_name: str | None = None) -> str:
+        base = str(base_url if base_url is not None else self.config.get("user_model_base_url") or os.environ.get("TAU2_USER_MODEL_BASE_URL") or "").strip()
         if not base:
             raise ValueError("tau2.user_model_base_url or TAU2_USER_MODEL_BASE_URL is required when user_sim_enabled=true")
         base = base.rstrip("/")
         if base.endswith("/chat/completions"):
             return base
+        provider = str(provider_name if provider_name is not None else self.config.get("user_model_provider") or "").strip().lower()
+        if provider == "ark":
+            return f"{base}/chat/completions"
+        if provider == "deepseek" and not base.endswith("/v1"):
+            return f"{base}/chat/completions"
         if base.endswith("/v1"):
             return f"{base}/chat/completions"
         return f"{base}/v1/chat/completions"
+
+    def _select_user_model_endpoint(self) -> dict[str, str]:
+        providers = _csv_values(self.config.get("user_model_provider") or "sglang")
+        models = _csv_values(self.config.get("user_model") or "local-user-sim")
+        base_urls = _csv_values(self.config.get("user_model_base_url") or os.environ.get("TAU2_USER_MODEL_BASE_URL") or "")
+        api_keys = _csv_values(self.config.get("user_model_api_key") or "")
+        api_key_paths = _csv_values(self.config.get("user_model_api_key_path") or "")
+        width = max(len(providers), len(models), len(base_urls), len(api_keys), len(api_key_paths), 1)
+        index = self.user_model_call_index % width
+        self.user_model_call_index += 1
+
+        def pick(values: list[str], default: str = "") -> str:
+            if not values:
+                return default
+            return values[index % len(values)]
+
+        return {
+            "provider": pick(providers, "sglang").lower(),
+            "model": pick(models, "local-user-sim"),
+            "base_url": pick(base_urls),
+            "api_key": pick(api_keys),
+            "api_key_path": pick(api_key_paths),
+            "route_index": str(index),
+        }
+
+    def _user_model_endpoint_info(self) -> dict[str, str]:
+        endpoint = self.user_model_endpoint or {}
+        return {
+            "provider": str(endpoint.get("provider") or ""),
+            "model": str(endpoint.get("model") or ""),
+            "base_url": str(endpoint.get("base_url") or ""),
+            "route_index": str(endpoint.get("route_index") or ""),
+        }
 
     def _tau2_message_to_openai(self, message: Any) -> dict[str, Any] | None:
         from tau2.data_model.message import AssistantMessage, SystemMessage, ToolMessage, UserMessage
@@ -480,7 +645,7 @@ class Tau2Backend:
             "type": "function",
             "function": {
                 "name": str(getattr(tool_call, "name", "")),
-                "arguments": getattr(tool_call, "arguments", {}) or {},
+                "arguments": _openai_tool_arguments(getattr(tool_call, "arguments", {}) or {}),
             },
         }
 
@@ -503,46 +668,38 @@ class Tau2Backend:
             requestor=requestor,
         )
 
-    def _user_messages_for_llm(self) -> list[dict[str, Any]]:
-        from tau2.data_model.message import AssistantMessage, SystemMessage, ToolMessage, UserMessage
-        from tau2.user.user_simulator import SYSTEM_PROMPT, get_global_user_sim_guidelines
-
-        instructions = str(getattr(self.task, "user_scenario", "") or "")
-        guidelines = get_global_user_sim_guidelines(use_tools=bool(self._user_tool_schemas()))
-        system_prompt = SYSTEM_PROMPT.format(
-            global_user_sim_guidelines_with_persona=guidelines.replace("<PERSONA_GUIDELINES>", ""),
-            instructions=instructions,
-        ).strip()
-        messages: list[Any] = [SystemMessage(role="system", content=system_prompt)]
-        for message in self.messages:
-            if isinstance(message, UserMessage):
-                messages.append(AssistantMessage(role="assistant", content=message.content, tool_calls=message.tool_calls))
-            elif isinstance(message, AssistantMessage):
-                if not message.tool_calls:
-                    messages.append(UserMessage(role="user", content=message.content))
-            elif isinstance(message, ToolMessage) and message.requestor == "user":
-                messages.append(ToolMessage(id=message.id, role="tool", content=message.content, requestor="user", error=message.error))
-        return [item for message in messages if (item := self._tau2_message_to_openai(message)) is not None]
-
     def _call_user_model(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+        if self.user_model_endpoint is None:
+            self.user_model_endpoint = self._select_user_model_endpoint()
+        endpoint = self.user_model_endpoint
+        provider = endpoint["provider"]
+        enable_thinking = bool(self.config.get("user_model_enable_thinking", False))
         payload: dict[str, Any] = {
-            "model": str(self.config.get("user_model") or "local-user-sim"),
+            "model": endpoint["model"],
             "messages": messages,
             "max_tokens": int(self.config.get("user_model_max_tokens", 512)),
-            "temperature": float(self.config.get("user_model_temperature", 0.0)),
-            "top_p": float(self.config.get("user_model_top_p", 1.0)),
-            "separate_reasoning": bool(self.config.get("user_model_separate_reasoning", True)),
-            "chat_template_kwargs": {
-                "enable_thinking": bool(self.config.get("user_model_enable_thinking", False)),
-            },
         }
+        if provider != "deepseek" or not enable_thinking:
+            payload["temperature"] = float(self.config.get("user_model_temperature", 0.0))
+            payload["top_p"] = float(self.config.get("user_model_top_p", 1.0))
+        if provider in {"sglang", "vllm", "aux", "local"}:
+            payload["separate_reasoning"] = bool(self.config.get("user_model_separate_reasoning", True))
+            payload["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
+        elif provider == "deepseek":
+            payload["thinking"] = {"type": "enabled" if enable_thinking else "disabled"}
+            effort = str(self.config.get("user_model_reasoning_effort") or "").strip()
+            if enable_thinking and effort:
+                payload["reasoning_effort"] = effort
         if tools:
             payload["tools"] = tools
         data = json.dumps(_strip_none(payload), ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
-            self._chat_completions_url(),
+            self._chat_completions_url(endpoint["base_url"], provider),
             data=data,
-            headers={"content-type": "application/json", "authorization": f"Bearer {self._api_key()}"},
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {self._api_key(endpoint['api_key'], endpoint['api_key_path'])}",
+            },
             method="POST",
         )
         start = time.perf_counter()
@@ -561,38 +718,114 @@ class Tau2Backend:
             message["_usage"] = usage
         return message
 
-    def _generate_user_reply(self, assistant_text: str) -> tuple[str, bool, dict[str, Any]]:
-        from tau2.data_model.message import AssistantMessage, ToolMessage, UserMessage
-        from tau2.user.user_simulator import UserSimulator
+    def _build_user_simulator(self) -> Any:
+        return _make_openai_user_simulator(
+            llm=str(self.config.get("user_model") or "local-user-sim"),
+            instructions=str(getattr(self.task, "user_scenario", "") or ""),
+            tools=self._user_tools(),
+            call_model=self._call_user_model,
+            message_to_openai=self._tau2_message_to_openai,
+            tool_call_from_openai=self._openai_tool_call_to_tau2,
+            separate_reasoning=bool(self.config.get("user_model_separate_reasoning", True)),
+        )
 
-        self.messages.append(AssistantMessage.text(_visible_model_text(assistant_text)))
-        tools = self._user_tool_schemas()
+    def _reset_user_simulator(self) -> None:
+        self.user_simulator = None
+        self.user_state = None
+        if not self.user_sim_enabled:
+            return
+        from tau2.user.user_simulator_base import is_valid_user_history_message
+
+        self.user_simulator = self._build_user_simulator()
+        history = [message for message in self.messages if is_valid_user_history_message(message)]
+        self.user_state = self.user_simulator.get_init_state(message_history=history)
+
+    def _generate_user_reply(self, assistant_text: str) -> tuple[str, bool, dict[str, Any]]:
+        from tau2.data_model.message import AssistantMessage, MultiToolMessage
+
+        if self.user_simulator is None or self.user_state is None:
+            self._reset_user_simulator()
+        if self.user_simulator is None or self.user_state is None:
+            raise RuntimeError("tau2 user simulator is not initialized")
+
+        assistant_message = AssistantMessage.text(_visible_model_text(assistant_text))
+        self.messages.append(assistant_message)
+        valid_user_tool_names = self._tool_schema_names(self._user_tool_schemas())
         latencies: list[float] = []
-        for _ in range(max(1, int(self.config.get("max_user_tool_rounds", 4)))):
-            raw_message = self._call_user_model(self._user_messages_for_llm(), tools)
-            if raw_message.get("_latency_s") is not None:
-                latencies.append(float(raw_message["_latency_s"]))
-            content = str(raw_message.get("content") or "")
-            if raw_message.get("reasoning_content") and bool(self.config.get("user_model_separate_reasoning", True)):
-                content = _strip_model_artifacts(content)
-            else:
-                content = _visible_model_text(content)
-            raw_tool_calls = raw_message.get("tool_calls") or []
-            if raw_tool_calls:
-                tool_calls = [self._openai_tool_call_to_tau2(raw, "user") for raw in raw_tool_calls if isinstance(raw, dict)]
-                user_message = UserMessage(role="user", content=content, tool_calls=tool_calls)
+        trace_enabled = bool(self.config.get("user_sim_trace", False))
+        user_sim_trace: list[dict[str, Any]] = []
+        next_user_input: Any = assistant_message
+        for round_index in range(max(1, int(self.config.get("max_user_tool_rounds", 20)))):
+            user_message, self.user_state = self.user_simulator.generate_next_message(next_user_input, self.user_state)
+            if user_message.generation_time_seconds is not None:
+                latencies.append(float(user_message.generation_time_seconds))
+            trace_entry: dict[str, Any] = {
+                "round": round_index,
+                "content": str(user_message.content or ""),
+                "tool_calls": [self._tool_call_to_openai(tool_call) for tool_call in (user_message.tool_calls or [])],
+            }
+            if user_message.generation_time_seconds is not None:
+                trace_entry["generation_time_s"] = float(user_message.generation_time_seconds)
+            if user_message.tool_calls:
+                invalid_tool_names = []
+                for tool_call in user_message.tool_calls:
+                    name = str(getattr(tool_call, "name", ""))
+                    if name not in valid_user_tool_names:
+                        invalid_tool_names.append(name)
+                if invalid_tool_names:
+                    trace_entry["invalid_tool_names"] = invalid_tool_names
+                    if trace_enabled:
+                        user_sim_trace.append(trace_entry)
+                    return f"User simulator produced invalid tool call: {', '.join(invalid_tool_names)}", True, {
+                        "user_model_calls": len(latencies),
+                        "user_model_latency_s": sum(latencies),
+                        "user_invalid_tool_call": True,
+                        "user_invalid_tool_names": invalid_tool_names,
+                        "user_model_content": user_message.content,
+                        "user_model_tool_calls": [
+                            self._tool_call_to_openai(tool_call) for tool_call in user_message.tool_calls
+                        ],
+                        "discard_sample": True,
+                        "discard_reason": "user_invalid_tool_call",
+                        **({"user_sim_trace": user_sim_trace} if trace_enabled else {}),
+                    }
                 self.messages.append(user_message)
-                for tool_call in tool_calls:
+                tool_messages = []
+                for tool_call in user_message.tool_calls:
                     tool_result = self.env.get_response(tool_call)
                     self.messages.append(tool_result)
+                    tool_messages.append(tool_result)
+                if trace_enabled:
+                    trace_entry["tool_results"] = [
+                        self._tau2_message_to_openai(tool_message) for tool_message in tool_messages
+                    ]
+                    user_sim_trace.append(trace_entry)
+                next_user_input = (
+                    tool_messages[0]
+                    if len(tool_messages) == 1
+                    else MultiToolMessage(role="tool", tool_messages=tool_messages)
+                )
                 continue
-            user_message = UserMessage.text(content)
             self.messages.append(user_message)
-            done = UserSimulator.is_stop(user_message)
-            return content, done, {"user_model_calls": len(latencies), "user_model_latency_s": sum(latencies)}
-        fallback = "I am unable to continue. ###STOP###"
-        self.messages.append(UserMessage.text(fallback))
-        return fallback, True, {"user_model_calls": len(latencies), "user_model_latency_s": sum(latencies), "user_tool_round_limit": True}
+            done = self.user_simulator.is_stop(user_message)
+            content = str(user_message.content or "")
+            if trace_enabled:
+                trace_entry["done"] = done
+                user_sim_trace.append(trace_entry)
+            return content, done, {
+                "user_model_calls": len(latencies),
+                "user_model_latency_s": sum(latencies),
+                **({"user_sim_trace": user_sim_trace} if trace_enabled else {}),
+            }
+        fallback = "User simulator exceeded the configured tool-call round limit."
+        return fallback, True, {
+            "user_model_calls": len(latencies),
+            "user_model_latency_s": sum(latencies),
+            "user_tool_round_limit": True,
+            "discard_sample": True,
+            "discard_reason": "user_tool_round_limit",
+            **({"user_sim_trace": user_sim_trace} if trace_enabled else {}),
+        }
 
     def _prime_user_simulator(self, info: dict[str, Any]) -> str:
         if not self.user_sim_enabled or self.messages:
@@ -604,7 +837,7 @@ class Tau2Backend:
         self.done = bool(user_done)
         info.update(user_info)
         info["done"] = self.done
-        if self.done:
+        if self.done and not bool(info.get("discard_sample", False)):
             self.final_score, eval_info = self._finish("", TerminationReason.USER_STOP)
             info.update(eval_info)
             info["done"] = True
@@ -627,6 +860,8 @@ class Tau2Backend:
         self.env = self._build_env_for_task(self.domain, task_context)
         self._apply_initial_state()
         self.messages = self._initial_message_history()
+        self.user_model_endpoint = self._select_user_model_endpoint() if self.user_sim_enabled else None
+        self._reset_user_simulator()
         self.reset_count += 1
         self.step_count = 0
         self.final_score = 0.0
@@ -642,6 +877,7 @@ class Tau2Backend:
             "policy": self._policy_doc(),
             "tool_schemas": self._tool_schemas(),
             "user_sim_enabled": self.user_sim_enabled,
+            "user_model_endpoint": self._user_model_endpoint_info(),
         }
         observation = self._prime_user_simulator(self.last_info)
         self.last_info["agent_messages"] = self._agent_openai_messages()
@@ -717,7 +953,7 @@ class Tau2Backend:
                     info.update(user_info)
                     info["done"] = self.done
                     info["message_updates"] = self._agent_openai_messages(self.messages[before:])
-                    if self.done:
+                    if self.done and not bool(info.get("discard_sample", False)):
                         from tau2.data_model.simulation import TerminationReason
 
                         self.final_score, eval_info = self._finish("", TerminationReason.USER_STOP)
@@ -728,8 +964,11 @@ class Tau2Backend:
                     return self._result(observation, info)
                 except Exception as exc:
                     observation = f"User simulator failed:\n{type(exc).__name__}: {exc}"
+                    self.done = True
                     info["user_sim_error"] = observation
-                    info["done"] = False
+                    info["discard_sample"] = True
+                    info["discard_reason"] = "user_sim_error"
+                    info["done"] = True
                     info["agent_messages"] = self._agent_openai_messages()
                     self.last_info = info
                     return self._result(observation, info)
@@ -788,6 +1027,8 @@ class Tau2Backend:
         self.env = None
         self.task = None
         self.messages = []
+        self.user_simulator = None
+        self.user_state = None
         return {}
 
 

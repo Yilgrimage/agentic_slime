@@ -1,6 +1,29 @@
 #!/bin/bash
 set -euo pipefail
 
+resolve_repo_path() {
+  local path=$1
+  local repo="${REPO_DIR:-/mnt/bn/jixf-nas-lq/mlf/code/slime}"
+  if [[ "${path}" = /* ]]; then
+    printf '%s\n' "${path}"
+  else
+    printf '%s/%s\n' "${repo}" "${path}"
+  fi
+}
+
+if [ -n "${TRAIN_PROFILE:-}" ]; then
+  TRAIN_PROFILE_PATH=$(resolve_repo_path "${TRAIN_PROFILE}")
+  [ -f "${TRAIN_PROFILE_PATH}" ] || { echo "Missing train profile: ${TRAIN_PROFILE_PATH}" >&2; exit 1; }
+  set -a
+  # shellcheck disable=SC1090
+  source "${TRAIN_PROFILE_PATH}"
+  set +a
+fi
+
+if [ -n "${RESUME_FROM:-}" ] && [ -z "${LOAD_DIR:-}" ]; then
+  export LOAD_DIR="${RESUME_FROM}"
+fi
+
 export ENV_NAME=tau2
 export LITELLM_LOCAL_MODEL_COST_MAP=${LITELLM_LOCAL_MODEL_COST_MAP:-True}
 export CUSTOM_GENERATE_FUNCTION_PATH=examples.agent_env.tau2.rollout.generate
@@ -75,4 +98,4 @@ PY
 )"
 export DYNAMIC_SAMPLING_FILTER_PATH=${DYNAMIC_SAMPLING_FILTER_PATH:-}
 
-exec bash "${REPO_DIR:-/mnt/bn/jixf-nas-lq/mlf/code/slime}/examples/agent_env/scripts/run_qwen3_8b_agent_env_grpo.sh"
+exec bash "${REPO_DIR:-/mnt/bn/jixf-nas-lq/mlf/code/slime}/examples/agent_env/scripts/run_agent_env_grpo.sh"

@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import re
 import uuid
@@ -153,11 +154,32 @@ def _runtime_env(args: Any, name: str, default: str = "") -> str:
 
 
 def _sample_case_dump_enabled(args: Any) -> bool:
+    limits = (
+        _case_dump_limit(args, "samples"),
+        _case_dump_limit(args, "discarded"),
+    )
+    return any(limit > 0 for limit in limits) and bool(_runtime_env(args, "RUN_ROOT") or _runtime_env(args, "MLF_RUN_ROOT"))
+
+
+def _int_runtime_env(args: Any, name: str, default: str = "0") -> int:
     try:
-        limit = int(_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_N", "0") or 0)
+        return int(_runtime_env(args, name, default) or 0)
     except (TypeError, ValueError):
-        limit = 0
-    return limit > 0 and bool(_runtime_env(args, "RUN_ROOT") or _runtime_env(args, "MLF_RUN_ROOT"))
+        return 0
+
+
+def _case_dump_bucket(sample: Sample) -> str:
+    sample_metadata = sample.metadata or {}
+    if bool(getattr(sample, "remove_sample", False)) or bool(sample_metadata.get("discard_sample", False)):
+        return "discarded"
+    return "samples"
+
+
+def _case_dump_limit(args: Any, bucket: str) -> int:
+    fallback = str(_int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_N", "0"))
+    if bucket == "discarded":
+        return _int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_DISCARD_N", fallback)
+    return _int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_N", "0")
 
 
 def _dump_trace_mode(args: Any) -> str:
@@ -245,11 +267,16 @@ def _record_rollout_infra_failure(
     tok: Any | None,
 ) -> Sample:
     sample_metadata = metadata(sample)
+    exc_text = repr(exc).lower()
+    reason_kind = "timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timed out" in exc_text else "failure"
+    discard_reason = f"env_{phase}_{reason_kind}"
     sample_metadata["infra_error"] = {
         "phase": phase,
         "type": type(exc).__name__,
         "message": str(exc),
     }
+    sample_metadata["discard_sample"] = True
+    sample_metadata["discard_reason"] = discard_reason
     sample_metadata.setdefault("error", repr(exc))
     sample.reward = 0.0
     sample.remove_sample = True
@@ -269,25 +296,39 @@ def _record_rollout_infra_failure(
     return sample
 
 
+def _env_discard_reason(info: dict[str, Any]) -> str:
+    if bool(info.get("discard_sample", False)):
+        return str(info.get("discard_reason") or "env_discard_sample")
+    if bool(info.get("user_tool_round_limit", False)):
+        return "user_tool_round_limit"
+    return ""
+
+
 def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, tok: Any | None = None) -> None:
-    limit = int(_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_N", "0") or 0)
+    bucket = _case_dump_bucket(sample)
+    limit = _case_dump_limit(args, bucket)
     if limit <= 0:
         return
     run_root = _runtime_env(args, "RUN_ROOT") or _runtime_env(args, "MLF_RUN_ROOT")
     if not run_root:
         return
-    count = _SAMPLE_DUMP_COUNTS.get(spec.name, 0)
+    counter_key = f"{spec.name}:{bucket}"
+    count = _SAMPLE_DUMP_COUNTS.get(counter_key, 0)
     if count >= limit:
         return
-    _SAMPLE_DUMP_COUNTS[spec.name] = count + 1
+    _SAMPLE_DUMP_COUNTS[counter_key] = count + 1
     sample_metadata = sample.metadata or {}
-    output_dir = Path(run_root) / "rollout_cases" / spec.name / "samples"
+    output_dir = Path(run_root) / "rollout_cases" / spec.name / bucket
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"sample_{count:04d}_pid{os.getpid()}_{uuid.uuid4().hex[:8]}.json"
+    path = output_dir / f"{bucket[:-1]}_{count:04d}_pid{os.getpid()}_{uuid.uuid4().hex[:8]}.json"
     trace_mode = _dump_trace_mode(args)
     record = {
         "sample_index": count,
+        "dump_bucket": bucket,
         "status": getattr(getattr(sample, "status", None), "name", str(getattr(sample, "status", ""))),
+        "remove_sample": bool(getattr(sample, "remove_sample", False)),
+        "discard_sample": bool(sample_metadata.get("discard_sample", False)),
+        "discard_reason": sample_metadata.get("discard_reason"),
         "reward": getattr(sample, "reward", None),
         "response_length": getattr(sample, "response_length", None),
         "effective_response_length": getattr(sample, "effective_response_length", None),
@@ -295,6 +336,8 @@ def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, to
         "response": getattr(sample, "response", None),
         "turn_count": sample_metadata.get("turn_count"),
         "format_errors": sample_metadata.get("format_errors"),
+        "format_checks": sample_metadata.get("format_checks"),
+        "format_reward": sample_metadata.get("format_reward"),
         "max_response_tokens_hits": sample_metadata.get("max_response_tokens_hits"),
         "truncated_reason": sample_metadata.get("truncated_reason"),
         "env_score": sample_metadata.get("env_score"),
@@ -912,6 +955,9 @@ class AgentTokenLedger:
             sample_metadata["token_segments"] = [segment.__dict__.copy() for segment in self.segments]
 
     def audit(self) -> dict[str, Any]:
+        segment_tokens = sum(segment.token_count for segment in self.segments)
+        segment_loss_mask = sum(segment.loss_mask_sum for segment in self.segments)
+        structural_ok = segment_tokens == len(self.tokens) and segment_loss_mask == sum(self.loss_mask)
         try:
             full_ids = apply_chat_template_ids(
                 self.tok,
@@ -921,14 +967,27 @@ class AgentTokenLedger:
                 enable_thinking=self.enable_thinking,
             )
         except Exception as exc:
-            return {"ok": False, "error": repr(exc)}
+            return {
+                "ok": structural_ok,
+                "structural_ok": structural_ok,
+                "message_replay_ok": False,
+                "message_replay_error": repr(exc),
+                "ledger_tokens": len(self.tokens),
+                "segment_tokens": segment_tokens,
+            }
         common = token_prefix_length(full_ids, self.tokens)
+        message_replay_ok = full_ids == self.tokens
         return {
-            "ok": full_ids == self.tokens,
+            "ok": structural_ok,
+            "structural_ok": structural_ok,
+            "message_replay_ok": message_replay_ok,
+            "message_replay_expected_to_differ": not message_replay_ok
+            and any(segment.kind == "assistant" for segment in self.segments),
             "ledger_tokens": len(self.tokens),
+            "segment_tokens": segment_tokens,
             "full_template_tokens": len(full_ids),
             "common_prefix_tokens": common,
-            "first_diff": None if full_ids == self.tokens else common,
+            "first_diff": None if message_replay_ok else common,
         }
 
 
@@ -1355,6 +1414,82 @@ def format_reward(args: Any, valid: bool) -> float:
     return float(cfg_path(args, "reward.format.invalid", -0.1))
 
 
+def record_format_check(sample_metadata: dict[str, Any], *, turn: int, valid: bool, parse_mode: str) -> None:
+    sample_metadata.setdefault("format_checks", []).append(
+        {
+            "turn": int(turn),
+            "valid": bool(valid),
+            "parse_mode": str(parse_mode),
+        }
+    )
+    if not valid:
+        sample_metadata["format_errors"] = int(sample_metadata.get("format_errors", 0) or 0) + 1
+
+
+def format_reward_adjustment(args: Any, sample: Sample) -> float:
+    sample_metadata = sample.metadata or {}
+    checks = sample_metadata.get("format_checks")
+    if isinstance(checks, list) and checks:
+        invalid_count = sum(1 for item in checks if isinstance(item, dict) and not bool(item.get("valid", False)))
+        valid_count = sum(1 for item in checks if isinstance(item, dict) and bool(item.get("valid", False)))
+    else:
+        invalid_count = int(sample_metadata.get("format_errors", 0) or 0)
+        turn_count = int(sample_metadata.get("turn_count", 0) or 0)
+        if turn_count <= 0:
+            turn_count = len(sample_metadata.get("action_parse_modes") or [])
+        valid_count = max(0, turn_count - invalid_count)
+    return valid_count * format_reward(args, True) + invalid_count * format_reward(args, False)
+
+
+def post_process_rewards(args: Any, samples: list[Sample]) -> tuple[list[float], list[float]]:
+    """GRPO reward postprocess that keeps discarded env samples out of normalization."""
+    raw_rewards = []
+    for sample in samples:
+        sample_metadata = metadata(sample)
+        if sample.remove_sample:
+            raw_reward = 0.0
+            sample_metadata["format_reward"] = 0.0
+        else:
+            format_adjustment = format_reward_adjustment(args, sample)
+            sample_metadata["format_reward"] = format_adjustment
+            raw_reward = float(sample.get_reward_value(args) or 0.0) + format_adjustment
+        sample_metadata["raw_reward"] = raw_reward
+        raw_rewards.append(raw_reward)
+    if not (
+        arg(args, "advantage_estimator", None) in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
+        and bool(arg(args, "rewards_normalization", False))
+    ):
+        return raw_rewards, list(raw_rewards)
+
+    rewards = [0.0] * len(samples)
+    n_samples = max(1, int(arg(args, "n_samples_per_prompt", 1) or 1))
+    grouped: dict[int, list[int]] = {}
+    for idx, sample in enumerate(samples):
+        group_key = int(sample.group_index) if sample.group_index is not None else idx // n_samples
+        grouped.setdefault(group_key, []).append(idx)
+
+    use_std = arg(args, "advantage_estimator", None) in ["grpo", "gspo"] and bool(
+        arg(args, "grpo_std_normalization", False)
+    )
+    for indices in grouped.values():
+        active = [idx for idx in indices if not samples[idx].remove_sample]
+        if not active:
+            continue
+        values = [raw_rewards[idx] for idx in active]
+        mean = sum(values) / len(values)
+        centered = [value - mean for value in values]
+        if use_std:
+            if len(values) > 1:
+                variance = sum(value * value for value in centered) / (len(values) - 1)
+                std = math.sqrt(variance)
+            else:
+                std = 0.0
+            centered = [value / (std + 1e-6) for value in centered]
+        for idx, value in zip(active, centered, strict=True):
+            rewards[idx] = value
+    return raw_rewards, rewards
+
+
 async def generate_agent_rollout(
     args: Any,
     sample: Sample,
@@ -1387,6 +1522,25 @@ async def generate_agent_rollout(
         observation = str(reset.get("observation", ""))
         info = reset.get("info") or {}
         split = reset.get("split") or split
+        reset_discard_reason = _env_discard_reason(info)
+        if reset_discard_reason:
+            sample.status = Sample.Status.FAILED
+            sample.remove_sample = True
+            sample_metadata["discard_sample"] = True
+            sample_metadata["discard_reason"] = reset_discard_reason
+            sample_metadata["turn_count"] = 0
+            sample_metadata["format_ok"] = True
+            sample_metadata["env_score"] = float(reset.get("score", 0.0) or 0.0)
+            sample_metadata["env_success"] = False
+            sample_metadata["env_reward"] = 0.0
+            env_meta = spec.env_metadata(reset, index, split, lease_id)
+            env_meta.setdefault("server_url", env_server_url(args, spec))
+            sample_metadata[spec.name] = env_meta
+            sample.reward = 0.0
+            ensure_rollout_shapes(args, sample, spec)
+            dump_completed_sample_case(args, spec, sample, tok)
+            logger.warning("%s rollout discarded sample during reset reason=%s", spec.name, reset_discard_reason)
+            return sample
 
         prompt = spec.initial_prompt(args, sample, observation, info)
         mode = interaction_mode(args, spec)
@@ -1501,8 +1655,7 @@ async def generate_agent_rollout(
                 parser = action_parser(args, spec)
                 action, format_valid, parse_mode = parser(parser_text)
             sample_metadata.setdefault("action_parse_modes", []).append(parse_mode)
-            if not format_valid:
-                sample_metadata["format_errors"] = int(sample_metadata.get("format_errors", 0)) + 1
+            record_format_check(sample_metadata, turn=_turn, valid=format_valid, parse_mode=parse_mode)
 
             if finish_type == "length":
                 sample_metadata["max_response_tokens_hits"] = int(
@@ -1533,10 +1686,6 @@ async def generate_agent_rollout(
                 text=raw_response_text,
                 log_probs=_response_log_probs,
             )
-            if not ledger.add_reward_to_last_token(format_reward(args, format_valid)):
-                sample_metadata["unassigned_token_reward"] = float(
-                    sample_metadata.get("unassigned_token_reward", 0.0)
-                ) + float(format_reward(args, format_valid))
             if turn_trace is not None:
                 turn_trace["token_count_after_assistant"] = len(ledger.tokens)
 
@@ -1557,6 +1706,29 @@ async def generate_agent_rollout(
                         "observation": observation,
                     }
                 )
+            discard_reason = _env_discard_reason(info)
+            if discard_reason:
+                sample.status = Sample.Status.FAILED
+                sample.remove_sample = True
+                sample_metadata["discard_sample"] = True
+                sample_metadata["discard_reason"] = discard_reason
+                sample_metadata["turn_count"] = len(actions)
+                sample_metadata["env_score"] = final_score
+                sample_metadata["env_success"] = success
+                sample_metadata["env_reward"] = 0.0
+                sample_metadata[spec.name] = spec.env_metadata(reset, index, split, lease_id)
+                sample_metadata[spec.name].setdefault("server_url", env_server_url(args, spec))
+                if turn_trace is not None:
+                    turn_trace["discard_sample"] = True
+                    turn_trace["discard_reason"] = discard_reason
+                    sample_metadata.setdefault("turns", []).append(turn_trace)
+                ledger.materialize(sample, sample_metadata, include_trace=trace_turns)
+                sample_metadata["token_audit"] = ledger.audit()
+                sample.reward = 0.0
+                dump_completed_sample_case(args, spec, sample, tok)
+                ensure_rollout_shapes(args, sample, spec)
+                logger.warning("%s rollout discarded sample reason=%s", spec.name, discard_reason)
+                return sample
             env_text = spec.observation_text(args, observation, info)
             env_messages = environment_messages_from_step(
                 mode=mode,
@@ -1616,6 +1788,7 @@ async def generate_agent_rollout(
             {
                 "turn_count": len(actions),
                 "format_ok": int(sample_metadata.get("format_errors", 0)) == 0,
+                "format_reward": format_reward_adjustment(args, sample),
                 "env_score": final_score,
                 "env_success": success,
                 "env_reward": env_reward,

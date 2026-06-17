@@ -39,37 +39,39 @@ ENV_PORT=18180
 ROUTER_PORT=19000
 RAY_PORT=6379
 ENV_POOL_SIZE=""
+ENV_CONFIG=${ENV_CONFIG:-}
 TRAIN_CMD=""
-AUX_NODE=${AUX_NODE:-}
-AUX_NODES_FILE=${AUX_NODES_FILE:-configs/nodes/agent_env_tau2_aux_1x8.txt}
-AUX_PORT=${AUX_PORT:-18080}
-AUX_MODEL=${AUX_MODEL:-${MLF_NAS_ROOT}/models/Qwen3.5-9B}
-AUX_GPUS=${AUX_GPUS:-0,1,2,3,4,5,6,7}
-AUX_TP=${AUX_TP:-8}
-AUX_MEM_FRACTION=${AUX_MEM_FRACTION:-0.65}
-AUX_REASONING_PARSER=${AUX_REASONING_PARSER:-qwen3}
-AUX_TOOL_CALL_PARSER=${AUX_TOOL_CALL_PARSER:-}
-TAU2_USER_MODEL=${TAU2_USER_MODEL:-tau2-user-sim}
-TAU2_USER_MODEL_API_KEY=${TAU2_USER_MODEL_API_KEY:-dummy}
+AUX_ENV_FILE=${AUX_ENV_FILE:-}
+TAU2_USER_MODEL_PROVIDER=${TAU2_USER_MODEL_PROVIDER:-}
+TAU2_USER_MODEL=${TAU2_USER_MODEL:-}
+TAU2_USER_MODEL_API_KEY=${TAU2_USER_MODEL_API_KEY:-}
+TAU2_USER_MODEL_API_KEY_PATH=${TAU2_USER_MODEL_API_KEY_PATH:-}
 TAU2_USER_MODEL_BASE_URL=${TAU2_USER_MODEL_BASE_URL:-}
-TAU2_DATA_SOURCE=${TAU2_DATA_SOURCE:-areal_synthetic}
-TAU2_DOMAINS=${TAU2_DOMAINS:-retail,airline,telecom}
+TAU2_USER_MODEL_TIMEOUT_S=${TAU2_USER_MODEL_TIMEOUT_S:-120}
+TAU2_USER_MODEL_MAX_TOKENS=${TAU2_USER_MODEL_MAX_TOKENS:-512}
+TAU2_USER_MODEL_TEMPERATURE=${TAU2_USER_MODEL_TEMPERATURE:-0.0}
+TAU2_USER_MODEL_TOP_P=${TAU2_USER_MODEL_TOP_P:-1.0}
+TAU2_USER_MODEL_ENABLE_THINKING=${TAU2_USER_MODEL_ENABLE_THINKING:-0}
+TAU2_USER_MODEL_SEPARATE_REASONING=${TAU2_USER_MODEL_SEPARATE_REASONING:-1}
+TAU2_USER_MODEL_REASONING_EFFORT=${TAU2_USER_MODEL_REASONING_EFFORT:-}
+TAU2_MAX_USER_TOOL_ROUNDS=${TAU2_MAX_USER_TOOL_ROUNDS:-}
+TAU2_DATA_SOURCE=${TAU2_DATA_SOURCE:-}
+TAU2_DOMAINS=${TAU2_DOMAINS:-}
 TAU2_DOMAIN_WEIGHTS=${TAU2_DOMAIN_WEIGHTS:-}
 TAU2_TASK_SETS=${TAU2_TASK_SETS:-}
-TAU2_PROMPT_NUM_TASKS=${TAU2_PROMPT_NUM_TASKS:-all}
-TAU2_PROMPT_SPLIT=${TAU2_PROMPT_SPLIT:-train}
-TAU2_PROMPT_SEED=${TAU2_PROMPT_SEED:-42}
-TAU2_AREAL_ROOT=${TAU2_AREAL_ROOT:-${MLF_LOCAL_ROOT}/data/tau2/areal_synthetic}
-TAU2_AREAL_INPUT=${TAU2_AREAL_INPUT:-tau2_rl_train.jsonl}
+TAU2_PROMPT_NUM_TASKS=${TAU2_PROMPT_NUM_TASKS:-}
+TAU2_PROMPT_SPLIT=${TAU2_PROMPT_SPLIT:-}
+TAU2_PROMPT_SEED=${TAU2_PROMPT_SEED:-}
+TAU2_AREAL_ROOT=${TAU2_AREAL_ROOT:-}
+TAU2_AREAL_INPUT=${TAU2_AREAL_INPUT:-}
 TAU2_TASK_FILE_DIR=${TAU2_TASK_FILE_DIR:-}
 BENCH_ON_TRAIN_EXIT=${BENCH_ON_TRAIN_EXIT:-1}
 BENCH_CMD=${BENCH_CMD:-}
 BENCH_GPUS=${BENCH_GPUS:-${RAY_CUDA_VISIBLE_DEVICES:-}}
-AUX_BENCH_ON_TRAIN_EXIT=${AUX_BENCH_ON_TRAIN_EXIT:-1}
-AUX_BENCH_GPUS=${AUX_BENCH_GPUS:-${AUX_GPUS}}
-AUX_BENCH_CMD=${AUX_BENCH_CMD:-}
+RESET_TRAIN_RUNTIME_ON_START=${RESET_TRAIN_RUNTIME_ON_START:-1}
+GPU_MEMORY_CLEAR_THRESHOLD_MIB=${GPU_MEMORY_CLEAR_THRESHOLD_MIB:-1024}
+GPU_MEMORY_CLEAR_TIMEOUT_S=${GPU_MEMORY_CLEAR_TIMEOUT_S:-120}
 AUX_BENCH_NODES_FILE=${AUX_BENCH_NODES_FILE:-}
-STARTED_AUX_SERVER=0
 DRY_RUN=0
 HEAD_ADDRESS=${HEAD_ADDRESS:-}
 ROUTER_WORKERS=${ROUTER_WORKERS:-}
@@ -100,14 +102,10 @@ Options:
   --router-port PORT   Head env router port
   --ray-port PORT      Ray head port
   --env-pool-size N    Env worker pool size
+  ENV_CONFIG can point at the base env YAML used to generate node-local config.
   --data-size SIZE     WebShop data size: small or full
   --train-cmd CMD      Command to execute on head after infra is ready
-  --aux-node HOST
-                       Start a dedicated OpenAI-compatible aux SGLang server on HOST.
-                       Alternatively set TAU2_USER_MODEL_BASE_URL to use an existing API.
-  --aux-port PORT
-  --aux-gpus CSV
-  --aux-model PATH
+  AUX_ENV_FILE points to an aux endpoint env file produced by scripts/mlf/aux_endpoint.sh.
   --no-bench-on-exit   Do not restart GPU bench after the train driver exits
   RAY_CUDA_VISIBLE_DEVICES can restrict Ray/training to a GPU subset, e.g. 0,1,2,3.
   --head-address HOST  Internal option for worker role
@@ -131,10 +129,6 @@ while [ $# -gt 0 ]; do
     --env-pool-size) ENV_POOL_SIZE=$2; shift 2 ;;
     --data-size) DATA_SIZE=$2; shift 2 ;;
     --train-cmd) TRAIN_CMD=$2; shift 2 ;;
-    --aux-node) AUX_NODE=$2; shift 2 ;;
-    --aux-port) AUX_PORT=$2; shift 2 ;;
-    --aux-gpus) AUX_GPUS=$2; shift 2 ;;
-    --aux-model) AUX_MODEL=$2; shift 2 ;;
     --no-bench-on-exit) BENCH_ON_TRAIN_EXIT=0; shift ;;
     --head-address) HEAD_ADDRESS=$2; shift 2 ;;
     --router-workers) ROUTER_WORKERS=$2; shift 2 ;;
@@ -153,6 +147,18 @@ read_nodes() {
     return
   fi
   awk 'NF && $1 !~ /^#/ {print $1}' "${NODES_FILE}"
+}
+
+resolve_path() {
+  local path=$1
+  if [ -z "${path}" ]; then
+    return 0
+  fi
+  if [[ "${path}" = /* ]]; then
+    printf '%s\n' "${path}"
+  else
+    printf '%s/%s\n' "${REPO_DIR}" "${path}"
+  fi
 }
 
 first_node() {
@@ -187,6 +193,7 @@ fill_ssh_args() {
     SSH_ARGS+=("-6")
   fi
   SSH_ARGS+=(
+    "-n"
     "-o" "BatchMode=yes"
     "-o" "StrictHostKeyChecking=no"
     "-o" "UserKnownHostsFile=/dev/null"
@@ -246,35 +253,210 @@ require_runtime() {
   esac
 }
 
+bench_residue_cleanup_cmd() {
+  cat <<EOF
+tmux kill-session -t torch_bench 2>/dev/null || true
+pkill -f '[m]lf_torch_bench.py' 2>/dev/null || true
+for _ in \$(seq 1 20); do
+  if ! pgrep -f '[m]lf_torch_bench.py' >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+  pkill -f '[m]lf_torch_bench.py' 2>/dev/null || true
+done
+sleep 2
+if command -v nvidia-smi >/dev/null 2>&1; then
+  threshold=${GPU_MEMORY_CLEAR_THRESHOLD_MIB}
+  deadline=\$((\$(date +%s) + ${GPU_MEMORY_CLEAR_TIMEOUT_S}))
+  while true; do
+    over=\$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | awk -v t="\$threshold" 'BEGIN { over=0 } { gsub(/[[:space:]]/, "", \$1); if (\$1 + 0 > t) over=1 } END { print over }')
+    [ "\${over:-0}" = "0" ] && break
+    [ "\$(date +%s)" -ge "\$deadline" ] && break
+    sleep 2
+  done
+  nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader 2>/dev/null || true
+fi
+EOF
+}
+
+cleanup_bench_residue_on_node() {
+  local node=$1
+  local cmd
+  cmd=$(bench_residue_cleanup_cmd)
+  [ "${DRY_RUN}" -eq 0 ] || { echo "+ cleanup bench residue on ${node}"; return 0; }
+  if is_current_node "${node}"; then
+    bash -lc "${cmd}" || true
+  else
+    fill_ssh_args "${node}"
+    ssh "${SSH_ARGS[@]}" "${cmd}" || true
+  fi
+}
+
+cleanup_bench_residue_for_nodes() {
+  local nodes_file=${1:-}
+  local node
+  if [ -n "${nodes_file}" ]; then
+    nodes_file=$(resolve_path "${nodes_file}")
+    while IFS= read -r node; do
+      [ -z "${node}" ] && continue
+      cleanup_bench_residue_on_node "${node}"
+    done < <(awk 'NF && $1 !~ /^#/ {print $1}' "${nodes_file}")
+  else
+    cleanup_bench_residue_on_node "this"
+  fi
+}
+
+training_runtime_reset_cmd() {
+  cat <<EOF
+set +e
+for session in mlf_ray_head mlf_ray_worker mlf_${ENV_NAME}_env mlf_${ENV_NAME}_router mlf_${ENV_NAME}_train; do
+  tmux kill-session -t "\${session}" 2>/dev/null || true
+done
+if [ -x "${SLIME_PYTHON}" ]; then
+  "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force >/tmp/mlf_ray_stop.log 2>&1 || true
+elif command -v ray >/dev/null 2>&1; then
+  ray stop --force >/tmp/mlf_ray_stop.log 2>&1 || true
+fi
+pkill -f '[s]glang.launch_server' 2>/dev/null || true
+pkill -f '[s]lime/ray/train' 2>/dev/null || true
+pkill -f '[e]xamples/agent_env/.*/server.py' 2>/dev/null || true
+pkill -f '[e]xamples/agent_env/router.py' 2>/dev/null || true
+pkill -f '[r]aylet|[g]cs_server|[p]lasma_store|[d]ashboard_agent|[d]ashboard.py' 2>/dev/null || true
+for _ in \$(seq 1 30); do
+  if ! pgrep -f '[s]glang.launch_server|[r]aylet|[g]cs_server|[p]lasma_store|[d]ashboard_agent|[d]ashboard.py|[s]lime/ray/train' >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+leftovers=\$(pgrep -af '[s]glang.launch_server|[r]aylet|[g]cs_server|[p]lasma_store|[d]ashboard_agent|[d]ashboard.py|[s]lime/ray/train' 2>/dev/null || true)
+if [ -n "\${leftovers}" ]; then
+  echo "[WARN] training runtime reset left processes:" >&2
+  echo "\${leftovers}" >&2
+fi
+EOF
+}
+
+reset_training_runtime_on_node() {
+  local node=$1
+  local cmd
+  [ "${RESET_TRAIN_RUNTIME_ON_START}" = "1" ] || return 0
+  cmd=$(training_runtime_reset_cmd)
+  if [ "${DRY_RUN}" -eq 1 ]; then
+    echo "+ reset training runtime on ${node}"
+    return 0
+  fi
+  echo "Resetting training runtime on ${node}"
+  if is_current_node "${node}"; then
+    bash -lc "${cmd}" || true
+  else
+    fill_ssh_args "${node}"
+    ssh "${SSH_ARGS[@]}" "${cmd}" || true
+  fi
+}
+
+reset_training_runtime_for_nodes() {
+  local nodes_file=${1:-}
+  local node
+  [ "${RESET_TRAIN_RUNTIME_ON_START}" = "1" ] || return 0
+  if [ -n "${nodes_file}" ]; then
+    nodes_file=$(resolve_path "${nodes_file}")
+    while IFS= read -r node; do
+      [ -z "${node}" ] && continue
+      reset_training_runtime_on_node "${node}"
+    done < <(awk 'NF && $1 !~ /^#/ {print $1}' "${nodes_file}")
+  else
+    reset_training_runtime_on_node "this"
+  fi
+}
+
+stop_bench_for_nodes() {
+  local nodes_file=${1:-}
+  local label=${2:-train}
+  local bench_script="${MLF_NAS_ROOT}/bash/run_bench.sh"
+  [ "${DRY_RUN}" -eq 0 ] || { echo "+ stop bench for ${label} nodes"; return 0; }
+  if [ ! -f "${bench_script}" ]; then
+    echo "missing run_bench.sh; skip stopping bench for ${label} nodes" >&2
+    cleanup_bench_residue_for_nodes "${nodes_file}"
+    return 0
+  fi
+  echo "Stopping GPU bench for ${label} nodes"
+  if [ -n "${nodes_file}" ]; then
+    nodes_file=$(resolve_path "${nodes_file}")
+    while IFS= read -r node; do
+      [ -z "${node}" ] && continue
+      if is_current_node "${node}"; then
+        bash "${bench_script}" stop || true
+      else
+        local remote_cmd
+        remote_cmd=$(printf 'bash %q stop' "${bench_script}")
+        fill_ssh_args "${node}"
+        ssh "${SSH_ARGS[@]}" "${remote_cmd}" || true
+      fi
+      cleanup_bench_residue_on_node "${node}"
+    done < <(awk 'NF && $1 !~ /^#/ {print $1}' "${nodes_file}")
+  else
+    bash "${bench_script}" stop || true
+    cleanup_bench_residue_on_node "this"
+  fi
+}
+
 ensure_log_dir() {
   mkdir -p "${LOG_DIR}"
 }
 
-infer_tool_call_parser_from_model() {
-  local model_path=$1
-  "${SLIME_PYTHON}" - <<PY
-import json
-from pathlib import Path
+source_aux_endpoint_env() {
+  [ "${ENV_NAME}" = "tau2" ] || return 0
+  if [ -n "${AUX_ENV_FILE}" ]; then
+    if [ ! -f "${AUX_ENV_FILE}" ]; then
+      if [ "${DRY_RUN}" -eq 1 ]; then
+        TAU2_USER_MODEL_PROVIDER=${TAU2_USER_MODEL_PROVIDER:-dry-run}
+        TAU2_USER_MODEL=${TAU2_USER_MODEL:-dry-run-user-sim}
+        TAU2_USER_MODEL_BASE_URL=${TAU2_USER_MODEL_BASE_URL:-http://127.0.0.1:18080/v1}
+        export TAU2_USER_MODEL_PROVIDER TAU2_USER_MODEL TAU2_USER_MODEL_BASE_URL
+        return 0
+      fi
+      echo "AUX_ENV_FILE does not exist: ${AUX_ENV_FILE}" >&2
+      exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "${AUX_ENV_FILE}"
+  fi
+  TAU2_USER_MODEL_PROVIDER=${AUX_ENDPOINT_PROVIDER:-${TAU2_USER_MODEL_PROVIDER:-}}
+  TAU2_USER_MODEL=${AUX_ENDPOINT_MODEL:-${TAU2_USER_MODEL:-}}
+  TAU2_USER_MODEL_BASE_URL=${AUX_ENDPOINT_BASE_URL:-${TAU2_USER_MODEL_BASE_URL:-}}
+  TAU2_USER_MODEL_API_KEY_PATH=${AUX_ENDPOINT_API_KEY_PATH:-${TAU2_USER_MODEL_API_KEY_PATH:-}}
+  TAU2_USER_MODEL_API_KEY=${AUX_ENDPOINT_API_KEY:-${TAU2_USER_MODEL_API_KEY:-}}
+  TAU2_USER_MODEL_TIMEOUT_S=${AUX_ENDPOINT_TIMEOUT_S:-${TAU2_USER_MODEL_TIMEOUT_S:-120}}
+  TAU2_USER_MODEL_MAX_TOKENS=${AUX_ENDPOINT_MAX_TOKENS:-${TAU2_USER_MODEL_MAX_TOKENS:-512}}
+  TAU2_USER_MODEL_TEMPERATURE=${AUX_ENDPOINT_TEMPERATURE:-${TAU2_USER_MODEL_TEMPERATURE:-0.0}}
+  TAU2_USER_MODEL_TOP_P=${AUX_ENDPOINT_TOP_P:-${TAU2_USER_MODEL_TOP_P:-1.0}}
+  TAU2_USER_MODEL_ENABLE_THINKING=${AUX_ENDPOINT_ENABLE_THINKING:-${TAU2_USER_MODEL_ENABLE_THINKING:-0}}
+  TAU2_USER_MODEL_SEPARATE_REASONING=${AUX_ENDPOINT_SEPARATE_REASONING:-${TAU2_USER_MODEL_SEPARATE_REASONING:-1}}
+  TAU2_USER_MODEL_REASONING_EFFORT=${AUX_ENDPOINT_REASONING_EFFORT:-${TAU2_USER_MODEL_REASONING_EFFORT:-}}
+  if [ "${AUX_ENDPOINT_STARTED_LOCAL:-0}" = "1" ] && [ -n "${AUX_ENDPOINT_NODES_FILE:-}" ]; then
+    AUX_BENCH_NODES_FILE="${AUX_ENDPOINT_NODES_FILE}"
+  fi
+  if [ -z "${TAU2_USER_MODEL_PROVIDER}" ] || [ -z "${TAU2_USER_MODEL}" ] || [ -z "${TAU2_USER_MODEL_BASE_URL}" ]; then
+    echo "tau2 requires AUX_ENV_FILE from scripts/mlf/aux_endpoint.sh or explicit TAU2_USER_MODEL_* env vars." >&2
+    exit 1
+  fi
+  export TAU2_USER_MODEL_PROVIDER TAU2_USER_MODEL TAU2_USER_MODEL_API_KEY TAU2_USER_MODEL_API_KEY_PATH TAU2_USER_MODEL_BASE_URL
+}
 
-path = Path("${model_path}") / "tokenizer_config.json"
-template = ""
-try:
-    template = str((json.loads(path.read_text()).get("chat_template") or ""))
-except Exception:
-    template = ""
-
-if "<function=" in template and "<parameter=" in template:
-    print("qwen3_coder")
-elif "<tool_call>" in template and '"name"' in template and '"arguments"' in template:
-    print("qwen")
-else:
-    print("qwen")
-PY
+env_config_path() {
+  local default_path=$1
+  if [ -n "${ENV_CONFIG}" ]; then
+    resolve_path "${ENV_CONFIG}"
+  else
+    resolve_path "${default_path}"
+  fi
 }
 
 write_webshop_config() {
   local config="${MLF_LOCAL_ROOT}/configs/webshop_launch.yaml"
   local pool_size="${ENV_POOL_SIZE:-32}"
+  local base_config
+  base_config=$(env_config_path "examples/agent_env/webshop/train_config.yaml")
   local product_file attr_file num_products
   if [ "${DATA_SIZE}" = "full" ] || [ "${DATA_SIZE}" = "all" ]; then
     product_file="${MLF_LOCAL_ROOT}/data/webshop/data/items_shuffle.json"
@@ -293,7 +475,7 @@ write_webshop_config() {
   "${SLIME_PYTHON}" - <<PY
 from pathlib import Path
 import yaml
-base = Path("${REPO_DIR}/examples/agent_env/webshop/train_config.yaml")
+base = Path("${base_config}")
 cfg = yaml.safe_load(base.read_text()) or {}
 cfg.setdefault("webshop", {})
 cfg["webshop"]["data_dir"] = "${MLF_LOCAL_ROOT}/data/webshop"
@@ -311,6 +493,8 @@ PY
 write_alfworld_config() {
   local config="${MLF_LOCAL_ROOT}/configs/alfworld_launch.yaml"
   local pool_size="${ENV_POOL_SIZE:-32}"
+  local base_config
+  base_config=$(env_config_path "examples/agent_env/alfworld/train_config.yaml")
   if [ "${DRY_RUN}" -eq 1 ]; then
     echo "${config}"
     return
@@ -320,7 +504,7 @@ write_alfworld_config() {
 from pathlib import Path
 import yaml
 
-base = Path("${REPO_DIR}/examples/agent_env/alfworld/train_config.yaml")
+base = Path("${base_config}")
 cfg = yaml.safe_load(base.read_text()) or {}
 cfg.setdefault("alfworld", {})
 cfg["alfworld"]["data_dir"] = "${MLF_LOCAL_ROOT}/data/alfworld"
@@ -333,8 +517,11 @@ PY
 }
 
 write_tau2_config() {
+  source_aux_endpoint_env
   local config="${MLF_LOCAL_ROOT}/configs/tau2_launch.yaml"
-  local pool_size="${ENV_POOL_SIZE:-8}"
+  local pool_size="${ENV_POOL_SIZE:-}"
+  local base_config
+  base_config=$(env_config_path "examples/agent_env/tau2/train_config.yaml")
   if [ "${DRY_RUN}" -eq 1 ]; then
     echo "${config}"
     return
@@ -342,11 +529,22 @@ write_tau2_config() {
   mkdir -p "${MLF_LOCAL_ROOT}/configs"
   TAU2_CONFIG_PATH="${config}" \
   TAU2_CONFIG_POOL_SIZE="${pool_size}" \
+  TAU2_CONFIG_BASE="${base_config}" \
   TAU2_CONFIG_REPO_DIR="${REPO_DIR}" \
   TAU2_CONFIG_LOCAL_ROOT="${MLF_LOCAL_ROOT}" \
   TAU2_CONFIG_LOCAL_ENVS="${MLF_LOCAL_ENVS}" \
+  TAU2_CONFIG_USER_MODEL_PROVIDER="${TAU2_USER_MODEL_PROVIDER}" \
   TAU2_CONFIG_USER_MODEL_BASE_URL="${TAU2_USER_MODEL_BASE_URL}" \
   TAU2_CONFIG_USER_MODEL="${TAU2_USER_MODEL}" \
+  TAU2_CONFIG_USER_MODEL_API_KEY_PATH="${TAU2_USER_MODEL_API_KEY_PATH}" \
+  TAU2_CONFIG_USER_MODEL_TIMEOUT_S="${TAU2_USER_MODEL_TIMEOUT_S}" \
+  TAU2_CONFIG_USER_MODEL_MAX_TOKENS="${TAU2_USER_MODEL_MAX_TOKENS}" \
+  TAU2_CONFIG_USER_MODEL_TEMPERATURE="${TAU2_USER_MODEL_TEMPERATURE}" \
+  TAU2_CONFIG_USER_MODEL_TOP_P="${TAU2_USER_MODEL_TOP_P}" \
+  TAU2_CONFIG_USER_MODEL_ENABLE_THINKING="${TAU2_USER_MODEL_ENABLE_THINKING}" \
+  TAU2_CONFIG_USER_MODEL_SEPARATE_REASONING="${TAU2_USER_MODEL_SEPARATE_REASONING}" \
+  TAU2_CONFIG_USER_MODEL_REASONING_EFFORT="${TAU2_USER_MODEL_REASONING_EFFORT}" \
+  TAU2_CONFIG_MAX_USER_TOOL_ROUNDS="${TAU2_MAX_USER_TOOL_ROUNDS}" \
   TAU2_CONFIG_DATA_SOURCE="${TAU2_DATA_SOURCE}" \
   TAU2_CONFIG_DOMAINS="${TAU2_DOMAINS}" \
   TAU2_CONFIG_DOMAIN_WEIGHTS="${TAU2_DOMAIN_WEIGHTS}" \
@@ -368,165 +566,70 @@ def scalar(name: str, default: str = "") -> str:
 def csv_list(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
-base = Path(scalar("TAU2_CONFIG_REPO_DIR")) / "examples/agent_env/tau2/train_config.yaml"
+def as_bool(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+base = Path(scalar("TAU2_CONFIG_BASE"))
 cfg = yaml.safe_load(base.read_text()) or {}
 cfg.setdefault("tau2", {})
 local_root = scalar("TAU2_CONFIG_LOCAL_ROOT")
 cfg["tau2"]["data_dir"] = f"{local_root}/data/tau2/data"
-if scalar("TAU2_CONFIG_USER_MODEL_BASE_URL"):
-    cfg["tau2"]["user_model_base_url"] = scalar("TAU2_CONFIG_USER_MODEL_BASE_URL")
+cfg["tau2"]["user_model_provider"] = scalar("TAU2_CONFIG_USER_MODEL_PROVIDER", "sglang")
+cfg["tau2"]["user_model_base_url"] = scalar("TAU2_CONFIG_USER_MODEL_BASE_URL")
 cfg["tau2"]["user_model"] = scalar("TAU2_CONFIG_USER_MODEL")
+cfg["tau2"]["user_model_api_key_path"] = scalar("TAU2_CONFIG_USER_MODEL_API_KEY_PATH")
+cfg["tau2"]["user_model_timeout_s"] = float(scalar("TAU2_CONFIG_USER_MODEL_TIMEOUT_S", "120"))
+cfg["tau2"]["user_model_max_tokens"] = int(scalar("TAU2_CONFIG_USER_MODEL_MAX_TOKENS", "512"))
+cfg["tau2"]["user_model_temperature"] = float(scalar("TAU2_CONFIG_USER_MODEL_TEMPERATURE", "0.0"))
+cfg["tau2"]["user_model_top_p"] = float(scalar("TAU2_CONFIG_USER_MODEL_TOP_P", "1.0"))
+cfg["tau2"]["user_model_enable_thinking"] = as_bool(scalar("TAU2_CONFIG_USER_MODEL_ENABLE_THINKING", "0"))
+cfg["tau2"]["user_model_separate_reasoning"] = as_bool(scalar("TAU2_CONFIG_USER_MODEL_SEPARATE_REASONING", "1"))
+if scalar("TAU2_CONFIG_USER_MODEL_REASONING_EFFORT"):
+    cfg["tau2"]["user_model_reasoning_effort"] = scalar("TAU2_CONFIG_USER_MODEL_REASONING_EFFORT")
+if scalar("TAU2_CONFIG_MAX_USER_TOOL_ROUNDS"):
+    cfg["tau2"]["max_user_tool_rounds"] = int(scalar("TAU2_CONFIG_MAX_USER_TOOL_ROUNDS"))
 prompt_data = cfg.setdefault("agent_prompt_data", {})
 prompt_data["script"] = f"{scalar('TAU2_CONFIG_REPO_DIR')}/examples/agent_env/tau2/prompt_data.py"
 prompt_data["python"] = f"{scalar('TAU2_CONFIG_LOCAL_ENVS')}/tau2/bin/python"
-prompt_data["source"] = scalar("TAU2_CONFIG_DATA_SOURCE", "official")
+if scalar("TAU2_CONFIG_DATA_SOURCE"):
+    prompt_data["source"] = scalar("TAU2_CONFIG_DATA_SOURCE")
 prompt_data["data_dir"] = f"{local_root}/data/tau2/data"
-prompt_data["areal_root"] = scalar("TAU2_CONFIG_AREAL_ROOT")
-prompt_data["areal_input"] = scalar("TAU2_CONFIG_AREAL_INPUT", "tau2_rl_train.jsonl")
-prompt_data["task_file_dir"] = scalar("TAU2_CONFIG_TASK_FILE_DIR")
-prompt_data["domains"] = csv_list(scalar("TAU2_CONFIG_DOMAINS", "retail"))
-prompt_data["task_sets"] = scalar("TAU2_CONFIG_TASK_SETS")
-prompt_data["domain_weights"] = scalar("TAU2_CONFIG_DOMAIN_WEIGHTS")
-prompt_data["split"] = scalar("TAU2_CONFIG_PROMPT_SPLIT", "train")
-prompt_data["num_tasks"] = scalar("TAU2_CONFIG_PROMPT_NUM_TASKS", "all")
-prompt_data["seed"] = int(scalar("TAU2_CONFIG_PROMPT_SEED", "42"))
-prompt_data["output_dir"] = f"{local_root}/data/tau2/{prompt_data['source']}_prompt"
+if scalar("TAU2_CONFIG_AREAL_ROOT"):
+    prompt_data["areal_root"] = scalar("TAU2_CONFIG_AREAL_ROOT")
+elif str(prompt_data.get("areal_root") or "").strip() in {"", "${TAU2_AREAL_ROOT}"}:
+    prompt_data["areal_root"] = f"{local_root}/data/tau2/areal_synthetic"
+if scalar("TAU2_CONFIG_AREAL_INPUT"):
+    prompt_data["areal_input"] = scalar("TAU2_CONFIG_AREAL_INPUT")
+if scalar("TAU2_CONFIG_TASK_FILE_DIR"):
+    prompt_data["task_file_dir"] = scalar("TAU2_CONFIG_TASK_FILE_DIR")
+if scalar("TAU2_CONFIG_DOMAINS"):
+    prompt_data["domains"] = csv_list(scalar("TAU2_CONFIG_DOMAINS"))
+if scalar("TAU2_CONFIG_TASK_SETS"):
+    prompt_data["task_sets"] = scalar("TAU2_CONFIG_TASK_SETS")
+if scalar("TAU2_CONFIG_DOMAIN_WEIGHTS"):
+    prompt_data["domain_weights"] = scalar("TAU2_CONFIG_DOMAIN_WEIGHTS")
+if scalar("TAU2_CONFIG_PROMPT_SPLIT"):
+    prompt_data["split"] = scalar("TAU2_CONFIG_PROMPT_SPLIT")
+if scalar("TAU2_CONFIG_PROMPT_NUM_TASKS"):
+    prompt_data["num_tasks"] = scalar("TAU2_CONFIG_PROMPT_NUM_TASKS")
+if scalar("TAU2_CONFIG_PROMPT_SEED"):
+    prompt_data["seed"] = int(scalar("TAU2_CONFIG_PROMPT_SEED"))
+prompt_source = prompt_data.get("source") or "official"
+prompt_data["output_dir"] = f"{local_root}/data/tau2/{prompt_source}_prompt"
 cfg.setdefault("env_server", {})
-cfg["env_server"]["pool_size"] = int(scalar("TAU2_CONFIG_POOL_SIZE", "8"))
+if scalar("TAU2_CONFIG_POOL_SIZE"):
+    cfg["env_server"]["pool_size"] = int(scalar("TAU2_CONFIG_POOL_SIZE"))
 cfg["env_server"]["worker_start_timeout_s"] = 600
 Path(scalar("TAU2_CONFIG_PATH")).write_text(yaml.safe_dump(cfg, sort_keys=False))
 PY
   echo "${config}"
 }
 
-sglang_health_url() {
-  local base=$1
-  if [[ "${base}" == */v1 ]]; then
-    printf '%s/models' "${base}"
-  else
-    printf '%s/v1/models' "${base%/}"
-  fi
-}
-
-wait_aux_http() {
-  local url=$1
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    echo "+ wait_aux_http ${url}"
-    return 0
-  fi
-  for _ in $(seq 1 300); do
-    if "${SLIME_PYTHON}" - <<PY 2>/dev/null
-import json, urllib.request
-data = json.loads(urllib.request.urlopen("${url}", timeout=2).read().decode())
-raise SystemExit(0 if "data" in data else 1)
-PY
-    then
-      echo "ready: ${url}"
-      return 0
-    fi
-    sleep 2
-  done
-  echo "Timed out waiting for ${url}" >&2
-  return 1
-}
-
-remote_wait_aux_http() {
-  local host=$1
-  local url=$2
-  echo "Waiting ${host} ${url}"
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    echo "+ remote_wait_aux_http ${host} ${url}"
-    return 0
-  fi
-  local remote_cmd py_code
-  py_code="import json,urllib.request,time,sys; url='${url}'; ok=False
-for _ in range(300):
-    try:
-        data=json.loads(urllib.request.urlopen(url,timeout=2).read().decode())
-        if 'data' in data:
-            print('ready', url); ok=True; break
-    except Exception:
-        pass
-    time.sleep(2)
-sys.exit(0 if ok else 1)"
-  remote_cmd=$(printf '%q ' bash -lc "$(printf '%q ' "${SLIME_PYTHON}" -c "${py_code}")")
-  fill_ssh_args "${host}"
-  ssh "${SSH_ARGS[@]}" "${remote_cmd}"
-}
-
-start_aux_server() {
-  [ "${ENV_NAME}" = "tau2" ] || return 0
-  if [ -n "${TAU2_USER_MODEL_BASE_URL}" ]; then
-    export TAU2_USER_MODEL_BASE_URL TAU2_USER_MODEL TAU2_USER_MODEL_API_KEY
-    return 0
-  fi
-  if [ -z "${AUX_NODE}" ] && [ -n "${AUX_NODES_FILE}" ]; then
-    local aux_nodes_file="${AUX_NODES_FILE}"
-    if [[ "${aux_nodes_file}" != /* ]]; then
-      aux_nodes_file="${REPO_DIR}/${aux_nodes_file}"
-    fi
-    if [ -f "${aux_nodes_file}" ]; then
-      AUX_NODE=$(awk 'NF && $1 !~ /^#/ {print $1; exit}' "${aux_nodes_file}")
-    fi
-  fi
-  if [ -z "${AUX_NODE}" ]; then
-    echo "tau2 aux service requires TAU2_USER_MODEL_BASE_URL or --aux-node HOST." >&2
-    echo "For a dedicated local service, pass --aux-node <host> and reserve its GPUs outside Ray/training." >&2
-    exit 1
-  fi
-  local node_addr="${AUX_NODE}"
-  ensure_log_dir
-  AUX_BENCH_NODES_FILE=${AUX_BENCH_NODES_FILE:-${LOG_DIR}/tau2_aux_nodes.txt}
-  [ "${DRY_RUN}" -eq 1 ] || printf '%s\n' "${AUX_NODE}" > "${AUX_BENCH_NODES_FILE}"
-  if [ "${DRY_RUN}" -eq 1 ]; then
-    node_addr="${AUX_NODE}"
-  elif [ "${AUX_NODE}" = "this" ]; then
-    node_addr=$(hostname -I | tr ' ' '\n' | grep -m1 .)
-  elif is_current_node "${AUX_NODE}"; then
-    node_addr=$(hostname -I | tr ' ' '\n' | grep -m1 .)
-  else
-    node_addr=$(remote_first_ip "${AUX_NODE}")
-  fi
-  export TAU2_USER_MODEL_BASE_URL="http://$(http_host "${node_addr}"):${AUX_PORT}/v1"
-  export TAU2_USER_MODEL TAU2_USER_MODEL_API_KEY
-  local aux_tool_call_parser="${AUX_TOOL_CALL_PARSER:-$(infer_tool_call_parser_from_model "${AUX_MODEL}")}"
-  echo "tau2 aux tool-call parser: ${aux_tool_call_parser} (model: ${AUX_MODEL})"
-
-  local session="mlf_tau2_aux"
-  local log="${LOG_DIR}/tau2_aux.log"
-  local serve_cmd
-  serve_cmd=$(printf 'cd %q && mkdir -p %q && export PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=%q PYTHONPATH=%q no_proxy=%q NO_PROXY=%q && %q -m sglang.launch_server --model-path %q --served-model-name %q --host 0.0.0.0 --port %q --tp-size %q --mem-fraction-static %q --reasoning-parser %q --tool-call-parser %q --trust-remote-code > %q 2>&1' \
-    "${REPO_DIR}" \
-    "${LOG_DIR}" \
-    "${AUX_GPUS}" \
-    "${REPO_DIR}:${SLIME_ENV}/lib/python3.12/site-packages" \
-    "${no_proxy}" \
-    "${NO_PROXY}" \
-    "${SLIME_PYTHON}" \
-    "${AUX_MODEL}" \
-    "${TAU2_USER_MODEL}" \
-    "${AUX_PORT}" \
-    "${AUX_TP}" \
-    "${AUX_MEM_FRACTION}" \
-    "${AUX_REASONING_PARSER}" \
-    "${aux_tool_call_parser}" \
-    "${log}")
-  if is_current_node "${AUX_NODE}" || [ "${AUX_NODE}" = "this" ]; then
-    run_cmd tmux kill-session -t "${session}" 2>/dev/null || true
-    run_cmd tmux new-session -d -s "${session}" "${serve_cmd}"
-    wait_aux_http "$(sglang_health_url "${TAU2_USER_MODEL_BASE_URL}")"
-  else
-    remote_start_tmux "${AUX_NODE}" "${session}" "${log}" "${serve_cmd}"
-    remote_wait_aux_http "${AUX_NODE}" "http://127.0.0.1:${AUX_PORT}/v1/models"
-  fi
-  STARTED_AUX_SERVER=1
-  echo "tau2 aux API: ${TAU2_USER_MODEL_BASE_URL}"
-  echo "tau2 aux log: ${AUX_NODE}:${log}"
-}
-
 write_appworld_config() {
   local config="${MLF_LOCAL_ROOT}/configs/appworld_launch.yaml"
   local pool_size="${ENV_POOL_SIZE:-4}"
+  local base_config
+  base_config=$(env_config_path "examples/agent_env/appworld/train_config.yaml")
   if [ "${DRY_RUN}" -eq 1 ]; then
     echo "${config}"
     return
@@ -535,7 +638,7 @@ write_appworld_config() {
   "${SLIME_PYTHON}" - <<PY
 from pathlib import Path
 import yaml
-base = Path("${REPO_DIR}/examples/agent_env/appworld/train_config.yaml")
+base = Path("${base_config}")
 cfg = yaml.safe_load(base.read_text()) or {}
 cfg.setdefault("appworld", {})
 cfg["appworld"]["root"] = "${MLF_LOCAL_ROOT}/data/appworld"
@@ -590,7 +693,7 @@ start_ray_head() {
   run_cmd tmux kill-session -t mlf_ray_head 2>/dev/null || true
   run_cmd "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force
   run_cmd tmux new-session -d -s mlf_ray_head \
-    "export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1; if [ -n '${RAY_CUDA_VISIBLE_DEVICES}' ]; then export CUDA_VISIBLE_DEVICES='${RAY_CUDA_VISIBLE_DEVICES}'; fi; mkdir -p ${LOG_DIR}; ${SLIME_PYTHON} -m ray.scripts.scripts start --head --node-ip-address ${node_ip} --port ${RAY_PORT} --num-gpus ${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265 --block > ${LOG_DIR}/ray_head.log 2>&1"
+    "export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1; if [ -f '${WANDB_SECRET_FILE}' ]; then set -a; source '${WANDB_SECRET_FILE}'; set +a; fi; if [ -n '${RAY_CUDA_VISIBLE_DEVICES}' ]; then export CUDA_VISIBLE_DEVICES='${RAY_CUDA_VISIBLE_DEVICES}'; fi; mkdir -p ${LOG_DIR}; ${SLIME_PYTHON} -m ray.scripts.scripts start --head --node-ip-address ${node_ip} --port ${RAY_PORT} --num-gpus ${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265 --block > ${LOG_DIR}/ray_head.log 2>&1"
 }
 
 start_ray_worker() {
@@ -600,7 +703,7 @@ start_ray_worker() {
   run_cmd tmux kill-session -t mlf_ray_worker 2>/dev/null || true
   run_cmd "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force
   run_cmd tmux new-session -d -s mlf_ray_worker \
-    "export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1; if [ -n '${RAY_CUDA_VISIBLE_DEVICES}' ]; then export CUDA_VISIBLE_DEVICES='${RAY_CUDA_VISIBLE_DEVICES}'; fi; mkdir -p ${LOG_DIR}; ${SLIME_PYTHON} -m ray.scripts.scripts start --address ${head}:${RAY_PORT} --node-ip-address ${node_ip} --num-gpus ${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}} --disable-usage-stats --block > ${LOG_DIR}/ray_worker.log 2>&1"
+    "export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1; if [ -f '${WANDB_SECRET_FILE}' ]; then set -a; source '${WANDB_SECRET_FILE}'; set +a; fi; if [ -n '${RAY_CUDA_VISIBLE_DEVICES}' ]; then export CUDA_VISIBLE_DEVICES='${RAY_CUDA_VISIBLE_DEVICES}'; fi; mkdir -p ${LOG_DIR}; ${SLIME_PYTHON} -m ray.scripts.scripts start --address ${head}:${RAY_PORT} --node-ip-address ${node_ip} --num-gpus ${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}} --disable-usage-stats --block > ${LOG_DIR}/ray_worker.log 2>&1"
 }
 
 wait_http() {
@@ -725,6 +828,112 @@ start_router() {
     "cd ${REPO_DIR} && export PYTHONNOUSERSITE=1 && mkdir -p ${LOG_DIR} && ${SLIME_PYTHON} examples/agent_env/router.py --host 0.0.0.0 --port ${ROUTER_PORT} --workers ${joined} > ${LOG_DIR}/${ENV_NAME}_router.log 2>&1"
 }
 
+write_bench_on_exit_script() {
+  local script="${LOG_DIR}/${ENV_NAME}_bench_on_exit.sh"
+  local train_nodes_file=""
+  local aux_nodes_file=""
+  if [ -n "${NODES_FILE}" ]; then
+    train_nodes_file=$(resolve_path "${NODES_FILE}")
+  fi
+  if [ -n "${AUX_BENCH_NODES_FILE}" ]; then
+    aux_nodes_file="${AUX_BENCH_NODES_FILE}"
+  fi
+  cat > "${script}" <<EOF
+#!/usr/bin/env bash
+set +e
+
+RUN_BENCH="${MLF_NAS_ROOT}/bash/run_bench.sh"
+TRAIN_NODES_FILE="${train_nodes_file}"
+AUX_NODES_FILE="${aux_nodes_file}"
+SSH_USER="${SSH_USER}"
+SSH_PORT="${SSH_PORT}"
+SSH_KEY="${SSH_KEY}"
+
+ssh_node() {
+  local host=\$1
+  local remote_cmd=\$2
+  ssh -n -6 \\
+    -o BatchMode=yes \\
+    -o ConnectTimeout=10 \\
+    -o StrictHostKeyChecking=no \\
+    -o UserKnownHostsFile=/dev/null \\
+    -o GlobalKnownHostsFile=/dev/null \\
+    -o CheckHostIP=no \\
+    -o IdentitiesOnly=yes \\
+    -i "\${SSH_KEY}" \\
+    -p "\${SSH_PORT}" \\
+    "\${SSH_USER}@\${host}" "\${remote_cmd}"
+}
+
+is_local_node() {
+  local host=\$1
+  [ "\${host}" = "this" ] && return 0
+  [ "\${host}" = "\$(hostname)" ] && return 0
+  hostname -I 2>/dev/null | tr ' ' '\\n' | grep -qx "\${host}" && return 0
+  ip addr 2>/dev/null | grep -Fq "\${host}" && return 0
+  return 1
+}
+
+start_remote_bench() {
+  local host=\$1
+  local pre_cmd=\${2:-:}
+  local remote_cmd
+  remote_cmd="\${pre_cmd}; nohup setsid bash \${RUN_BENCH} start >> /tmp/mlf_bench_start.log 2>&1 < /dev/null &"
+  for attempt in 1 2 3; do
+    echo "[bench-on-exit] start bench on \${host}, attempt \${attempt}"
+    if ssh_node "\${host}" "\${remote_cmd}"; then
+      return 0
+    fi
+    sleep 3
+  done
+  echo "[bench-on-exit] failed to start bench on \${host}"
+  return 1
+}
+
+START_LOCAL_BENCH=0
+LOCAL_PRE_CMDS=()
+
+queue_or_start_bench() {
+  local host=\$1
+  local pre_cmd=\${2:-:}
+  if is_local_node "\${host}"; then
+    echo "[bench-on-exit] defer local bench on \${host}"
+    START_LOCAL_BENCH=1
+    LOCAL_PRE_CMDS+=("\${pre_cmd}")
+    return 0
+  fi
+  start_remote_bench "\${host}" "\${pre_cmd}"
+}
+
+if [ -n "\${TRAIN_NODES_FILE}" ] && [ -f "\${TRAIN_NODES_FILE}" ]; then
+  while IFS= read -r node; do
+    [ -z "\${node}" ] && continue
+    queue_or_start_bench "\${node}"
+  done < <(awk 'NF && \$1 !~ /^#/ {print \$1}' "\${TRAIN_NODES_FILE}")
+else
+  echo "[bench-on-exit] no train nodes file; starting local bench"
+  START_LOCAL_BENCH=1
+fi
+
+if [ -n "\${AUX_NODES_FILE}" ] && [ -f "\${AUX_NODES_FILE}" ]; then
+  while IFS= read -r node; do
+    [ -z "\${node}" ] && continue
+    queue_or_start_bench "\${node}" "tmux kill-session -t mlf_tau2_aux 2>/dev/null || true; tmux kill-session -t mlf_aux_endpoint 2>/dev/null || true; pkill -f '[v]llm serve' 2>/dev/null || true; pkill -f '[V]LLM::Worker' 2>/dev/null || true; pkill -f '[E]ngineCore' 2>/dev/null || true; pkill -f '[A]PIServer' 2>/dev/null || true; pkill -f '[s]glang.launch_server' 2>/dev/null || true"
+  done < <(awk 'NF && \$1 !~ /^#/ {print \$1}' "\${AUX_NODES_FILE}")
+fi
+
+if [ "\${START_LOCAL_BENCH}" = "1" ]; then
+  for pre_cmd in "\${LOCAL_PRE_CMDS[@]}"; do
+    eval "\${pre_cmd}" || true
+  done
+  echo "[bench-on-exit] start local bench last"
+  nohup setsid bash "\${RUN_BENCH}" start >> /tmp/mlf_bench_start.log 2>&1 < /dev/null &
+fi
+EOF
+  chmod +x "${script}"
+  printf '%s\n' "${script}"
+}
+
 start_train_driver() {
   if [ -z "${TRAIN_CMD}" ]; then
     return 0
@@ -736,50 +945,7 @@ start_train_driver() {
   local bench_log="${LOG_DIR}/${ENV_NAME}_bench_on_exit.log"
   local bench_cmd="${BENCH_CMD}"
   if [ -z "${bench_cmd}" ] && [ "${BENCH_ON_TRAIN_EXIT}" = "1" ]; then
-    bench_cmd=$(printf 'if [ -f %q ]; then bash %q start' "${MLF_NAS_ROOT}/bash/run_bench.sh" "${MLF_NAS_ROOT}/bash/run_bench.sh")
-    if [ -n "${NODES_FILE}" ]; then
-      bench_cmd+=" $(printf '%q %q' --nodes "${NODES_FILE}")"
-    fi
-    if [ -n "${BENCH_GPUS}" ]; then
-      bench_cmd+=" $(printf '%q %q' --gpus "${BENCH_GPUS}")"
-    fi
-    bench_cmd+='; else echo "missing run_bench.sh"; fi'
-  fi
-  local aux_bench_cmd="${AUX_BENCH_CMD}"
-  if [ -z "${aux_bench_cmd}" ] && [ "${BENCH_ON_TRAIN_EXIT}" = "1" ] && [ "${AUX_BENCH_ON_TRAIN_EXIT}" = "1" ] && [ "${STARTED_AUX_SERVER}" = "1" ]; then
-    local aux_stop_cmd
-    if is_current_node "${AUX_NODE}" || [ "${AUX_NODE}" = "this" ]; then
-      aux_stop_cmd='tmux kill-session -t mlf_tau2_aux 2>/dev/null || true'
-    else
-      local aux_ssh=(ssh)
-      if [ "${SSH_IPV6}" = "1" ]; then
-        aux_ssh+=("-6")
-      fi
-      aux_ssh+=(
-        "-o" "BatchMode=yes"
-        "-o" "StrictHostKeyChecking=no"
-        "-o" "UserKnownHostsFile=/dev/null"
-        "-o" "GlobalKnownHostsFile=/dev/null"
-        "-o" "CheckHostIP=no"
-        "-o" "IdentitiesOnly=yes"
-        "-i" "${SSH_KEY}"
-        "-p" "${SSH_PORT}"
-      )
-      if [ -n "${SSH_JUMP}" ]; then
-        aux_ssh+=("-J" "${SSH_JUMP}")
-      fi
-      aux_ssh+=("${SSH_USER}@${AUX_NODE}")
-      aux_stop_cmd="$(printf '%q ' "${aux_ssh[@]}") $(printf '%q' 'tmux kill-session -t mlf_tau2_aux 2>/dev/null || true')"
-    fi
-    aux_bench_cmd=$(printf 'if [ -f %q ]; then %s; bash %q start --nodes %q --gpus %q; else echo "missing run_bench.sh"; fi' \
-      "${MLF_NAS_ROOT}/bash/run_bench.sh" \
-      "${aux_stop_cmd}" \
-      "${MLF_NAS_ROOT}/bash/run_bench.sh" \
-      "${AUX_BENCH_NODES_FILE}" \
-      "${AUX_BENCH_GPUS}")
-  fi
-  if [ -n "${aux_bench_cmd}" ]; then
-    bench_cmd="${bench_cmd:-:}; ${aux_bench_cmd}"
+    bench_cmd=$(printf 'bash %q' "$(write_bench_on_exit_script)")
   fi
   local cmd
   cmd=$(printf 'cd %q && mkdir -p %q && on_exit(){ code=$?; printf "exit_code=%%s\nend_time=%%s\n" "$code" "$(date -Is)" > %q; if [ %q = 1 ]; then echo "[bench-on-exit] train exited with code $code at $(date -Is)" >> %q; bash -lc %q >> %q 2>&1 || true; fi; exit "$code"; }; trap on_exit EXIT; printf "state=running\nstart_time=%%s\n" "$(date -Is)" > %q; AGENT_ENV_ROUTER_URL=%q WEBSHOP_ENV_SERVER_URL=%q ALFWORLD_ENV_SERVER_URL=%q TAU2_ENV_SERVER_URL=%q APPWORLD_ENV_SERVER_URL=%q WEBSHOP_DATA_SIZE=%q bash -lc %q > %q 2>&1' \
@@ -799,7 +965,9 @@ start_train_driver() {
     "${WEBSHOP_DATA_SIZE:-${DATA_SIZE}}" \
     "${TRAIN_CMD}" \
     "${train_log}")
-  run_cmd tmux kill-session -t "${session}" 2>/dev/null || true
+  if tmux has-session -t "=${session}" 2>/dev/null; then
+    run_cmd tmux kill-session -t "=${session}"
+  fi
   run_cmd tmux new-session -d -s "${session}" "${cmd}"
   echo "Training submitted in tmux: ${session}"
   echo "Training log: ${train_log}"
@@ -832,9 +1000,9 @@ remote_worker() {
 }
 
 remote_cmd_prefix() {
-  printf 'cd %q && MLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q LOG_DIR=%q REPO_DIR=%q RAY_CUDA_VISIBLE_DEVICES=%q NUM_GPUS_PER_NODE_FOR_RAY=%q AUX_NODE=%q AUX_PORT=%q AUX_MODEL=%q AUX_GPUS=%q AUX_TP=%q AUX_MEM_FRACTION=%q AUX_REASONING_PARSER=%q AUX_TOOL_CALL_PARSER=%q TAU2_USER_MODEL=%q TAU2_USER_MODEL_API_KEY=%q TAU2_USER_MODEL_BASE_URL=%q bash scripts/mlf/launch_agentic_training.sh ' \
-    "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${LOG_DIR}" "${REPO_DIR}" "${RAY_CUDA_VISIBLE_DEVICES}" "${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}}" \
-    "${AUX_NODE}" "${AUX_PORT}" "${AUX_MODEL}" "${AUX_GPUS}" "${AUX_TP}" "${AUX_MEM_FRACTION}" "${AUX_REASONING_PARSER}" "${AUX_TOOL_CALL_PARSER}" "${TAU2_USER_MODEL}" "${TAU2_USER_MODEL_API_KEY}" "${TAU2_USER_MODEL_BASE_URL}"
+  printf 'cd %q && MLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q LOG_DIR=%q REPO_DIR=%q ENV_CONFIG=%q RAY_CUDA_VISIBLE_DEVICES=%q NUM_GPUS_PER_NODE_FOR_RAY=%q AUX_ENV_FILE=%q bash scripts/mlf/launch_agentic_training.sh ' \
+    "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${LOG_DIR}" "${REPO_DIR}" "${ENV_CONFIG}" "${RAY_CUDA_VISIBLE_DEVICES}" "${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}}" \
+    "${AUX_ENV_FILE}"
 }
 
 remote_start_tmux() {
@@ -966,6 +1134,7 @@ run_worker() {
     echo "Worker role requires HEAD_NODE or --head-address support from caller" >&2
     exit 1
   fi
+  stop_bench_for_nodes "" train-worker
   start_env_server
   wait_http "http://127.0.0.1:${ENV_PORT}/health"
   start_ray_worker "${head_addr}"
@@ -979,7 +1148,9 @@ run_head() {
   else
     head=$(hostname -I | tr ' ' '\n' | grep -m1 .)
   fi
-  start_aux_server
+  source_aux_endpoint_env
+  reset_training_runtime_for_nodes "${NODES_FILE}"
+  stop_bench_for_nodes "${NODES_FILE}" train
   start_ray_head
   start_env_server
   wait_http "http://127.0.0.1:${ENV_PORT}/health"
@@ -1044,9 +1215,9 @@ if [ "${ROLE}" = "auto" ]; then
     # local machine should only maintain this one SSH connection long enough to
     # submit the tmux session.
     remote_cmd=$(
-      printf 'cd %q && MLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q LOG_DIR=%q REPO_DIR=%q RAY_CUDA_VISIBLE_DEVICES=%q NUM_GPUS_PER_NODE_FOR_RAY=%q AUX_NODE=%q AUX_PORT=%q AUX_MODEL=%q AUX_GPUS=%q AUX_TP=%q AUX_MEM_FRACTION=%q AUX_REASONING_PARSER=%q AUX_TOOL_CALL_PARSER=%q TAU2_USER_MODEL=%q TAU2_USER_MODEL_API_KEY=%q TAU2_USER_MODEL_BASE_URL=%q SSH_JUMP= SSH_KEY=%q SSH_IPV6=1 bash scripts/mlf/launch_agentic_training.sh ' \
-        "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${LOG_DIR}" "${REPO_DIR}" "${RAY_CUDA_VISIBLE_DEVICES}" "${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}}" \
-        "${AUX_NODE}" "${AUX_PORT}" "${AUX_MODEL}" "${AUX_GPUS}" "${AUX_TP}" "${AUX_MEM_FRACTION}" "${AUX_REASONING_PARSER}" "${AUX_TOOL_CALL_PARSER}" "${TAU2_USER_MODEL}" "${TAU2_USER_MODEL_API_KEY}" "${TAU2_USER_MODEL_BASE_URL}" "/home/${SSH_USER}/.ssh/byte_id_rsa"
+      printf 'cd %q && MLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q LOG_DIR=%q REPO_DIR=%q ENV_CONFIG=%q RAY_CUDA_VISIBLE_DEVICES=%q NUM_GPUS_PER_NODE_FOR_RAY=%q AUX_ENV_FILE=%q SSH_JUMP= SSH_KEY=%q SSH_IPV6=1 bash scripts/mlf/launch_agentic_training.sh ' \
+        "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${LOG_DIR}" "${REPO_DIR}" "${ENV_CONFIG}" "${RAY_CUDA_VISIBLE_DEVICES}" "${NUM_GPUS_PER_NODE_FOR_RAY:-${NUM_GPUS:-4}}" \
+        "${AUX_ENV_FILE}" "/home/${SSH_USER}/.ssh/byte_id_rsa"
       printf '%q ' --role head --env "${ENV_NAME}" --nodes "${NODES_FILE}" --env-port "${ENV_PORT}" --router-port "${ROUTER_PORT}" --ray-port "${RAY_PORT}" --data-size "${DATA_SIZE}"
       [ -z "${ENV_POOL_SIZE}" ] || printf '%q ' --env-pool-size "${ENV_POOL_SIZE}"
       [ -z "${TRAIN_CMD}" ] || printf '%q ' --train-cmd "${TRAIN_CMD}"
@@ -1065,6 +1236,7 @@ case "${ROLE}" in
     start_router
     wait_http "http://127.0.0.1:${ROUTER_PORT}/health"
     if [ -n "${TRAIN_CMD}" ]; then
+      source_aux_endpoint_env
       export AGENT_ENV_ROUTER_URL="http://$(http_host "$(hostname -I | tr ' ' '\n' | grep -m1 .)"):${ROUTER_PORT}"
       export WEBSHOP_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"
       export ALFWORLD_ENV_SERVER_URL="${AGENT_ENV_ROUTER_URL}"

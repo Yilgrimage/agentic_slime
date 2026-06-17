@@ -193,3 +193,9 @@ glm/
 _examples_synced/
 .env
 .DS_Store
+._*
+**/._*
+
+# Large task assets and temporary experiment notes belong on NAS, not in git.
+/data/
+/AAAnote/

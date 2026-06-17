@@ -58,6 +58,15 @@ class RayTrainGroup:
             **{name: "1" for name in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST},
             **self.args.train_env_vars,
         }
+        for key in (
+            "WANDB_API_KEY",
+            "WANDB_BASE_URL",
+            "WANDB_MODE",
+            "WANDB_HTTP_TIMEOUT",
+            "WANDB_INIT_TIMEOUT",
+        ):
+            if value := os.environ.get(key):
+                env_vars[key] = value
 
         if self.args.offload_train and self.args.train_backend == "megatron":
             import torch_memory_saver

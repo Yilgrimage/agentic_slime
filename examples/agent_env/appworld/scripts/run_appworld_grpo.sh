@@ -8,4 +8,4 @@ export ENV_SERVER_URL_VAR=APPWORLD_ENV_SERVER_URL
 export APPWORLD_ROOT=${APPWORLD_ROOT:-${MLF_LOCAL_ROOT:-/tmp/mlf-runtime}/data/appworld}
 export HOME=${APPWORLD_ROOT}
 
-exec bash "${REPO_DIR:-/mnt/bn/jixf-nas-lq/mlf/code/slime}/examples/agent_env/scripts/run_qwen3_8b_agent_env_grpo.sh"
+exec bash "${REPO_DIR:-/mnt/bn/jixf-nas-lq/mlf/code/slime}/examples/agent_env/scripts/run_agent_env_grpo.sh"

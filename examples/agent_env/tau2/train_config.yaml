@@ -28,12 +28,12 @@ reward:
     invalid: 0.0
 
 env_server:
-  pool_size: 32
+  pool_size: 128
   acquire_timeout_s: 1
   prewarm_splits: ["train"]
   shared_pool: true
   worker_start_timeout_s: 300
-  worker_request_timeout_s: 180
+  worker_request_timeout_s: 300
 
 agent_prompt_data:
   source: areal_synthetic
@@ -58,16 +58,8 @@ tau2:
   max_turns: 40
   solo_mode: false
   user_sim_enabled: true
-  user_model: ${TAU2_USER_MODEL}
-  user_model_base_url: ${TAU2_USER_MODEL_BASE_URL}
-  user_model_api_key_path: ${TAU2_USER_MODEL_API_KEY_PATH}
-  user_model_timeout_s: 120
-  user_model_max_tokens: 512
-  user_model_temperature: 0.0
-  user_model_top_p: 1.0
-  user_model_enable_thinking: false
-  user_model_separate_reasoning: true
-  max_user_tool_rounds: 4
+  max_user_tool_rounds: 20
+  user_sim_trace: true
   include_policy: true
   include_tools: true
   evaluation_type: action

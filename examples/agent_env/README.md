@@ -13,6 +13,8 @@ Shared modules:
   token reward alignment, and lease cleanup.
 - `metrics.py`: generic rollout/eval metric aggregation for Slime
   logging.
+- `scripts/run_agent_env_grpo.sh`: generic Slime GRPO runner shared by
+  environment wrappers.
 
 Environment folders provide a small `AgentEnvSpec` plus a backend implementation:
 
@@ -68,3 +70,68 @@ Keep generic behavior in this folder:
 - multi-turn rollout bookkeeping
 - token-level reward list shape management
 - common rollout/eval logging
+
+Launch/config convention:
+
+- env behavior belongs in `<env>/train_config.yaml`;
+- train/model/topology/aux parameters belong in `configs/agent_env/**/*.env`;
+- optional auxiliary inference parameters belong in an aux config, not in the
+  top-level launch script;
+- use `examples/agent_env/scripts/launch_agent_env.sh <run-profile.env>` as the
+  top-level launch entrypoint.
+
+## Current source of truth
+
+Use the GitHub fork as the code source of truth and the NAS checkout as the
+runtime checkout:
+
+- Git remote: `https://github.com/Yilgrimage/agentic_slime.git`
+- NAS checkout: `/mnt/bn/jixf-nas-lq/mlf/code/slime`
+- Node-local runtime: `/tmp/mlf-envs` and `/tmp/mlf-runtime`
+
+When moving to a cloud development machine with the NAS mounted, develop
+directly in the NAS checkout or clone the GitHub fork there and keep that clone
+as the only editable copy. Avoid editing both a laptop checkout and the NAS
+checkout in parallel; sync drift is otherwise hard to reason about during
+training.
+
+## Profile-driven launch
+
+Normal tau2 launch:
+
+```bash
+cd /mnt/bn/jixf-nas-lq/mlf/code/slime
+bash examples/agent_env/scripts/launch_agent_env.sh \
+  configs/agent_env/runs/tau2_qwen35_4b_grpo_m2p7_3train_1aux.env
+```
+
+The selected run profile sources:
+
+- one topology profile from `configs/agent_env/topology/`;
+- one train profile from `configs/agent_env/train/`;
+- optionally one aux profile from `configs/agent_env/aux/`;
+- one env config from `examples/agent_env/<env>/train_config.yaml`.
+
+The launcher writes the resolved profiles into the run log directory before
+starting Ray, env servers, the router, optional aux inference, and the Slime
+train driver. If a parameter should be considered part of an experiment, add it
+to the appropriate profile rather than hiding it in ad-hoc shell variables.
+
+## Environment responsibilities
+
+The shared rollout layer handles HTTP leases, token ledger bookkeeping, common
+format-reward accounting, sample dumping, and Slime custom generation. It should
+not contain environment-specific reset semantics.
+
+Environment folders should own:
+
+- task selection and split handling;
+- prompt/observation/action rendering;
+- backend reset/step/evaluate calls;
+- success and score interpretation;
+- optional tool-use or text-action parser choice.
+
+For tool-use environments, keep policy-facing tool schemas and usersim behavior
+inside the env-specific adapter. For text-action environments such as ALFWorld
+and WebShop, keep tag parsing local to the env adapter while still using the
+shared message/token ledger.

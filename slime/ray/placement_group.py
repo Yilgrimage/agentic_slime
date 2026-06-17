@@ -1,4 +1,5 @@
 import logging
+import os
 import socket
 
 import ray
@@ -181,10 +182,24 @@ def create_training_models(args, pgs, rollout_manager):
 
 
 def create_rollout_manager(args, pg):
-    rollout_manager = RolloutManager.options(
-        num_cpus=1,
-        num_gpus=0,
-    ).remote(args, pg)
+    runtime_env_vars = {
+        key: value
+        for key in (
+            "WANDB_API_KEY",
+            "WANDB_BASE_URL",
+            "WANDB_MODE",
+            "WANDB_HTTP_TIMEOUT",
+            "WANDB_INIT_TIMEOUT",
+        )
+        if (value := os.environ.get(key))
+    }
+    rollout_options = {
+        "num_cpus": 1,
+        "num_gpus": 0,
+    }
+    if runtime_env_vars:
+        rollout_options["runtime_env"] = {"env_vars": runtime_env_vars}
+    rollout_manager = RolloutManager.options(**rollout_options).remote(args, pg)
 
     # calculate num_rollout from num_epoch
     num_rollout_per_epoch = None
