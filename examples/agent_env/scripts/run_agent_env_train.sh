@@ -311,6 +311,7 @@ export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${SLIME_ENV}/lib:${S
 
 cd "${REPO_DIR}"
 source "${MODEL_ARGS_SCRIPT}"
+read -r -a MODEL_EXTRA_ARGS_ARRAY <<< "${MODEL_EXTRA_ARGS:-}"
 
 ROLLOUT_FUNCTION_PATH=${ROLLOUT_FUNCTION_PATH:-}
 if [ -z "${ROLLOUT_FUNCTION_PATH}" ]; then
@@ -505,6 +506,7 @@ echo "Checkpoint options: save_interval=${SAVE_INTERVAL:-${NUM_STEPS}} no_save_o
 "${SLIME_PYTHON}" "${REPO_DIR}/${TRAIN_ENTRYPOINT}" \
    "${CKPT_ARGS[@]}" \
    "${MODEL_ARGS[@]}" \
+   "${MODEL_EXTRA_ARGS_ARRAY[@]}" \
    "${ROLLOUT_ARGS[@]}" \
    "${PERF_ARGS[@]}" \
    --train-env-vars "${TRAIN_ENV_VARS_JSON}" \
