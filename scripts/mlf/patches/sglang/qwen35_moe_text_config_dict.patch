@@ -1,0 +1,46 @@
+diff --git a/python/sglang/srt/utils/hf_transformers_utils.py b/python/sglang/srt/utils/hf_transformers_utils.py
+index 9c6886f..0000000 100644
+--- a/python/sglang/srt/utils/hf_transformers_utils.py
++++ b/python/sglang/srt/utils/hf_transformers_utils.py
+@@ -129,6 +129,23 @@ def download_from_hf(
+     return snapshot_download(model_path, allow_patterns=allow_patterns)
+ 
+ 
++def _coerce_nested_config_dicts(config: PretrainedConfig) -> None:
++    for attr in ("text_config", "vision_config"):
++        nested_config = getattr(config, attr, None)
++        if not isinstance(nested_config, dict):
++            continue
++        sub_configs = getattr(config, "sub_configs", {})
++        config_cls = sub_configs.get(attr)
++        if config_cls is not None:
++            nested_config = config_cls(**nested_config)
++        else:
++            try:
++                nested_config = AutoConfig.for_model(**nested_config)
++            except ValueError:
++                nested_config = PretrainedConfig.from_dict(nested_config)
++        setattr(config, attr, nested_config)
++
++
+ def get_hf_text_config(config: PretrainedConfig):
+     """Get the "sub" config relevant to llm for multi modal models.
+     No op for pure text models.
+@@ -146,6 +157,8 @@ def get_hf_text_config(config: PretrainedConfig):
+             setattr(config, "dtype", torch.float16)
+             return config
+ 
++    _coerce_nested_config_dicts(config)
++
+     if hasattr(config, "text_config"):
+         # The code operates under the assumption that text_config should have
+         # `num_attention_heads` (among others). Assert here to fail early
+@@ -408,6 +421,8 @@ def get_config(
+         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
+         config.update({"architectures": [model_type]})
+ 
++    _coerce_nested_config_dicts(config)
++
+     return config
+ 
+ 

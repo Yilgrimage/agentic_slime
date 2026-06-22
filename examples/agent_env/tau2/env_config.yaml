@@ -1,0 +1,63 @@
+task:
+  split: train
+max_turns: 40
+timeouts:
+  policy_s: 300
+  env_request_s: 660
+interaction:
+  mode: tool_call
+  enable_thinking: true
+  reasoning:
+    parser: qwen3-thinking
+    fallback_to_raw: false
+observation:
+  include_actions: true
+action:
+  restrict_to_available: false
+  invalid_fallback: assistant_message
+reward:
+  source: score
+  outcome: 10.0
+  truncated: -1.0
+  format:
+    valid: 0.0
+    invalid: -0.1
+env_server:
+  pool_size: 128
+  acquire_timeout_s: 600
+  prewarm_splits:
+  - train
+  shared_pool: true
+  worker_start_timeout_s: 300
+  worker_request_timeout_s: 300
+agent_prompt_data:
+  source: areal_synthetic
+  data_dir: ${MLF_LOCAL_ROOT}/data/tau2/data
+  areal_root: ${MLF_LOCAL_ROOT}/data/tau2/areal_synthetic
+  areal_input: tau2_rl_train.jsonl
+  task_file_dir: ''
+  domains:
+  - retail
+  - airline
+  - telecom
+  task_sets: ''
+  domain_weights: ''
+  split: train
+  num_tasks: all
+  seed: 42
+  output_dir: ${MLF_LOCAL_ROOT}/data/tau2/areal_synthetic_prompt
+tau2:
+  data_dir: ${MLF_LOCAL_ROOT}/data/tau2/data
+  domain: retail
+  task_set: retail
+  split: null
+  num_tasks: null
+  max_turns: 40
+  solo_mode: false
+  user_sim_enabled: true
+  ignore_user_stop_before_assistant_tool: true
+  max_user_tool_rounds: 20
+  user_sim_trace: true
+  include_policy: true
+  include_tools: true
+  evaluation_type: action

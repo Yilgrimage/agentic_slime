@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+from typing import Any
+
+
+def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
+    if not samples:
+        return {}
+
+    turn_counts = []
+    format_error_counts = []
+    max_response_tokens_hit_counts = []
+    success_count = 0
+    env_rewards = []
+    format_rewards = []
+    truncated_rewards = []
+    truncated_reasons: dict[str, int] = {}
+    discard_reasons: dict[str, int] = {}
+
+    for sample in samples:
+        metadata = sample.metadata or {}
+        turn_count = int(metadata.get("turn_count", 0) or 0)
+        format_errors = int(metadata.get("format_errors", 0) or 0)
+        max_response_tokens_hits = int(metadata.get("max_response_tokens_hits", 0) or 0)
+        turn_counts.append(turn_count)
+        format_error_counts.append(format_errors)
+        max_response_tokens_hit_counts.append(max_response_tokens_hits)
+        success_count += int(bool(metadata.get("env_success", False)))
+        if "env_reward" in metadata:
+            env_rewards.append(float(metadata["env_reward"]))
+        if "format_reward" in metadata:
+            format_rewards.append(float(metadata["format_reward"]))
+        if "truncated_reward" in metadata:
+            truncated_rewards.append(float(metadata["truncated_reward"]))
+        reason = metadata.get("truncated_reason")
+        if reason:
+            truncated_reasons[str(reason)] = truncated_reasons.get(str(reason), 0) + 1
+        discard_reason = metadata.get("discard_reason") if bool(getattr(sample, "remove_sample", False)) else None
+        if discard_reason:
+            discard_reasons[str(discard_reason)] = discard_reasons.get(str(discard_reason), 0) + 1
+
+    total_turns = sum(turn_counts)
+    total_format_errors = sum(format_error_counts)
+    total_discards = sum(discard_reasons.values())
+    metrics = {
+        f"{prefix}/format_error_rate": total_format_errors / total_turns if total_turns else 0.0,
+        f"{prefix}/format_error_per_sample": total_format_errors / len(samples),
+        f"{prefix}/max_response_tokens_hit_rate": sum(1 for count in max_response_tokens_hit_counts if count > 0)
+        / len(samples),
+        f"{prefix}/max_response_tokens_hits_per_sample": sum(max_response_tokens_hit_counts) / len(samples),
+        f"{prefix}/discard_sample_rate": total_discards / len(samples),
+        f"{prefix}/success_rate": success_count / len(samples),
+        f"{prefix}/turn_count_mean": total_turns / len(samples),
+    }
+    if env_rewards:
+        metrics[f"{prefix}/env_reward_mean"] = sum(env_rewards) / len(env_rewards)
+    if format_rewards:
+        metrics[f"{prefix}/format_reward_mean"] = sum(format_rewards) / len(format_rewards)
+    if truncated_rewards:
+        metrics[f"{prefix}/truncated_reward_mean"] = sum(truncated_rewards) / len(truncated_rewards)
+    for reason, count in truncated_reasons.items():
+        metrics[f"{prefix}/truncated_{reason}_rate"] = count / len(samples)
+    for reason, count in discard_reasons.items():
+        metrics[f"{prefix}/discard_{reason}_rate"] = count / len(samples)
+    return metrics
+
+
+def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:
+    from slime.ray.rollout import compute_metrics_from_samples, compute_perf_metrics_from_samples
+    from slime.utils import logging_utils
+    from slime.utils.metric_utils import compute_rollout_step
+
+    log_dict = {**(rollout_extra_metrics or {})}
+    log_dict |= environment_metrics(samples, prefix=prefix)
+    log_dict |= {f"rollout/{k}": v for k, v in compute_metrics_from_samples(args, samples).items()}
+    log_dict |= {f"perf/{k}": v for k, v in compute_perf_metrics_from_samples(args, samples, rollout_time).items()}
+    log_dict["rollout/step"] = compute_rollout_step(args, rollout_id)
+    logging_utils.log(args, log_dict, step_key="rollout/step")
+    return True
+
+
+def log_eval_rollout_data_for_env(prefix: str, rollout_id, args, data, extra_metrics) -> bool:
+    if extra_metrics is None:
+        return False
+    for name, info in data.items():
+        samples = info.get("samples") or []
+        for key, value in environment_metrics(samples, prefix=prefix).items():
+            extra_metrics[f"eval/{name}/{key.removeprefix(prefix + '/')}"] = value
+    return False
