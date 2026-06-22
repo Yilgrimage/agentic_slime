@@ -810,6 +810,7 @@ class AgentTokenLedger:
         tokens: list[int],
         loss_mask_value: int,
         text: str | None = None,
+        log_probs: list[float] | None = None,
     ) -> None:
         if not tokens:
             return
@@ -819,7 +820,13 @@ class AgentTokenLedger:
         self.loss_mask.extend(mask)
         self.token_rewards.extend([0.0] * len(tokens))
         if self.rollout_log_probs is not None:
-            self.rollout_log_probs.extend([0.0] * len(tokens))
+            if log_probs is None:
+                segment_log_probs = [0.0] * len(tokens)
+            else:
+                segment_log_probs = [float(value) for value in log_probs[: len(tokens)]]
+                if len(segment_log_probs) < len(tokens):
+                    segment_log_probs.extend([0.0] * (len(tokens) - len(segment_log_probs)))
+            self.rollout_log_probs.extend(segment_log_probs)
         self.segments.append(
             TokenSegment(
                 kind=kind,
@@ -897,6 +904,13 @@ class AgentTokenLedger:
         log_probs: list[float] | None = None,
     ) -> None:
         self.messages.append(messages_for_chat_template([message])[0])
+        segment_log_probs = None
+        if bool(arg(self.args, "use_rollout_logprobs", False)) or bool(arg(self.args, "use_tis", False)) or bool(
+            arg(self.args, "get_mismatch_metrics", False)
+        ):
+            if self.rollout_log_probs is None:
+                self.rollout_log_probs = [0.0] * len(self.response_tokens)
+            segment_log_probs = list(log_probs or [])
         self._append_segment(
             kind="assistant",
             role="assistant",
@@ -904,6 +918,7 @@ class AgentTokenLedger:
             tokens=list(token_ids),
             loss_mask_value=1,
             text=text,
+            log_probs=segment_log_probs,
         )
         self.assistant_response_texts.append(text)
 
@@ -949,7 +964,7 @@ class AgentTokenLedger:
         sample.response_length = self.response_length
         sample.loss_mask = list(self.loss_mask)
         sample.response = "".join(self.assistant_response_texts)
-        sample.rollout_log_probs = None
+        sample.rollout_log_probs = list(self.rollout_log_probs) if self.rollout_log_probs is not None else None
         sample_metadata["token_rewards"] = list(self.token_rewards)
         if include_trace:
             sample_metadata["messages"] = copy.deepcopy(self.messages)

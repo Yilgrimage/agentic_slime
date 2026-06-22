@@ -42,6 +42,7 @@ SAVE_DIR=${SAVE_DIR:-}
 RESET_TRAIN_RUNTIME_ON_START=${RESET_TRAIN_RUNTIME_ON_START:-1}
 BENCH_ON_TRAIN_EXIT=${BENCH_ON_TRAIN_EXIT:-1}
 BENCH_ON_LAUNCH_FAILURE=${BENCH_ON_LAUNCH_FAILURE:-1}
+BENCH_ON_EXIT_SUPPRESS_FILE=${BENCH_ON_EXIT_SUPPRESS_FILE:-/tmp/mlf_suppress_bench_on_train_exit_until}
 
 SSH_USER=${SSH_USER:-tiger}
 SSH_PORT=${SSH_PORT:-10413}
@@ -91,6 +92,27 @@ while [ $# -gt 0 ]; do
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
+
+configure_internal_no_proxy() {
+  local additions existing host_ips
+  additions="localhost,127.0.0.1,0.0.0.0,::1"
+  if [ -n "${HEAD_ADDRESS:-}" ]; then
+    additions="${additions},${HEAD_ADDRESS}"
+  fi
+  host_ips="$(hostname -I 2>/dev/null | tr ' ' ',' | sed 's/,$//' || true)"
+  if [ -n "${host_ips}" ]; then
+    additions="${additions},${host_ips}"
+  fi
+  existing="${no_proxy:-${NO_PROXY:-}}"
+  if [ -n "${existing}" ]; then
+    export no_proxy="${additions},${existing}"
+  else
+    export no_proxy="${additions}"
+  fi
+  export NO_PROXY="${no_proxy}"
+}
+
+configure_internal_no_proxy
 
 resolve_path() {
   local path=${1:-}
@@ -348,8 +370,14 @@ run_bench_nodes() {
 }
 
 reset_runtime_cmd() {
+  local suppress_until
+  suppress_until=$(( $(date +%s) + 180 ))
   cat <<EOF
 set +e
+if [ -n "${BENCH_ON_EXIT_SUPPRESS_FILE}" ]; then
+  mkdir -p "$(dirname "${BENCH_ON_EXIT_SUPPRESS_FILE}")" 2>/dev/null || true
+  printf '%s\n' "${suppress_until}" > "${BENCH_ON_EXIT_SUPPRESS_FILE}" 2>/dev/null || true
+fi
 for session in mlf_ray_head mlf_ray_worker mlf_${ENV_NAME}_env mlf_${ENV_NAME}_router mlf_${ENV_NAME}_train mlf_multi_head mlf_multi_worker; do
   tmux kill-session -t "\${session}" 2>/dev/null || true
 done
@@ -616,11 +644,22 @@ start_train_driver() {
     printf 'SSH_KEY=%q\n' "${SSH_KEY}"
     printf 'SSH_IPV6=%q\n' "${SSH_IPV6}"
     printf 'SSH_JUMP=%q\n' "${SSH_JUMP}"
+    printf 'BENCH_ON_EXIT_SUPPRESS_FILE=%q\n' "${BENCH_ON_EXIT_SUPPRESS_FILE}"
     cat <<'EOF'
 finish() {
   local code=$?
+  local now suppress_until skip_bench=0
   printf "exit_code=%s\nend_time=%s\n" "${code}" "$(date -Is)" > "${STATUS_FILE}"
-  if [ "${BENCH_ON_TRAIN_EXIT}" = "1" ] && [ -n "${NODES_FILE}" ] && [ -f "${RUN_BENCH}" ]; then
+  if [ -n "${BENCH_ON_EXIT_SUPPRESS_FILE}" ] && [ -f "${BENCH_ON_EXIT_SUPPRESS_FILE}" ]; then
+    now=$(date +%s)
+    suppress_until=$(cat "${BENCH_ON_EXIT_SUPPRESS_FILE}" 2>/dev/null || echo 0)
+    if [ "${suppress_until:-0}" -gt "${now}" ] 2>/dev/null; then
+      skip_bench=1
+      printf "[%s] train exited code=%s; skip run_bench because reset suppression is active until %s\n" \
+        "$(date -Is)" "${code}" "${suppress_until}" >> "${BENCH_LOG}" 2>&1 || true
+    fi
+  fi
+  if [ "${BENCH_ON_TRAIN_EXIT}" = "1" ] && [ "${skip_bench}" != "1" ] && [ -n "${NODES_FILE}" ] && [ -f "${RUN_BENCH}" ]; then
     {
       echo "[$(date -Is)] train exited code=${code}; running run_bench start --nodes ${NODES_FILE} --node ${NODE_INDICES}"
       bench_args=(start --nodes "${NODES_FILE}")
@@ -700,7 +739,7 @@ write_resolved_launch_config() {
     NODES_FILE NODE_INDICES AUX_NODES_FILE AUX_NODE_INDICES AUX_ENV_FILE ENV_PORT ROUTER_PORT RAY_PORT \
     RAY_CUDA_VISIBLE_DEVICES NUM_GPUS_PER_NODE_FOR_RAY RAY_MIN_WORKER_PORT RAY_MAX_WORKER_PORT \
     RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR EXP_PROJECT EXP_NAME \
-    RESET_TRAIN_RUNTIME_ON_START BENCH_ON_TRAIN_EXIT BENCH_ON_LAUNCH_FAILURE \
+    RESET_TRAIN_RUNTIME_ON_START BENCH_ON_TRAIN_EXIT BENCH_ON_LAUNCH_FAILURE BENCH_ON_EXIT_SUPPRESS_FILE \
     SSH_USER SSH_PORT SSH_KEY SSH_IPV6 SSH_JUMP \
     AUX_ENDPOINT_PROVIDER AUX_ENDPOINT_MODEL AUX_ENDPOINT_BASE_URL AUX_ENDPOINT_API_KEY_PATH \
     AUX_ENDPOINT_TIMEOUT_S AUX_ENDPOINT_MAX_TOKENS AUX_ENDPOINT_TEMPERATURE AUX_ENDPOINT_TOP_P \
@@ -821,6 +860,14 @@ bench_on_launch_exit() {
   exit "${code}"
 }
 
+stop_bench_nodes_quiescent() {
+  run_bench_nodes stop "${NODES_FILE}" "${NODE_INDICES}"
+  if [ "${DRY_RUN}" != "1" ]; then
+    sleep 20
+  fi
+  run_bench_nodes stop "${NODES_FILE}" "${NODE_INDICES}"
+}
+
 main_launch() {
   prepare_run
   LAUNCH_BENCH_GUARD_ACTIVE=1
@@ -829,7 +876,7 @@ main_launch() {
   start_aux_endpoint
   write_resolved_launch_config
   reset_runtime_on_nodes
-  run_bench_nodes stop "${NODES_FILE}" "${NODE_INDICES}"
+  stop_bench_nodes_quiescent
   submit_head
   run_bench_nodes stop "${NODES_FILE}" "${NODE_INDICES}"
   LAUNCH_COMPLETED=1

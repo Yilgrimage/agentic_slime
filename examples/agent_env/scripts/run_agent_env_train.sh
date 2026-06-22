@@ -223,7 +223,9 @@ OUTPUT_ROOT=${OUTPUT_ROOT:-${RUN_ROOT}}
 SAVE_DIR=${SAVE_DIR:-${RUN_ROOT}/checkpoints}
 LOG_DIR=${LOG_DIR:-${RUN_ROOT}/logs}
 WANDB_DIR=${WANDB_DIR:-${RUN_ROOT}/wandb}
-RAY_TEMP_DIR=${RAY_TEMP_DIR:-${MLF_LOCAL_ROOT}/ray/${ENV_NAME}_${USER}}
+RUN_USER=${USER:-$(id -un 2>/dev/null || echo unknown)}
+export USER=${USER:-${RUN_USER}}
+RAY_TEMP_DIR=${RAY_TEMP_DIR:-${MLF_LOCAL_ROOT}/ray/${ENV_NAME}_${RUN_USER}}
 DATA_DIR=${DATA_DIR:-${MLF_LOCAL_ROOT}/data/${ENV_NAME}}
 PROMPT_NUM_TASKS=${PROMPT_NUM_TASKS:-}
 DATA_PATH=${DATA_PATH:-}
@@ -418,6 +420,11 @@ GRPO_ARGS=(
 case "${NORMALIZE_ADVANTAGES:-0}" in
   1|true|TRUE|yes|YES|on|ON)
     GRPO_ARGS+=(--normalize-advantages)
+    ;;
+esac
+case "${USE_ROLLOUT_LOGPROBS:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    GRPO_ARGS+=(--use-rollout-logprobs)
     ;;
 esac
 if [ "${USE_KL_LOSS}" = "1" ] || [ "${KL_LOSS_COEF:-0.00}" != "0.00" ]; then
