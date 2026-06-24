@@ -481,7 +481,12 @@ fi
 DEBUG_ARGS=()
 case "${SAVE_DEBUG_TRAIN_DATA:-0}" in
   1|true|TRUE|yes|YES|on|ON)
-    DEBUG_ARGS+=(--save-debug-train-data "${SAVE_DEBUG_TRAIN_DATA_PATH:-${RUN_ROOT}/debug/train_data/{rollout_id}_{rank}.pt}")
+    if [ -n "${SAVE_DEBUG_TRAIN_DATA_PATH:-}" ]; then
+      DEBUG_TRAIN_DATA_PATH="${SAVE_DEBUG_TRAIN_DATA_PATH}"
+    else
+      DEBUG_TRAIN_DATA_PATH="${RUN_ROOT}/debug/train_data/"'{rollout_id}_{rank}.pt'
+    fi
+    DEBUG_ARGS+=(--save-debug-train-data "${DEBUG_TRAIN_DATA_PATH}")
     ;;
 esac
 
