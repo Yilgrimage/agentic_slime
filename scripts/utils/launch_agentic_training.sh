@@ -31,6 +31,8 @@ RAY_CUDA_VISIBLE_DEVICES=${RAY_CUDA_VISIBLE_DEVICES:-}
 NUM_GPUS_PER_NODE_FOR_RAY=${NUM_GPUS_PER_NODE_FOR_RAY:-}
 RAY_MIN_WORKER_PORT=${RAY_MIN_WORKER_PORT:-}
 RAY_MAX_WORKER_PORT=${RAY_MAX_WORKER_PORT:-}
+RAY_START_MAX_ATTEMPTS=${RAY_START_MAX_ATTEMPTS:-2}
+RAY_HEAD_START_TIMEOUT_S=${RAY_HEAD_START_TIMEOUT_S:-90}
 
 EXP_PROJECT=${EXP_PROJECT:-}
 EXP_NAME=${EXP_NAME:-}
@@ -353,6 +355,11 @@ EOF
   remote_query "${host}" "${remote_cmd}"
 }
 
+tmux_session_active() {
+  local session=$1
+  tmux has-session -t "${session}" 2>/dev/null
+}
+
 run_bench_nodes() {
   local action=$1
   local nodes_file=$2
@@ -484,11 +491,21 @@ start_env_server() {
 start_ray_head() {
   local node_ip=${HEAD_ADDRESS:-}
   [ -n "${node_ip}" ] || node_ip=$(hostname -I | tr ' ' '\n' | grep -m1 .)
-  [ "${DRY_RUN}" = "1" ] || "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force || true
-  local script
+  local script attempt
   script=$(printf 'export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1\n[ ! -f %q ] || { set -a; source %q; set +a; }\nexport CUDA_VISIBLE_DEVICES=%q\nmkdir -p %q\n%q -m ray.scripts.scripts start --head --node-ip-address %q --port %q --num-gpus %q --min-worker-port %q --max-worker-port %q --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265 --block\n' \
     "${WANDB_SECRET_FILE}" "${WANDB_SECRET_FILE}" "${RAY_CUDA_VISIBLE_DEVICES}" "${LOG_DIR}" "${SLIME_PYTHON}" "${node_ip}" "${RAY_PORT}" "${NUM_GPUS_PER_NODE_FOR_RAY}" "${RAY_MIN_WORKER_PORT}" "${RAY_MAX_WORKER_PORT}")
-  tmux_start_local mlf_ray_head "${script}" "${LOG_DIR}/ray_head.log"
+  for attempt in $(seq 1 "${RAY_START_MAX_ATTEMPTS}"); do
+    echo "Starting Ray head attempt ${attempt}/${RAY_START_MAX_ATTEMPTS}"
+    [ "${DRY_RUN}" = "1" ] || "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force || true
+    tmux_start_local mlf_ray_head "${script}" "${LOG_DIR}/ray_head.log"
+    if wait_ray_head_ready; then
+      return 0
+    fi
+    tmux kill-session -t mlf_ray_head 2>/dev/null || true
+    sleep 5
+  done
+  echo "Ray head failed after ${RAY_START_MAX_ATTEMPTS} attempts" >&2
+  return 1
 }
 
 start_ray_worker() {
@@ -561,6 +578,31 @@ finally:
 PY
 }
 
+wait_ray_head_ready() {
+  local deadline=$((SECONDS + RAY_HEAD_START_TIMEOUT_S))
+  local alive
+  if [ "${DRY_RUN}" = "1" ]; then
+    echo "+ wait_ray_head_ready"
+    return 0
+  fi
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    alive=$(ray_alive_nodes 2>/dev/null | tail -n 1 || true)
+    if [ "${alive:-0}" -ge 1 ] 2>/dev/null; then
+      echo "Ray head ready: alive=${alive}"
+      return 0
+    fi
+    if ! tmux_session_active mlf_ray_head; then
+      echo "Ray head tmux exited before ready" >&2
+      tail -n 80 "${LOG_DIR}/ray_head.log" >&2 || true
+      return 1
+    fi
+    sleep 2
+  done
+  echo "Timed out waiting for Ray head" >&2
+  tail -n 80 "${LOG_DIR}/ray_head.log" >&2 || true
+  return 1
+}
+
 wait_ray_nodes() {
   local expected=$1
   local alive
@@ -613,6 +655,12 @@ write_train_driver() {
     printf 'export LOG_DIR=%q\n' "${LOG_DIR}"
     printf 'export WANDB_DIR=%q\n' "${WANDB_DIR}"
     printf 'export SAVE_DIR=%q\n' "${SAVE_DIR}"
+    printf 'export AUX_ENV_FILE=%q\n' "${AUX_ENV_FILE:-}"
+    printf 'if [ -n "${AUX_ENV_FILE:-}" ] && [ -f "${AUX_ENV_FILE}" ]; then\n'
+    printf '  set -a\n'
+    printf '  source "${AUX_ENV_FILE}"\n'
+    printf '  set +a\n'
+    printf 'fi\n'
     printf 'cd %q\n' "${REPO_DIR}"
     printf 'bash %q\n' "${TRAIN_ADAPTER}"
   } > "${driver}"
@@ -699,6 +747,18 @@ run_worker() {
 run_head() {
   source_env_file "${RESOLVED_CONFIG}" resolved
   mkdir -p "${LOG_DIR}"
+  HEAD_ORCHESTRATION_COMPLETE=0
+  head_failure_guard() {
+    local code=$?
+    if [ "${code}" -ne 0 ] \
+      && [ "${HEAD_ORCHESTRATION_COMPLETE}" != "1" ] \
+      && [ "${BENCH_ON_LAUNCH_FAILURE}" = "1" ]; then
+      echo "Head orchestration failed with exit_code=${code}; starting bench on ${NODES_FILE}" >&2
+      run_bench_nodes start "${NODES_FILE}" "${NODE_INDICES}"
+    fi
+    exit "${code}"
+  }
+  trap head_failure_guard EXIT
   local head_addr=${HEAD_ADDRESS:-}
   [ -n "${head_addr}" ] || head_addr=$(hostname -I | tr ' ' '\n' | grep -m1 .)
   local head_http="http://$(http_host "${head_addr}"):${ENV_PORT}"
@@ -715,7 +775,7 @@ run_head() {
       node_addr=$(remote_first_ip "${node}")
     fi
     env_urls+=("http://$(http_host "${node_addr}"):${ENV_PORT}")
-    worker_script=$(printf 'cd %q\nMLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q bash scripts/mlf/launch_agentic_training.sh --internal-role worker --resolved %q --head-address %q\n' \
+    worker_script=$(printf 'cd %q\nMLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q bash scripts/utils/launch_agentic_training.sh --internal-role worker --resolved %q --head-address %q\n' \
       "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_CONFIG}" "${head_addr}")
     tmux_start_remote "${node}" mlf_multi_worker "${worker_script}" "${LOG_DIR}/multi_worker_$(safe_label "${node}").log"
   done
@@ -729,6 +789,8 @@ run_head() {
   start_router "${workers_csv}"
   wait_http "http://127.0.0.1:${ROUTER_PORT}/health"
   start_train_driver "http://$(http_host "${head_addr}"):${ROUTER_PORT}"
+  HEAD_ORCHESTRATION_COMPLETE=1
+  trap - EXIT
 }
 
 write_resolved_launch_config() {
@@ -738,6 +800,7 @@ write_resolved_launch_config() {
     ENV_NAME ENV_CONFIG MODEL_PROFILE TRAIN_PROFILE TRAIN_ADAPTER RESOLVED_TRAIN_PROFILE \
     NODES_FILE NODE_INDICES AUX_NODES_FILE AUX_NODE_INDICES AUX_ENV_FILE ENV_PORT ROUTER_PORT RAY_PORT \
     RAY_CUDA_VISIBLE_DEVICES NUM_GPUS_PER_NODE_FOR_RAY RAY_MIN_WORKER_PORT RAY_MAX_WORKER_PORT \
+    RAY_START_MAX_ATTEMPTS RAY_HEAD_START_TIMEOUT_S \
     RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR EXP_PROJECT EXP_NAME \
     RESET_TRAIN_RUNTIME_ON_START BENCH_ON_TRAIN_EXIT BENCH_ON_LAUNCH_FAILURE BENCH_ON_EXIT_SUPPRESS_FILE \
     SSH_USER SSH_PORT SSH_KEY SSH_IPV6 SSH_JUMP \
@@ -818,7 +881,7 @@ start_aux_endpoint() {
   run_bench_nodes stop "${AUX_NODES_FILE:-}" "${AUX_NODE_INDICES:-}"
   local dry=()
   [ "${DRY_RUN}" = "0" ] || dry=(--dry-run)
-  bash "${REPO_DIR}/scripts/mlf/aux_endpoint.sh" start \
+  bash "${REPO_DIR}/scripts/utils/aux_endpoint.sh" start \
     --config "${RESOLVED_AUX_PROFILE}" \
     --env-file "${AUX_ENV_FILE}" \
     "${aux_nodes_arg[@]}" \
@@ -834,7 +897,7 @@ submit_head() {
   else
     head_addr=$(remote_first_ip "${head}")
   fi
-  script=$(printf 'cd %q\nMLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q SSH_JUMP= bash scripts/mlf/launch_agentic_training.sh --internal-role head --resolved %q --head-address %q\n' \
+  script=$(printf 'cd %q\nMLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q SSH_JUMP= bash scripts/utils/launch_agentic_training.sh --internal-role head --resolved %q --head-address %q\n' \
     "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_LAUNCH_CONFIG}" "${head_addr}")
   if is_current_node "${head}"; then
     RESOLVED_CONFIG="${RESOLVED_LAUNCH_CONFIG}" HEAD_ADDRESS="${head_addr}" run_head
@@ -847,6 +910,7 @@ submit_head() {
 
 LAUNCH_BENCH_GUARD_ACTIVE=0
 LAUNCH_COMPLETED=0
+HEAD_ORCHESTRATION_COMPLETE=0
 
 bench_on_launch_exit() {
   local code=$?

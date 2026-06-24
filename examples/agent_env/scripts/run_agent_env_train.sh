@@ -200,6 +200,14 @@ export SAVE_INTERVAL=${SAVE_INTERVAL:-${TOTAL_NUM_STEPS:-${NUM_STEPS}}}
 export AGENT_ENV_ROLLOUT_DUMP_N=${AGENT_ENV_ROLLOUT_DUMP_N:-${ROLLOUT_CASE_DUMP_N:-0}}
 export AGENT_ENV_ROLLOUT_DUMP_DISCARD_N=${AGENT_ENV_ROLLOUT_DUMP_DISCARD_N:-${ROLLOUT_CASE_DUMP_DISCARD_N:-${AGENT_ENV_ROLLOUT_DUMP_N}}}
 export AGENT_ENV_ROLLOUT_DUMP_TRACE=${AGENT_ENV_ROLLOUT_DUMP_TRACE:-${ROLLOUT_CASE_DUMP_TRACE:-both}}
+export CUSTOM_RM_PATH=${CUSTOM_RM_PATH:-examples.agent_env.group_rm.group_reward}
+export GROUP_RM=${GROUP_RM:-1}
+export AGENT_ENV_JUDGE_MODE=${AGENT_ENV_JUDGE_MODE:-none}
+export RM_TYPE=${RM_TYPE:-}
+export RM_URL=${RM_URL:-}
+export REWARD_KEY=${REWARD_KEY:-}
+export EVAL_REWARD_KEY=${EVAL_REWARD_KEY:-}
+export LOG_REWARD_CATEGORY=${LOG_REWARD_CATEGORY:-}
 
 ENV_SERVER_URL=${ENV_SERVER_URL:-${AGENT_ENV_ROUTER_URL:-}}
 if [ -z "${ENV_SERVER_URL}" ]; then
@@ -362,7 +370,7 @@ CKPT_ARGS+=(--load "${LOAD_DIR}")
 ROLLOUT_ARGS=(
    --rollout-function-path "${ROLLOUT_FUNCTION_PATH}"
    --custom-generate-function-path "${CUSTOM_GENERATE_FUNCTION_PATH}"
-   --custom-reward-post-process-path "${CUSTOM_REWARD_POST_PROCESS_PATH:-examples.agent_env.rollout.post_process_rewards}"
+   --custom-reward-post-process-path "${CUSTOM_REWARD_POST_PROCESS_PATH:-examples.agent_env.reward_post_process.post_process_rewards}"
    --custom-rollout-log-function-path "${CUSTOM_GENERATE_FUNCTION_PATH%.*}.log_rollout_data"
    --custom-eval-rollout-log-function-path "${CUSTOM_GENERATE_FUNCTION_PATH%.*}.log_eval_rollout_data"
    --custom-config-path "${ENV_RUNTIME_CONFIG_PATH}"
@@ -382,6 +390,34 @@ ROLLOUT_ARGS=(
 )
 if [ -n "${DYNAMIC_SAMPLING_FILTER_PATH:-}" ]; then
   ROLLOUT_ARGS+=(--dynamic-sampling-filter-path "${DYNAMIC_SAMPLING_FILTER_PATH}")
+fi
+case "${GROUP_RM:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    ROLLOUT_ARGS+=(--group-rm)
+    if [ -n "${CUSTOM_RM_PATH:-}" ]; then
+      ROLLOUT_ARGS+=(--custom-rm-path "${CUSTOM_RM_PATH}")
+    fi
+    ;;
+  *)
+    if [ -n "${CUSTOM_RM_PATH:-}" ]; then
+      ROLLOUT_ARGS+=(--custom-rm-path "${CUSTOM_RM_PATH}")
+    fi
+    ;;
+esac
+if [ -n "${RM_TYPE:-}" ]; then
+  ROLLOUT_ARGS+=(--rm-type "${RM_TYPE}")
+fi
+if [ -n "${RM_URL:-}" ]; then
+  ROLLOUT_ARGS+=(--rm-url "${RM_URL}")
+fi
+if [ -n "${REWARD_KEY:-}" ]; then
+  ROLLOUT_ARGS+=(--reward-key "${REWARD_KEY}")
+fi
+if [ -n "${EVAL_REWARD_KEY:-}" ]; then
+  ROLLOUT_ARGS+=(--eval-reward-key "${EVAL_REWARD_KEY}")
+fi
+if [ -n "${LOG_REWARD_CATEGORY:-}" ]; then
+  ROLLOUT_ARGS+=(--log-reward-category "${LOG_REWARD_CATEGORY}")
 fi
 
 PERF_ARGS=(
@@ -418,6 +454,16 @@ GRPO_ARGS=(
    --eps-clip "${EPS_CLIP:-0.2}"
    --eps-clip-high "${EPS_CLIP_HIGH:-0.28}"
 )
+case "${REWARDS_NORMALIZATION:-1}" in
+  0|false|FALSE|no|NO|off|OFF)
+    GRPO_ARGS+=(--disable-rewards-normalization)
+    ;;
+esac
+case "${GRPO_STD_NORMALIZATION:-1}" in
+  0|false|FALSE|no|NO|off|OFF)
+    GRPO_ARGS+=(--disable-grpo-std-normalization)
+    ;;
+esac
 case "${NORMALIZE_ADVANTAGES:-0}" in
   1|true|TRUE|yes|YES|on|ON)
     GRPO_ARGS+=(--normalize-advantages)
@@ -493,6 +539,10 @@ keys = [
     "AGENT_ENV_ROLLOUT_DUMP_N", "AGENT_ENV_ROLLOUT_DUMP_DISCARD_N",
     "AGENT_ENV_ROLLOUT_DUMP_TRACE",
     "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "AGENT_ENV_GLM_PADDING_MAX_SEEN_GROUPS",
+    "AGENT_ENV_JUDGE_MODE",
+    "AUX_ENDPOINT_PROVIDER", "AUX_ENDPOINT_MODEL", "AUX_ENDPOINT_BASE_URL", "AUX_ENDPOINT_API_KEY_PATH",
+    "AUX_ENDPOINT_TIMEOUT_S", "AUX_ENDPOINT_MAX_TOKENS", "AUX_ENDPOINT_TEMPERATURE", "AUX_ENDPOINT_TOP_P",
+    "AUX_ENDPOINT_ENABLE_THINKING", "AUX_ENDPOINT_SEPARATE_REASONING", "AUX_ENDPOINT_REASONING_EFFORT",
     "LITELLM_LOCAL_MODEL_COST_MAP",
     "WANDB_BASE_URL", "WANDB_ENTITY", "WANDB_HTTP_TIMEOUT", "WANDB_INIT_TIMEOUT",
 ]

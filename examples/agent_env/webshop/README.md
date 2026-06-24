@@ -29,10 +29,10 @@ Runtime setup:
 
 1. Ensure the WebShop pack exists at `/mnt/bn/jixf-nas-lq/mlf/packs/webshop.tar.gz`.
 2. Ensure the WebShop data backup exists at `/mnt/bn/jixf-nas-lq/mlf/data/webshop`.
-3. Materialize node-local runtime with `scripts/mlf/prepare_agentic_runtime.sh`.
+3. Materialize node-local runtime with `scripts/utils/prepare_agentic_runtime.sh`.
 
-Use `scripts/mlf/build_webshop_env.sh`, `scripts/mlf/pack_webshop_env.sh`, and
-`scripts/mlf/pack_agent_data.sh` only when rebuilding NAS packs/data. They are
+Use `scripts/utils/build_webshop_env.sh`, `scripts/utils/pack_webshop_env.sh`, and
+`scripts/utils/pack_agent_data.sh` only when rebuilding NAS packs/data. They are
 not part of normal training startup.
 
 ## Data Scope
@@ -68,7 +68,7 @@ Do not claim full WebShop coverage until the NAS/runtime contains:
 Pack full data with:
 
 ```bash
-DATASETS=webshop bash scripts/mlf/pack_agent_data.sh
+DATASETS=webshop bash scripts/utils/pack_agent_data.sh
 ```
 
 ## Shared backend direction

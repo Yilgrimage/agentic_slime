@@ -1,4 +1,4 @@
-# MLF runtime and pack scripts
+# Agent-env runtime and pack scripts
 
 These scripts keep code, reusable packs, and node-local runtime state separate.
 
@@ -12,12 +12,12 @@ These scripts keep code, reusable packs, and node-local runtime state separate.
 Normal pack refresh is:
 
 ```bash
-bash scripts/mlf/publish_slime_pack.sh
-bash scripts/mlf/build_webshop_env.sh
-bash scripts/mlf/build_alfworld_env.sh
-bash scripts/mlf/build_tau2_env.sh
-bash scripts/mlf/build_appworld_env.sh
-bash scripts/mlf/pack_agent_data.sh
+bash scripts/utils/publish_slime_pack.sh
+bash scripts/utils/build_webshop_env.sh
+bash scripts/utils/build_alfworld_env.sh
+bash scripts/utils/build_tau2_env.sh
+bash scripts/utils/build_appworld_env.sh
+bash scripts/utils/pack_agent_data.sh
 ```
 
 Normal node migration is now split from training launch.
@@ -25,7 +25,7 @@ Normal node migration is now split from training launch.
 Prepare only the current node:
 
 ```bash
-bash scripts/mlf/prepare_agentic_runtime.sh \
+bash scripts/utils/prepare_agentic_runtime.sh \
   --local-only \
   --envs slime,alfworld,webshop \
   --data alfworld,webshop \
@@ -35,7 +35,7 @@ bash scripts/mlf/prepare_agentic_runtime.sh \
 Prepare only the lightweight text/tool-use envs:
 
 ```bash
-bash scripts/mlf/prepare_agentic_runtime.sh \
+bash scripts/utils/prepare_agentic_runtime.sh \
   --local-only \
   --envs tau2,appworld \
   --data tau2,appworld \
@@ -46,7 +46,7 @@ bash scripts/mlf/prepare_agentic_runtime.sh \
 Prepare every node listed in a node file from the current machine:
 
 ```bash
-bash scripts/mlf/prepare_agentic_runtime.sh \
+bash scripts/utils/prepare_agentic_runtime.sh \
   --all-nodes \
   --nodes configs/nodes/agent_env_all.txt \
   --node 0,1,2,3 \
@@ -61,11 +61,11 @@ node. `materialize_node_runtime.sh` is intentionally single-node only.
 Training launch is separate. Prefer the profile-driven launcher:
 
 ```bash
-bash scripts/mlf/launch_agentic_training.sh \
+bash scripts/utils/launch_agentic_training.sh \
   configs/agent_env/runs/tau2_qwen35_4b_grpo_m2p7_3train_1aux.env
 ```
 
-`scripts/mlf/launch_agentic_training.sh` is the single profile-driven launcher.
+`scripts/utils/launch_agentic_training.sh` is the single profile-driven launcher.
 It resolves the run/topology/model/train/aux profiles, starts optional aux
 inference, then manages SSH/tmux/Ray/env servers/router before submitting the
 train adapter. Normal experiments should not pass a large ad-hoc `--train-cmd`
@@ -84,7 +84,7 @@ Then prepare all nodes from the NAS checkout:
 
 ```bash
 cd /mnt/bn/jixf-nas-lq/mlf/code/slime
-bash scripts/mlf/prepare_agentic_runtime.sh \
+bash scripts/utils/prepare_agentic_runtime.sh \
   --all-nodes \
   --orchestrator head \
   --nodes configs/nodes/agent_env_all.txt \
@@ -148,11 +148,11 @@ folded into vendored source trees. For example, Qwen3.5 MoE auxiliary serving
 with the current SGLang checkout may need:
 
 ```bash
-bash scripts/mlf/apply_sglang_patches.sh check
-bash scripts/mlf/apply_sglang_patches.sh apply
+bash scripts/utils/apply_sglang_patches.sh check
+bash scripts/utils/apply_sglang_patches.sh apply
 ```
 
-Use `bash scripts/mlf/apply_sglang_patches.sh reverse` to remove these patches
+Use `bash scripts/utils/apply_sglang_patches.sh reverse` to remove these patches
 again. Do not edit `${MLF_NAS_ROOT}/code/sglang` directly for temporary
 compatibility fixes.
 

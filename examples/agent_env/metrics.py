@@ -12,8 +12,6 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     max_response_tokens_hit_counts = []
     success_count = 0
     env_rewards = []
-    format_rewards = []
-    truncated_rewards = []
     truncated_reasons: dict[str, int] = {}
     discard_reasons: dict[str, int] = {}
 
@@ -28,10 +26,6 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         success_count += int(bool(metadata.get("env_success", False)))
         if "env_reward" in metadata:
             env_rewards.append(float(metadata["env_reward"]))
-        if "format_reward" in metadata:
-            format_rewards.append(float(metadata["format_reward"]))
-        if "truncated_reward" in metadata:
-            truncated_rewards.append(float(metadata["truncated_reward"]))
         reason = metadata.get("truncated_reason")
         if reason:
             truncated_reasons[str(reason)] = truncated_reasons.get(str(reason), 0) + 1
@@ -41,23 +35,17 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
 
     total_turns = sum(turn_counts)
     total_format_errors = sum(format_error_counts)
+    total_max_response_tokens_hits = sum(max_response_tokens_hit_counts)
     total_discards = sum(discard_reasons.values())
     metrics = {
         f"{prefix}/format_error_rate": total_format_errors / total_turns if total_turns else 0.0,
-        f"{prefix}/format_error_per_sample": total_format_errors / len(samples),
-        f"{prefix}/max_response_tokens_hit_rate": sum(1 for count in max_response_tokens_hit_counts if count > 0)
-        / len(samples),
-        f"{prefix}/max_response_tokens_hits_per_sample": sum(max_response_tokens_hit_counts) / len(samples),
+        f"{prefix}/max_response_tokens_hit_rate": total_max_response_tokens_hits / total_turns if total_turns else 0.0,
         f"{prefix}/discard_sample_rate": total_discards / len(samples),
         f"{prefix}/success_rate": success_count / len(samples),
         f"{prefix}/turn_count_mean": total_turns / len(samples),
     }
     if env_rewards:
         metrics[f"{prefix}/env_reward_mean"] = sum(env_rewards) / len(env_rewards)
-    if format_rewards:
-        metrics[f"{prefix}/format_reward_mean"] = sum(format_rewards) / len(format_rewards)
-    if truncated_rewards:
-        metrics[f"{prefix}/truncated_reward_mean"] = sum(truncated_rewards) / len(truncated_rewards)
     for reason, count in truncated_reasons.items():
         metrics[f"{prefix}/truncated_{reason}_rate"] = count / len(samples)
     for reason, count in discard_reasons.items():

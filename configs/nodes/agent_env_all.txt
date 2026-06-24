@@ -4,6 +4,6 @@
 # 2: train node 2
 # 3: train node 3 or auxiliary inference node, depending on topology
 fdbd:dc03:9:643::142
-fdbd:dc03:9:646::78
-fdbd:dc03:9:647::134
+fdbd:dc03:9:646::74
+fdbd:dc03:9:655::150
 fdbd:dc03:9:660::194

@@ -147,11 +147,13 @@ async def run(data_dir: str):
             assert result.metadata["alfworld"]["game_file"]
             assert len(result.metadata["token_rewards"]) == result.response_length
             assert len(result.loss_mask) == result.response_length
-            assert result.rollout_log_probs is None
+            assert result.rollout_log_probs is not None
+            assert len(result.rollout_log_probs) == result.response_length
             assert "<think>" in result.response
             assert "<action>look</action>" in result.response
             assert sum(result.loss_mask) > 0
-            assert result.reward in (0.0, 10.0)
+            assert result.reward is None
+            assert result.metadata["env_reward"] in (0.0, 10.0)
 
         assert results[0].metadata["alfworld"]["game_file"] != results[1].metadata["alfworld"]["game_file"]
         print("ALFWorld real env adapter smoke test passed")

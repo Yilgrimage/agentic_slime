@@ -4,6 +4,9 @@ This folder contains the environment-agnostic pieces shared by agentic examples.
 ALFWorld, WebShop, and future ScienceWorld adapters should keep only
 environment-specific reset/step logic in their own folders.
 
+Detailed architecture, configuration, operations, and development guidance live
+in `docs/agent_env/`.
+
 Shared modules:
 
 - `router.py`: generic multi-worker lease router.
@@ -74,11 +77,15 @@ Keep generic behavior in this folder:
 Launch/config convention:
 
 - env behavior belongs in `<env>/env_config.yaml`;
-- train/model/topology/aux parameters belong in `configs/agent_env/**/*.env`;
-- rollout sampling and filtering strategy belongs in `configs/agent_env/train/*.env`;
+- model identity and loss-mask behavior belong in `configs/agent_env/models/*.env`;
+- train behavior belongs in `configs/agent_env/train/*.env`, including
+  algorithm, sync/full-async mode, rollout sampling/filtering, batch/token
+  budgets, TP/CP, and actor/rollout allocation;
+- topology belongs in `configs/agent_env/topology/*.env`, limited to node
+  selection, ports, and Ray-visible GPUs;
 - optional auxiliary inference parameters belong in an aux config, not in the
   top-level launch script;
-- use `scripts/mlf/launch_agentic_training.sh <run-profile.env>` as the
+- use `scripts/utils/launch_agentic_training.sh <run-profile.env>` as the
   top-level launch entrypoint.
 
 ## Current source of truth
@@ -102,13 +109,14 @@ Normal tau2 launch:
 
 ```bash
 cd /mnt/bn/jixf-nas-lq/mlf/code/slime
-bash scripts/mlf/launch_agentic_training.sh \
+bash scripts/utils/launch_agentic_training.sh \
   configs/agent_env/runs/tau2_qwen35_4b_grpo_m2p7_3train_1aux.env
 ```
 
 The selected run profile sources:
 
 - one topology profile from `configs/agent_env/topology/`;
+- one model profile from `configs/agent_env/models/`;
 - one train profile from `configs/agent_env/train/`;
 - optionally one aux profile from `configs/agent_env/aux/`;
 - one env config from `examples/agent_env/<env>/env_config.yaml`.

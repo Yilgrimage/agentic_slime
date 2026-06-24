@@ -38,7 +38,7 @@ alfworld:
   direct_game_file: true
 
 env_server:
-  pool_size: 64
+  pool_size: 128
   acquire_timeout_s: 600
   lease_ttl_s: 1800
   idempotency_ttl_s: 300

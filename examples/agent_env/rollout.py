@@ -4,7 +4,6 @@ import asyncio
 import copy
 import json
 import logging
-import math
 import os
 import re
 import uuid
@@ -337,10 +336,8 @@ def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, to
         "turn_count": sample_metadata.get("turn_count"),
         "format_errors": sample_metadata.get("format_errors"),
         "format_checks": sample_metadata.get("format_checks"),
-        "format_reward": sample_metadata.get("format_reward"),
         "max_response_tokens_hits": sample_metadata.get("max_response_tokens_hits"),
         "truncated_reason": sample_metadata.get("truncated_reason"),
-        "truncated_reward": sample_metadata.get("truncated_reward"),
         "env_score": sample_metadata.get("env_score"),
         "env_success": sample_metadata.get("env_success"),
         "env_reward": sample_metadata.get("env_reward"),
@@ -904,13 +901,9 @@ class AgentTokenLedger:
         log_probs: list[float] | None = None,
     ) -> None:
         self.messages.append(messages_for_chat_template([message])[0])
-        segment_log_probs = None
-        if bool(arg(self.args, "use_rollout_logprobs", False)) or bool(arg(self.args, "use_tis", False)) or bool(
-            arg(self.args, "get_mismatch_metrics", False)
-        ):
-            if self.rollout_log_probs is None:
-                self.rollout_log_probs = [0.0] * len(self.response_tokens)
-            segment_log_probs = list(log_probs or [])
+        if self.rollout_log_probs is None:
+            self.rollout_log_probs = [0.0] * len(self.response_tokens)
+        segment_log_probs = list(log_probs or [])
         self._append_segment(
             kind="assistant",
             role="assistant",
@@ -950,14 +943,6 @@ class AgentTokenLedger:
         if max_len is None:
             return True, total
         return total <= int(max_len), total
-
-    def add_reward_to_last_token(self, value: float) -> bool:
-        if value == 0:
-            return True
-        if not self.token_rewards:
-            return False
-        self.token_rewards[-1] += float(value)
-        return True
 
     def materialize(self, sample: Sample, sample_metadata: dict[str, Any], *, include_trace: bool = False) -> None:
         sample.tokens = list(self.tokens)
@@ -1463,58 +1448,6 @@ def truncated_reward_adjustment(args: Any, sample: Sample) -> float:
     return float(cfg_path(args, "reward.truncated", 0.0))
 
 
-def post_process_rewards(args: Any, samples: list[Sample]) -> tuple[list[float], list[float]]:
-    """GRPO reward postprocess that keeps discarded env samples out of normalization."""
-    raw_rewards = []
-    for sample in samples:
-        sample_metadata = metadata(sample)
-        if sample.remove_sample:
-            raw_reward = 0.0
-            sample_metadata["format_reward"] = 0.0
-            sample_metadata["truncated_reward"] = 0.0
-        else:
-            format_adjustment = format_reward_adjustment(args, sample)
-            truncated_adjustment = truncated_reward_adjustment(args, sample)
-            sample_metadata["format_reward"] = format_adjustment
-            sample_metadata["truncated_reward"] = truncated_adjustment
-            raw_reward = float(sample.get_reward_value(args) or 0.0) + format_adjustment + truncated_adjustment
-        sample_metadata["raw_reward"] = raw_reward
-        raw_rewards.append(raw_reward)
-    if not (
-        arg(args, "advantage_estimator", None) in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
-        and bool(arg(args, "rewards_normalization", False))
-    ):
-        return raw_rewards, list(raw_rewards)
-
-    rewards = [0.0] * len(samples)
-    n_samples = max(1, int(arg(args, "n_samples_per_prompt", 1) or 1))
-    grouped: dict[int, list[int]] = {}
-    for idx, sample in enumerate(samples):
-        group_key = int(sample.group_index) if sample.group_index is not None else idx // n_samples
-        grouped.setdefault(group_key, []).append(idx)
-
-    use_std = arg(args, "advantage_estimator", None) in ["grpo", "gspo"] and bool(
-        arg(args, "grpo_std_normalization", False)
-    )
-    for indices in grouped.values():
-        active = [idx for idx in indices if not samples[idx].remove_sample]
-        if not active:
-            continue
-        values = [raw_rewards[idx] for idx in active]
-        mean = sum(values) / len(values)
-        centered = [value - mean for value in values]
-        if use_std:
-            if len(values) > 1:
-                variance = sum(value * value for value in centered) / (len(values) - 1)
-                std = math.sqrt(variance)
-            else:
-                std = 0.0
-            centered = [value / (std + 1e-6) for value in centered]
-        for idx, value in zip(active, centered, strict=True):
-            rewards[idx] = value
-    return raw_rewards, rewards
-
-
 def _is_hard_discard_sample(sample: Sample) -> bool:
     sample_metadata = metadata(sample)
     if sample.status == Sample.Status.ABORTED:
@@ -1978,10 +1911,6 @@ async def generate_agent_rollout(
             sample_metadata["truncated_reason"] = "max_turns"
 
         env_reward = outcome_reward(args, spec, success, final_score)
-        if not ledger.add_reward_to_last_token(env_reward):
-            sample_metadata["unassigned_token_reward"] = float(sample_metadata.get("unassigned_token_reward", 0.0)) + float(
-                env_reward
-            )
         env_meta = spec.env_metadata(reset, index, split, lease_id)
         env_meta.setdefault("server_url", env_server_url(args, spec))
         ledger.materialize(sample, sample_metadata, include_trace=trace_turns)
@@ -1990,8 +1919,6 @@ async def generate_agent_rollout(
             {
                 "turn_count": len(actions),
                 "format_ok": int(sample_metadata.get("format_errors", 0)) == 0,
-                "format_reward": format_reward_adjustment(args, sample),
-                "truncated_reward": truncated_reward_adjustment(args, sample),
                 "env_score": final_score,
                 "env_success": success,
                 "env_reward": env_reward,
@@ -2005,9 +1932,7 @@ async def generate_agent_rollout(
         elif arg(args, "use_opd", False) and arg(args, "opd_type") == "sglang":
             sample.reward = None
         else:
-            sample.reward = float(sum(sample_metadata.get("token_rewards", []))) + float(
-                sample_metadata.get("unassigned_token_reward", 0.0)
-            )
+            sample.reward = None
         dump_completed_sample_case(args, spec, sample, tok)
         ensure_rollout_shapes(args, sample, spec)
         return sample

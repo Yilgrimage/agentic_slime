@@ -8,8 +8,8 @@ SGLANG_REPO="${SGLANG_REPO:-${MLF_NAS_ROOT}/code/sglang}"
 ACTION="${1:-apply}"
 
 PATCHES=(
-  "${REPO_DIR}/scripts/mlf/patches/sglang/qwen35_moe_text_config_dict.patch"
-  "${REPO_DIR}/scripts/mlf/patches/sglang/qwen35_moe_text_norm_topk.patch"
+  "${REPO_DIR}/scripts/utils/patches/sglang/qwen35_moe_text_config_dict.patch"
+  "${REPO_DIR}/scripts/utils/patches/sglang/qwen35_moe_text_norm_topk.patch"
 )
 
 usage() {

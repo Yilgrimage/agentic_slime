@@ -97,12 +97,12 @@ fi
 run_local() {
   cd "${REPO_DIR}"
   if [ "${DRY_RUN}" -eq 1 ]; then
-    printf '+ bash scripts/mlf/materialize_node_runtime.sh '
+    printf '+ bash scripts/utils/materialize_node_runtime.sh '
     printf '%q ' "${materialize_args[@]}"
     printf '\n'
     return
   fi
-  bash scripts/mlf/materialize_node_runtime.sh "${materialize_args[@]}"
+  bash scripts/utils/materialize_node_runtime.sh "${materialize_args[@]}"
 }
 
 read_nodes() {
@@ -174,7 +174,7 @@ run_remote() {
   local host=$1
   local remote_cmd
   remote_cmd=$(
-    printf 'cd %q && MLF_NAS_ROOT=%q REPO_DIR=%q bash scripts/mlf/materialize_node_runtime.sh ' \
+    printf 'cd %q && MLF_NAS_ROOT=%q REPO_DIR=%q bash scripts/utils/materialize_node_runtime.sh ' \
       "${REPO_DIR}" "${MLF_NAS_ROOT}" "${REPO_DIR}"
     printf '%q ' "${materialize_args[@]}"
   )
@@ -190,7 +190,7 @@ run_remote() {
 }
 
 remote_prepare_command() {
-  printf 'cd %q && MLF_NAS_ROOT=%q REPO_DIR=%q bash scripts/mlf/materialize_node_runtime.sh ' \
+  printf 'cd %q && MLF_NAS_ROOT=%q REPO_DIR=%q bash scripts/utils/materialize_node_runtime.sh ' \
     "${REPO_DIR}" "${MLF_NAS_ROOT}" "${REPO_DIR}"
   printf '%q ' "${materialize_args[@]}"
 }
@@ -300,7 +300,7 @@ submit_head_prepare() {
   local head=$1
   local remote_cmd
   remote_cmd=$(
-    printf 'cd %q && MLF_NAS_ROOT=%q REPO_DIR=%q SSH_JUMP= SSH_KEY=%q SSH_IPV6=1 bash scripts/mlf/prepare_agentic_runtime.sh ' \
+    printf 'cd %q && MLF_NAS_ROOT=%q REPO_DIR=%q SSH_JUMP= SSH_KEY=%q SSH_IPV6=1 bash scripts/utils/prepare_agentic_runtime.sh ' \
       "${REPO_DIR}" "${MLF_NAS_ROOT}" "${REPO_DIR}" "${SSH_KEY}"
     printf '%q ' --all-nodes --orchestrator local --nodes "${NODES_FILE}" --envs "${ENVS}" --data "${DATASETS}" --models "${MODELS}" --sources "${SOURCES}"
     [ -z "${NODE_SELECTOR}" ] || printf '%q ' --node "${NODE_SELECTOR}"

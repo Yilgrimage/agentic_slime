@@ -96,13 +96,15 @@ async def main():
     result = await alf_gen.generate(args, sample, sampling_params={})
 
     assert result.status == Sample.Status.COMPLETED
-    assert result.reward == 10.0
+    assert result.reward is None
+    assert result.metadata["env_reward"] == 10.0
     assert result.metadata["env_success"] is True
     assert result.metadata["actions"] == ["take apple"]
     assert result.metadata["alfworld"]["game_file"] == "/tmp/game.tw-pddl"
     assert len(result.metadata["token_rewards"]) == result.response_length
     assert len(result.loss_mask) == result.response_length
-    assert result.rollout_log_probs is None
+    assert result.rollout_log_probs is not None
+    assert len(result.rollout_log_probs) == result.response_length
     assert "<think>" in result.response
     assert "<action>take apple</action>" in result.response
     assert sum(result.loss_mask) > 0
