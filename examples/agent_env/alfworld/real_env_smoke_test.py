@@ -120,7 +120,7 @@ async def run(data_dir: str):
         partial_rollout=False,
         rollout_max_context_len=4096,
         rollout_max_response_len=128,
-        alfworld_env_server_url=base_url,
+        env_server_url=base_url,
         task={"split": "train"},
         timeouts={"policy_s": 120, "env_request_s": 660},
         max_turns=1,

@@ -42,6 +42,9 @@ examples/agent_env/
   server.py         Generic process-pool environment HTTP server.
   router.py         Generic multi-node lease router.
   rollout.py        Generic Slime custom-generate agent loop.
+  train_entrypoint.py
+                    Agent-env Slime entrypoint that registers external args
+                    and dispatches to the stock sync/async train loops.
   fully_async_rollout.py
                     External full-async rollout wrapper that preserves Slime's
                     worker model while applying dynamic filtering.

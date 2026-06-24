@@ -231,7 +231,7 @@ tail -200 "$RUN_ROOT/logs/multi_head.log"
 Useful train log patterns:
 
 ```bash
-rg -n "raw_reward|rollout/rewards|advantages|ppo_kl|clip|dynamic_filter|drop_|Traceback|RuntimeError|TimeoutError" \
+grep -RInE "raw_reward|rollout/rewards|advantages|ppo_kl|clip|dynamic_filter|drop_|Traceback|RuntimeError|TimeoutError" \
   "$RUN_ROOT/logs/"*"_train.log"
 ```
 
@@ -291,8 +291,8 @@ hangs with no GPU usage, the watchdog should still start bench.
 
 The current watchdog policy outside this repo is intended to be:
 
-- monitor utilization continuously or frequently;
-- if recent utilization remains low for the configured window, run bench;
+- sample maximum GPU utilization every 10 seconds by default;
+- if utilization stays below 5% for 1800 seconds by default, run bench;
 - do not bind watchdog behavior to training tmux/process liveness.
 
 ## Reset Behavior

@@ -34,9 +34,7 @@ MetadataFn = Callable[[dict, int, str, str | None], dict]
 @dataclass(frozen=True)
 class AgentEnvSpec:
     name: str
-    default_env_url: str
     env_url_arg: str
-    env_url_envvar: str
     default_split: str
     info_actions: InfoFn
     observation_text: TextFn
@@ -1333,7 +1331,11 @@ async def call_policy(
 
 
 def env_server_url(args: Any, spec: AgentEnvSpec) -> str:
-    return str(os.environ.get(spec.env_url_envvar) or arg(args, spec.env_url_arg, None) or spec.default_env_url).rstrip("/")
+    value = arg(args, spec.env_url_arg, None)
+    if value is None or not str(value).strip():
+        cli_name = spec.env_url_arg.replace("_", "-")
+        raise RuntimeError(f"{spec.name} rollout requires --{cli_name}; URL env vars are not propagated to rollout actors.")
+    return str(value).rstrip("/")
 
 
 async def post_env(args: Any, spec: AgentEnvSpec, endpoint: str, payload: dict, max_retries: int = 60) -> dict:
@@ -1354,12 +1356,11 @@ async def allocate_env(args: Any, spec: AgentEnvSpec, sample: Sample) -> dict:
     split = payload.get("split") or cfg_path(args, "task.split", spec.default_split)
     index = task_index(sample)
     logger.debug(
-        "%s allocate split=%s task_index=%s url=%s envvar=%s arg_%s=%s",
+        "%s allocate split=%s task_index=%s url=%s arg_%s=%s",
         spec.name,
         split,
         index,
         env_server_url(args, spec),
-        os.environ.get(spec.env_url_envvar),
         spec.env_url_arg,
         arg(args, spec.env_url_arg, None),
     )

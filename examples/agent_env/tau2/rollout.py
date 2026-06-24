@@ -72,9 +72,7 @@ def _env_metadata(reset: dict, task_index: int, split: str, lease_id: str | None
 
 TAU2_SPEC = AgentEnvSpec(
     name="tau2",
-    default_env_url="http://127.0.0.1:18182",
     env_url_arg="env_server_url",
-    env_url_envvar="TAU2_ENV_SERVER_URL",
     default_split="train",
     info_actions=_available_actions,
     observation_text=_observation_text,

@@ -3,6 +3,24 @@ set -euo pipefail
 
 export PYTHONUNBUFFERED=1
 
+ENV_ROUTER_URL_ARG=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --env-server-url)
+      if [ "$#" -lt 2 ]; then
+        echo "Missing value for --env-server-url" >&2
+        exit 1
+      fi
+      ENV_ROUTER_URL_ARG=$2
+      shift 2
+      ;;
+    *)
+      echo "Unknown run_agent_env_train.sh argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
 MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
 MLF_LOCAL_ROOT=${MLF_LOCAL_ROOT:-/tmp/mlf-runtime}
 MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
@@ -45,21 +63,20 @@ if [ -z "${SLIME_ENV:-}" ]; then
   fi
 fi
 SLIME_PYTHON=${SLIME_PYTHON:-${SLIME_ENV}/bin/python}
-TRAIN_ENTRYPOINT=${TRAIN_ENTRYPOINT:-train_async.py}
+TRAIN_ENTRYPOINT=${TRAIN_ENTRYPOINT:-examples/agent_env/train_entrypoint.py}
+AGENT_ENV_TRAIN_LOOP=${AGENT_ENV_TRAIN_LOOP:-async}
 
 configure_env_defaults() {
   case "${ENV_NAME}" in
     alfworld)
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.alfworld.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ALFWORLD_CONFIG:-${ENV_CONFIG:-examples/agent_env/alfworld/env_config.yaml}}}
-      export ENV_SERVER_URL_VAR=${ENV_SERVER_URL_VAR:-ALFWORLD_ENV_SERVER_URL}
       export DATA_DIR=${DATA_DIR:-${MLF_LOCAL_ROOT}/data/alfworld}
       export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/alfworld/prompt_data.py}
       ;;
     webshop)
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.webshop.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${WEBSHOP_CONFIG:-${ENV_CONFIG:-examples/agent_env/webshop/env_config.yaml}}}
-      export ENV_SERVER_URL_VAR=${ENV_SERVER_URL_VAR:-WEBSHOP_ENV_SERVER_URL}
       export DATA_DIR=${DATA_DIR:-${MLF_LOCAL_ROOT}/data/webshop}
       export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/webshop/prompt_data.py}
       ;;
@@ -67,7 +84,6 @@ configure_env_defaults() {
       export LITELLM_LOCAL_MODEL_COST_MAP=${LITELLM_LOCAL_MODEL_COST_MAP:-True}
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.tau2.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/tau2/env_config.yaml}}
-      export ENV_SERVER_URL_VAR=${ENV_SERVER_URL_VAR:-TAU2_ENV_SERVER_URL}
       export PROMPT_DATA_PYTHON=${PROMPT_DATA_PYTHON:-${TAU2_ENV:-${MLF_LOCAL_ENVS}/tau2}/bin/python}
       export PROMPT_USE_SERVER_NUM_TASKS=${PROMPT_USE_SERVER_NUM_TASKS:-0}
       configure_tau2_prompt_data
@@ -75,7 +91,6 @@ configure_env_defaults() {
     appworld)
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.appworld.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/appworld/env_config.yaml}}
-      export ENV_SERVER_URL_VAR=${ENV_SERVER_URL_VAR:-APPWORLD_ENV_SERVER_URL}
       export APPWORLD_ROOT=${APPWORLD_ROOT:-${MLF_LOCAL_ROOT}/data/appworld}
       export HOME=${APPWORLD_ROOT}
       ;;
@@ -161,12 +176,19 @@ PY
 configure_env_defaults
 CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:?Set CUSTOM_GENERATE_FUNCTION_PATH}
 CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:?Set CUSTOM_CONFIG_PATH}
-ENV_SERVER_URL_VAR=${ENV_SERVER_URL_VAR:?Set ENV_SERVER_URL_VAR}
 export DYNAMIC_SAMPLING_FILTER_PATH=${DYNAMIC_SAMPLING_FILTER_PATH:-}
 
 is_async_entrypoint() {
+  case "${AGENT_ENV_TRAIN_LOOP:-}" in
+    async|fullasync|full_async)
+      return 0
+      ;;
+    sync)
+      return 1
+      ;;
+  esac
   case "$(basename -- "${TRAIN_ENTRYPOINT}")" in
-    train_async.py|train_async_compat.py)
+    train_async.py)
       return 0
       ;;
     *)
@@ -209,15 +231,11 @@ export REWARD_KEY=${REWARD_KEY:-}
 export EVAL_REWARD_KEY=${EVAL_REWARD_KEY:-}
 export LOG_REWARD_CATEGORY=${LOG_REWARD_CATEGORY:-}
 
-ENV_SERVER_URL=${ENV_SERVER_URL:-${AGENT_ENV_ROUTER_URL:-}}
-if [ -z "${ENV_SERVER_URL}" ]; then
-  ENV_SERVER_URL=${!ENV_SERVER_URL_VAR:-}
-fi
-if [ -z "${ENV_SERVER_URL}" ]; then
-  echo "Missing env server URL. Set AGENT_ENV_ROUTER_URL or ${ENV_SERVER_URL_VAR}." >&2
+ENV_ROUTER_URL=${ENV_ROUTER_URL_ARG}
+if [ -z "${ENV_ROUTER_URL}" ]; then
+  echo "Missing env server URL. Pass --env-server-url to run_agent_env_train.sh." >&2
   exit 1
 fi
-export "${ENV_SERVER_URL_VAR}=${ENV_SERVER_URL}"
 
 MODEL_BASENAME=${MODEL_BASENAME:-Qwen3.5-9B}
 MODEL_ARGS_SCRIPT=${MODEL_ARGS_SCRIPT:-scripts/models/qwen3.5-9B.sh}
@@ -251,31 +269,14 @@ export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-${MLF_LOCAL_ROOT}/cache/torc
 export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-${MLF_LOCAL_ROOT}/cache/triton}
 export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-${MLF_LOCAL_ROOT}/cache/cuda}
 
-mkdir -p "${MLF_LOCAL_ROOT}/logs" "${RUN_ROOT}/configs" "${DATA_DIR}" "${SAVE_DIR}" "${LOG_DIR}" "${WANDB_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}" \
+mkdir -p "${MLF_LOCAL_ROOT}/logs" "${DATA_DIR}" "${SAVE_DIR}" "${LOG_DIR}" "${WANDB_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}" \
   "${XDG_CACHE_HOME}" "${HF_HOME}" "${TRANSFORMERS_CACHE}" "${TORCH_EXTENSIONS_DIR}" "${TRITON_CACHE_DIR}" "${CUDA_CACHE_PATH}"
-
-ENV_RUNTIME_CONFIG_PATH=${ENV_RUNTIME_CONFIG_PATH:-${RUN_ROOT}/configs/${ENV_NAME}_env_runtime.yaml}
-"${SLIME_PYTHON}" - <<PYH
-from pathlib import Path
-import yaml
-
-base = Path("${CUSTOM_CONFIG_PATH}")
-target = Path("${ENV_RUNTIME_CONFIG_PATH}")
-cfg = yaml.safe_load(base.read_text()) or {}
-env_server_url = "${ENV_SERVER_URL}".rstrip("/")
-cfg["env_server_url"] = env_server_url
-env_specific_key = "${ENV_SERVER_URL_VAR}".lower()
-if env_specific_key:
-    cfg[env_specific_key] = env_server_url
-target.parent.mkdir(parents=True, exist_ok=True)
-target.write_text(yaml.safe_dump(cfg, sort_keys=False))
-PYH
 
 if [ -z "${PROMPT_NUM_TASKS}" ] && [ "${PROMPT_USE_SERVER_NUM_TASKS}" = "1" ]; then
   PROMPT_NUM_TASKS=$("${SLIME_PYTHON}" - <<PYH
 import json
 import urllib.request
-base_url = "${ENV_SERVER_URL}".rstrip("/")
+base_url = "${ENV_ROUTER_URL}".rstrip("/")
 status = json.loads(urllib.request.urlopen(f"{base_url}/status", timeout=30).read().decode())
 workers = status.get("workers") or []
 worker_tasks = [int(w["num_tasks"]) for w in workers if w.get("ok") and w.get("num_tasks")]
@@ -368,12 +369,13 @@ fi
 CKPT_ARGS+=(--load "${LOAD_DIR}")
 
 ROLLOUT_ARGS=(
+   --env-server-url "${ENV_ROUTER_URL}"
    --rollout-function-path "${ROLLOUT_FUNCTION_PATH}"
    --custom-generate-function-path "${CUSTOM_GENERATE_FUNCTION_PATH}"
    --custom-reward-post-process-path "${CUSTOM_REWARD_POST_PROCESS_PATH:-examples.agent_env.reward_post_process.post_process_rewards}"
    --custom-rollout-log-function-path "${CUSTOM_GENERATE_FUNCTION_PATH%.*}.log_rollout_data"
    --custom-eval-rollout-log-function-path "${CUSTOM_GENERATE_FUNCTION_PATH%.*}.log_eval_rollout_data"
-   --custom-config-path "${ENV_RUNTIME_CONFIG_PATH}"
+   --custom-config-path "${CUSTOM_CONFIG_PATH}"
    --prompt-data "${DATA_PATH}"
    --input-key prompt
    --metadata-key metadata
@@ -506,6 +508,7 @@ SGLANG_ARGS=(
 )
 
 MISC_ARGS=(
+   --agent-env-train-loop "${AGENT_ENV_TRAIN_LOOP}"
    --num-steps "${NUM_STEPS:-100}"
    --log-interval 1
    --seed "${SEED:-42}"
@@ -545,8 +548,7 @@ import json, os
 keys = [
     "PYTHONPATH", "PYTHONNOUSERSITE", "CUDA_DEVICE_MAX_CONNECTIONS", "CUDA_HOME",
     "PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH",
-    "LD_LIBRARY_PATH", "RAY_ADDRESS", "${ENV_SERVER_URL_VAR}", "ALFWORLD_ENV_SERVER_URL",
-    "WEBSHOP_ENV_SERVER_URL", "TAU2_ENV_SERVER_URL", "APPWORLD_ENV_SERVER_URL",
+    "LD_LIBRARY_PATH", "RAY_ADDRESS",
     "TAU2_DATA_DIR", "TAU2_AREAL_ROOT", "APPWORLD_ROOT", "RUN_ROOT", "LOG_DIR", "WANDB_DIR",
     "AGENT_ENV_ROLLOUT_DUMP_N", "AGENT_ENV_ROLLOUT_DUMP_DISCARD_N",
     "AGENT_ENV_ROLLOUT_DUMP_TRACE",

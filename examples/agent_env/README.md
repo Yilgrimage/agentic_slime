@@ -16,6 +16,8 @@ Shared modules:
   token reward alignment, and lease cleanup.
 - `metrics.py`: generic rollout/eval metric aggregation for Slime
   logging.
+- `train_entrypoint.py`: external Slime entrypoint that registers agent-env
+  CLI args and dispatches to sync or full-async training.
 - `scripts/run_agent_env_train.sh`: generic Slime train adapter shared by all
   agent environments.
 
@@ -125,6 +127,10 @@ The launcher writes the resolved profiles into the run log directory before
 starting Ray, env servers, the router, optional aux inference, and the Slime
 train driver. If a parameter should be considered part of an experiment, add it
 to the appropriate profile rather than hiding it in ad-hoc shell variables.
+The Slime `--custom-config-path` always points at the static env config. The
+runtime env/router endpoint is converted by the train adapter into the explicit
+Slime argument `--env-server-url`; rollout code should not read URL values from
+process environment variables.
 
 ## Environment responsibilities
 

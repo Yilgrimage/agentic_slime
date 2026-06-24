@@ -66,10 +66,13 @@ The adapter may need:
 ```bash
 CUSTOM_GENERATE_FUNCTION_PATH=examples.agent_env.scienceworld.rollout.generate
 CUSTOM_CONFIG_PATH=examples/agent_env/scienceworld/env_config.yaml
-ENV_SERVER_URL_VAR=SCIENCEWORLD_ENV_SERVER_URL
 DATA_DIR=${MLF_LOCAL_ROOT}/data/scienceworld
 PROMPT_DATA_SCRIPT=${REPO_DIR}/examples/agent_env/scienceworld/prompt_data.py
 ```
+
+Do not add env-specific URL variables. The launcher computes the router URL and
+passes it to the train adapter as `--env-server-url`; the adapter passes it to
+Slime unchanged, and rollout code reads `args.env_server_url`.
 
 Do not put algorithm, topology, judge prompt, model identity, or reward weights
 in this adapter.
@@ -235,6 +238,7 @@ Do not move loss mask to run or topology profiles.
 Train profiles are the right place for:
 
 - `TRAIN_ENTRYPOINT`
+- `AGENT_ENV_TRAIN_LOOP`
 - `ROLLOUT_FUNCTION_PATH`
 - `USE_ROLLOUT_LOGPROBS`
 - `ADVANTAGE_ESTIMATOR`
@@ -290,6 +294,8 @@ Before launching multi-node training:
 
    ```bash
    /tmp/mlf-envs/slime/bin/python -m py_compile \
+     examples/agent_env/train_entrypoint.py \
+     examples/agent_env/rollout.py \
      examples/agent_env/fully_async_rollout.py \
      examples/agent_env/group_rm.py \
      examples/agent_env/reward_post_process.py

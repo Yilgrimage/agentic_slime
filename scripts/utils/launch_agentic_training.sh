@@ -636,11 +636,6 @@ write_train_driver() {
   local driver="${LOG_DIR}/${ENV_NAME}_train_driver.sh"
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
-    printf 'export AGENT_ENV_ROUTER_URL=%q\n' "${router_url}"
-    printf 'export WEBSHOP_ENV_SERVER_URL=%q\n' "${router_url}"
-    printf 'export ALFWORLD_ENV_SERVER_URL=%q\n' "${router_url}"
-    printf 'export TAU2_ENV_SERVER_URL=%q\n' "${router_url}"
-    printf 'export APPWORLD_ENV_SERVER_URL=%q\n' "${router_url}"
     printf 'export MLF_NAS_ROOT=%q\n' "${MLF_NAS_ROOT}"
     printf 'export MLF_LOCAL_ROOT=%q\n' "${MLF_LOCAL_ROOT}"
     printf 'export MLF_LOCAL_ENVS=%q\n' "${MLF_LOCAL_ENVS}"
@@ -662,7 +657,7 @@ write_train_driver() {
     printf '  set +a\n'
     printf 'fi\n'
     printf 'cd %q\n' "${REPO_DIR}"
-    printf 'bash %q\n' "${TRAIN_ADAPTER}"
+    printf 'bash %q --env-server-url %q\n' "${TRAIN_ADAPTER}" "${router_url}"
   } > "${driver}"
   chmod +x "${driver}"
   printf '%s\n' "${driver}"

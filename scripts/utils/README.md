@@ -119,9 +119,9 @@ bash /mnt/bn/jixf-nas-lq/mlf/bash/gpu_idle_watchdog.sh status
 bash /mnt/bn/jixf-nas-lq/mlf/bash/gpu_idle_watchdog.sh stop
 ```
 
-Default behavior is conservative: every five minutes it checks the maximum GPU
-utilization across the node. If six consecutive checks stay below 5%, it starts
-`run_bench.sh start`. The watchdog itself runs in a tmux session, and
+Default behavior is conservative: every 10 seconds it checks the maximum GPU
+utilization across the node. If utilization stays below 5% for 1800 seconds, it
+starts `run_bench.sh start`. The watchdog itself runs in a tmux session, and
 `run_bench.sh start` only replaces the `torch_bench` tmux session by default.
 
 Before launching training, stop bench on the nodes that will be used. After a

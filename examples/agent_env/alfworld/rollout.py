@@ -74,9 +74,7 @@ def _env_metadata(reset: dict, task_index: int, split: str, lease_id: str | None
 
 ALFWORLD_SPEC = AgentEnvSpec(
     name="alfworld",
-    default_env_url="http://127.0.0.1:18080",
-    env_url_arg="alfworld_env_server_url",
-    env_url_envvar="ALFWORLD_ENV_SERVER_URL",
+    env_url_arg="env_server_url",
     default_split="train",
     info_actions=_admissible,
     observation_text=_observation_text,

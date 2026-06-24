@@ -1,4 +1,8 @@
-"""Agent-env training entrypoint with launch-local compatibility patches."""
+"""Agent-env Slime training entrypoint.
+
+This entrypoint keeps agent-env runtime arguments on the Slime ``args`` object
+instead of relying on Ray actor environment-variable propagation.
+"""
 
 from __future__ import annotations
 
@@ -7,10 +11,11 @@ import logging
 from pathlib import Path
 
 from slime.backends.megatron_utils import arguments as megatron_arguments
+from slime.utils.arguments import parse_args
 
 
-_ORIGINAL_HF_VALIDATE_ARGS = megatron_arguments._hf_validate_args
 _LOGGER = logging.getLogger(__name__)
+_ORIGINAL_HF_VALIDATE_ARGS = megatron_arguments._hf_validate_args
 
 
 def _raw_text_config_has_moe_keys(hf_config, args) -> bool:
@@ -72,10 +77,36 @@ def _hf_validate_args(args, hf_config):
         raise
 
 
-megatron_arguments._hf_validate_args = _hf_validate_args
+def add_agent_env_arguments(parser):
+    parser.add_argument(
+        "--agent-env-train-loop",
+        choices=("sync", "async"),
+        default="async",
+        help="Select the base Slime training loop for agent-env runs.",
+    )
+    parser.add_argument(
+        "--env-server-url",
+        type=str,
+        default=None,
+        help="Agent-env router URL consumed by custom rollout functions.",
+    )
+    return parser
+
+
+def main() -> None:
+    megatron_arguments._hf_validate_args = _hf_validate_args
+
+    args = parse_args(add_agent_env_arguments)
+    if not getattr(args, "env_server_url", None):
+        raise ValueError("agent-env training requires --env-server-url; do not rely on Ray env propagation.")
+
+    if args.agent_env_train_loop == "sync":
+        from train import train
+    else:
+        from train_async import train
+
+    train(args)
 
 
 if __name__ == "__main__":
-    from train_async import parse_args, train
-
-    train(parse_args())
+    main()

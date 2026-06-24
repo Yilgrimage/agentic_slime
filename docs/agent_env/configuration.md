@@ -35,7 +35,7 @@ Model profiles own:
 - Megatron torch-dist directory
 - Megatron model args script
 - model-family loss mask
-- dropout/model compatibility defaults
+- dropout/model extras
 - model extra args
 
 Model profiles should not select sync/full-async mode, topology, aux endpoints,
@@ -223,9 +223,14 @@ AUX_PROFILE=configs/agent_env/aux/qwen36_27b_sglang.env
 Training entrypoint:
 
 ```bash
-TRAIN_ENTRYPOINT=train.py        # sync
-TRAIN_ENTRYPOINT=train_async.py  # full-async
+TRAIN_ENTRYPOINT=examples/agent_env/train_entrypoint.py
+AGENT_ENV_TRAIN_LOOP=sync        # or async
 ```
+
+`train_entrypoint.py` registers agent-env-only Slime CLI args such as
+`--env-server-url`, then dispatches to stock Slime `train.py` or
+`train_async.py` according to `AGENT_ENV_TRAIN_LOOP`. Keep this wrapper external
+to avoid editing Slime source.
 
 Rollout function:
 
@@ -372,8 +377,10 @@ configs/agent_env/runs/<env>_<model>_grpo_fullasync_<nodes>x<gpus>.env
 ```
 
 Add env defaults in `examples/agent_env/scripts/run_agent_env_train.sh` only for
-paths and env-url variable names needed by the generic adapter. Do not put
-reward semantics or task-specific prompt settings in the adapter.
+paths and prompt-data defaults needed by the generic adapter. Do not add
+env-specific URL variables. The distributed launcher computes the router URL
+and invokes the adapter with `--env-server-url`, which is passed through to
+Slime as the same explicit argument.
 
 ## Resolved Profiles
 

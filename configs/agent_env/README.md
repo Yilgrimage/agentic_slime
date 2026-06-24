@@ -10,7 +10,7 @@ naming policy.
   config, model profile, topology profile, train profile, optional aux profile,
   and experiment naming.
 - `models/*.env`: model identity, Megatron model-args script, model-family loss
-  mask, and optional model-family train-entrypoint compatibility defaults.
+  mask, and model-family extras.
 - `topology/*.env`: node indexes, ports, and Ray-visible GPU layout.
 - `train/*.env`: algorithm, sync/full-async mode, rollout sampling/filtering,
   batch/perf layout, Slime resource layout, logging, and checkpoint parameters.
@@ -24,6 +24,10 @@ bash scripts/utils/launch_agentic_training.sh configs/agent_env/runs/tau2_qwen35
 
 The launcher writes resolved profiles under the run log directory before
 starting services, so the exact effective parameters are auditable.
+The env config selected by a run is the static
+`examples/agent_env/<env>/env_config.yaml`; dynamic service endpoints are not
+written back into YAML. The launcher gives the adapter `--env-server-url`, and
+the adapter passes it to Slime as the same explicit argument.
 
 Keep run files thin. If a setting changes model family behavior, put it in a
 model profile. If it changes algorithm, sync/full-async mode, batch size,
