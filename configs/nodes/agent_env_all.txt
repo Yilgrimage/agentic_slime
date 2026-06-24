@@ -2,8 +2,8 @@
 # 0: default head / train node 0
 # 1: train node 1
 # 2: train node 2
-# 3: train node 3 or auxiliary inference node, depending on topology
+# 3: currently unavailable / handed off; leave commented until reassigned
 fdbd:dc03:9:643::142
 fdbd:dc03:9:646::74
 fdbd:dc03:9:655::150
-fdbd:dc03:9:660::194
+# fdbd:dc03:9:660::194

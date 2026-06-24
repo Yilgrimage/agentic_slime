@@ -478,6 +478,13 @@ if [ "${USE_KL_LOSS}" = "1" ] || [ "${KL_LOSS_COEF:-0.00}" != "0.00" ]; then
   GRPO_ARGS+=(--use-kl-loss --kl-loss-coef "${KL_LOSS_COEF:-0.00}" --kl-loss-type "${KL_LOSS_TYPE:-low_var_kl}")
 fi
 
+DEBUG_ARGS=()
+case "${SAVE_DEBUG_TRAIN_DATA:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    DEBUG_ARGS+=(--save-debug-train-data "${SAVE_DEBUG_TRAIN_DATA_PATH:-${RUN_ROOT}/debug/train_data/{rollout_id}_{rank}.pt}")
+    ;;
+esac
+
 OPTIMIZER_ARGS=(
    --optimizer adam
    --lr "${LR:-1e-6}"
@@ -561,6 +568,7 @@ echo "Checkpoint options: save_interval=${SAVE_INTERVAL:-${NUM_STEPS}} no_save_o
    "${PERF_ARGS[@]}" \
    --train-env-vars "${TRAIN_ENV_VARS_JSON}" \
    "${GRPO_ARGS[@]}" \
+   "${DEBUG_ARGS[@]}" \
    "${OPTIMIZER_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
    "${WANDB_ARGS[@]}" \
