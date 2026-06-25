@@ -7,6 +7,13 @@ design boundaries and failure modes that are easy to miss when reading code.
 For details, read the source and the resolved run profiles under
 `RUN_ROOT/logs/`.
 
+Portable agent operating rules live in `.claude/skills/`:
+
+- `.claude/skills/agent-env-ops-discipline/SKILL.md`: server operations,
+  runtime packs, node handling, keepalive, and artifact hygiene.
+- `.claude/skills/slime-code-review-preferences/SKILL.md`: review preferences
+  for avoiding unnecessary wrappers and unclear control flow.
+
 ## Design Boundary
 
 - Do not modify Slime core under `slime/` for agent-env experiments. Agent-env
