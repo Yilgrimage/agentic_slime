@@ -9,10 +9,10 @@ For details, read the source and the resolved run profiles under
 
 Portable agent operating rules live in `.claude/skills/`:
 
-- `.claude/skills/agent-env-ops-discipline/SKILL.md`: server operations,
-  runtime packs, node handling, keepalive, and artifact hygiene.
-- `.claude/skills/slime-code-review-preferences/SKILL.md`: review preferences
-  for avoiding unnecessary wrappers and unclear control flow.
+- `.claude/skills/agentic-slime-discipline/SKILL.md`: agentic Slime code,
+  config, rollout, reward, and training discipline.
+- `.claude/skills/server-ops-discipline/SKILL.md`: server operations, runtime
+  packs, node handling, keepalive, and artifact hygiene.
 
 ## Design Boundary
 
