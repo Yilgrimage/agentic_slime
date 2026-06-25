@@ -5,7 +5,7 @@ task:
 max_turns: 30
 
 timeouts:
-  policy_s: 120
+  policy_s: 300
   env_request_s: 660
 
 interaction:

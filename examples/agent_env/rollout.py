@@ -266,7 +266,8 @@ def _record_rollout_infra_failure(
     sample_metadata = metadata(sample)
     exc_text = repr(exc).lower()
     reason_kind = "timeout" if isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timed out" in exc_text else "failure"
-    discard_reason = f"env_{phase}_{reason_kind}"
+    discard_prefix = "policy" if phase == "policy" else f"env_{phase}"
+    discard_reason = f"{discard_prefix}_{reason_kind}"
     sample_metadata["infra_error"] = {
         "phase": phase,
         "type": type(exc).__name__,
@@ -1522,12 +1523,62 @@ def _glm_style_pad_group(
     return padded, padding_offset, metrics
 
 
+def _add_metrics(metrics: dict[str, float], update: dict[str, float]) -> None:
+    for key, value in update.items():
+        metrics[key] = metrics.get(key, 0.0) + float(value)
+
+
+def _group_sort_key(group: list[Sample]) -> int:
+    for sample in group:
+        if sample.index is not None and sample.index >= 0:
+            return int(sample.index)
+    for sample in group:
+        if sample.index is not None:
+            return int(sample.index)
+    return 0
+
+
+def glm_style_pad_groups_filter(args: Any, data: list[list[Sample]]) -> None:
+    """Repair kept GRPO groups through Slime's stock rollout sample-filter hook."""
+    padding_offset = 0
+    padded_groups = 0
+    padded_samples = 0
+    for idx, group in enumerate(data):
+        repaired, padding_offset, metrics = _glm_style_pad_group(
+            args,
+            group,
+            rollout_id=_group_sort_key(group),
+            padding_offset=padding_offset,
+        )
+        if repaired is None:
+            raise RuntimeError(
+                "GLM-style sample padding received a group with too few valid samples after dynamic filtering. "
+                "Ensure dynamic-sampling-filter-path drops groups at or below "
+                "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION before rollout-sample-filter-path runs."
+            )
+        data[idx] = repaired
+        padded_groups += int(metrics.get("agent_env/glm_padding/group_padded", 0.0))
+        padded_samples += int(metrics.get("agent_env/glm_padding/padded_samples", 0.0))
+    if padded_groups or padded_samples:
+        logger.info(
+            "agent-env GLM-style sample filter padded groups=%d samples=%d",
+            padded_groups,
+            padded_samples,
+        )
+
+
 async def _generate_rollout_fully_async_glm_padding(args: Any, rollout_id: int, data_buffer: Any):
     from slime.rollout.base_types import RolloutFnTrainOutput
+    from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
     from slime.rollout.fully_async_rollout import _get_global_worker
+    from slime.utils.misc import load_function
 
     assert args.rollout_global_dataset
     worker = _get_global_worker(args, data_buffer)
+    dynamic_filter = (
+        load_function(args.dynamic_sampling_filter_path) if args.dynamic_sampling_filter_path is not None else None
+    )
+    metric_gatherer = MetricGatherer()
     target = int(args.rollout_batch_size)
     logger.info(
         "agent-env GLM-style fully-async rollout %d: target=%d queue_warm=%d",
@@ -1545,22 +1596,23 @@ async def _generate_rollout_fully_async_glm_padding(args: Any, rollout_id: int, 
     started = asyncio.get_running_loop().time()
     last_log = started
 
-    def add_metrics(update: dict[str, float]) -> None:
-        for key, value in update.items():
-            metrics[key] = metrics.get(key, 0.0) + float(value)
-
     while len(collected) < target:
         drained = 0
         for gid, group in worker.get_completed_groups():
             drained += 1
+            all_groups.append(group)
             padded_group, padding_offset, group_metrics = _glm_style_pad_group(
                 args,
                 group,
                 rollout_id=rollout_id,
                 padding_offset=padding_offset,
             )
-            add_metrics(group_metrics)
+            _add_metrics(metrics, group_metrics)
             if padded_group is None:
+                continue
+            dynamic_filter_output = call_dynamic_filter(dynamic_filter, args, padded_group)
+            if not dynamic_filter_output.keep:
+                metric_gatherer.on_dynamic_filter_drop(reason=dynamic_filter_output.reason)
                 continue
             collected[gid] = padded_group
 
@@ -1593,17 +1645,17 @@ async def _generate_rollout_fully_async_glm_padding(args: Any, rollout_id: int, 
             )
             last_log = now
 
-    def group_key(group: list[Sample]) -> int:
-        for sample in group:
-            if sample.index is not None and sample.index >= 0:
-                return int(sample.index)
-        for sample in group:
-            if sample.index is not None:
-                return int(sample.index)
-        return 0
+    output = sorted(collected.values(), key=_group_sort_key)[:target]
+    if args.rollout_sample_filter_path is not None:
+        filter_func = load_function(args.rollout_sample_filter_path)
+        filter_func(args, output)
 
-    output = sorted(collected.values(), key=group_key)[:target]
+    if args.rollout_all_samples_process_path is not None:
+        process_func = load_function(args.rollout_all_samples_process_path)
+        process_func(args, sorted(all_groups, key=_group_sort_key), data_buffer)
+
     elapsed = asyncio.get_running_loop().time() - started
+    _add_metrics(metrics, metric_gatherer.collect())
     metrics["agent_env/glm_padding/elapsed_s"] = elapsed
     logger.info(
         "agent-env GLM-style rollout %d: done in %.1fs, groups=%d, seen=%d, dropped=%d, padded=%d, padded_samples=%d",
@@ -1938,7 +1990,7 @@ async def generate_agent_rollout(
         ensure_rollout_shapes(args, sample, spec)
         return sample
     except Exception as exc:
-        if phase in {"allocate", "reset", "step"} and _is_env_infra_exception(exc):
+        if phase in {"allocate", "reset", "policy", "step"} and _is_env_infra_exception(exc):
             return _record_rollout_infra_failure(args, spec, sample, phase, exc, tok)
         sample.status = Sample.Status.FAILED
         sample.reward = 0.0

@@ -10,6 +10,7 @@ from examples.agent_env.rollout import (
     arg,
     format_reward_adjustment,
     metadata,
+    _runtime_env,
     truncated_reward_adjustment,
 )
 
@@ -120,6 +121,10 @@ def check_reward_nonzero_std(args: Any, samples: list[Sample], **_: Any) -> Dyna
     active = [sample for sample in samples if not sample.remove_sample]
     if not active:
         return DynamicFilterOutput(keep=False, reason="no_active_samples")
+    group_size = int(arg(args, "n_samples_per_prompt", len(samples)) or len(samples))
+    min_valid_fraction = float(_runtime_env(args, "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "0.5"))
+    if len(active) <= group_size * min_valid_fraction:
+        return DynamicFilterOutput(keep=False, reason=f"too_few_valid_{len(active)}_of_{group_size}")
     rewards = [raw_reward_for_filter(args, sample) for sample in active]
     mean = sum(rewards) / len(rewards)
     variance = sum((reward - mean) ** 2 for reward in rewards) / max(1, len(rewards) - 1)

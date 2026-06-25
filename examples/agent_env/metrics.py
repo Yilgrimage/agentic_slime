@@ -7,6 +7,14 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     if not samples:
         return {}
 
+    real_samples = [
+        sample
+        for sample in samples
+        if not bool((getattr(sample, "metadata", None) or {}).get("glm_padding_duplicate"))
+    ]
+    if not real_samples:
+        real_samples = samples
+
     turn_counts = []
     format_error_counts = []
     max_response_tokens_hit_counts = []
@@ -15,7 +23,7 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     truncated_reasons: dict[str, int] = {}
     discard_reasons: dict[str, int] = {}
 
-    for sample in samples:
+    for sample in real_samples:
         metadata = sample.metadata or {}
         turn_count = int(metadata.get("turn_count", 0) or 0)
         format_errors = int(metadata.get("format_errors", 0) or 0)
@@ -40,16 +48,16 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     metrics = {
         f"{prefix}/format_error_rate": total_format_errors / total_turns if total_turns else 0.0,
         f"{prefix}/max_response_tokens_hit_rate": total_max_response_tokens_hits / total_turns if total_turns else 0.0,
-        f"{prefix}/discard_sample_rate": total_discards / len(samples),
-        f"{prefix}/success_rate": success_count / len(samples),
-        f"{prefix}/turn_count_mean": total_turns / len(samples),
+        f"{prefix}/discard_sample_rate": total_discards / len(real_samples),
+        f"{prefix}/success_rate": success_count / len(real_samples),
+        f"{prefix}/turn_count_mean": total_turns / len(real_samples),
     }
     if env_rewards:
         metrics[f"{prefix}/env_reward_mean"] = sum(env_rewards) / len(env_rewards)
     for reason, count in truncated_reasons.items():
-        metrics[f"{prefix}/truncated_{reason}_rate"] = count / len(samples)
+        metrics[f"{prefix}/truncated_{reason}_rate"] = count / total_turns if total_turns else 0.0
     for reason, count in discard_reasons.items():
-        metrics[f"{prefix}/discard_{reason}_rate"] = count / len(samples)
+        metrics[f"{prefix}/discard_{reason}_rate"] = count / len(real_samples)
     return metrics
 
 

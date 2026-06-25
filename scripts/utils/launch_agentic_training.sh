@@ -646,6 +646,8 @@ write_train_driver() {
     printf 'export SLIME_ENV=%q\n' "${SLIME_ENV}"
     printf 'export CUDA_VISIBLE_DEVICES=%q\n' "${RAY_CUDA_VISIBLE_DEVICES}"
     printf 'export RAY_CUDA_VISIBLE_DEVICES=%q\n' "${RAY_CUDA_VISIBLE_DEVICES}"
+    printf 'export RAY_PORT=%q\n' "${RAY_PORT}"
+    printf 'export RAY_ADDRESS=%q\n' "127.0.0.1:${RAY_PORT}"
     printf 'export RUN_ROOT=%q\n' "${RUN_ROOT}"
     printf 'export LOG_DIR=%q\n' "${LOG_DIR}"
     printf 'export WANDB_DIR=%q\n' "${WANDB_DIR}"

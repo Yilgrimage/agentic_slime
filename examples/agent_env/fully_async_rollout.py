@@ -1,24 +1,99 @@
 from __future__ import annotations
 
+import atexit
 import asyncio
 import logging
+import math
+import os
+import threading
 import time
 from typing import Any
 
 from slime.rollout.base_types import RolloutFnTrainOutput
 from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
-from slime.rollout.fully_async_rollout import _get_global_worker
+from slime.rollout.fully_async_rollout import AsyncRolloutWorker
 from slime.utils.async_utils import run
+from slime.utils.http_utils import get_rollout_num_engines
 from slime.utils.misc import load_function
 from slime.utils.types import Sample
 
 logger = logging.getLogger("examples.agent_env.fully_async_rollout")
 
+_worker_lock = threading.Lock()
+_worker: AsyncRolloutWorker | None = None
+_worker_key: tuple[int, int] | None = None
+
+
+def _runtime_env(args: Any, name: str, default: str = "") -> str:
+    value = os.environ.get(name)
+    if value:
+        return value
+    train_env_vars = getattr(args, "train_env_vars", None) or {}
+    if isinstance(train_env_vars, dict):
+        value = train_env_vars.get(name)
+        if value:
+            return str(value)
+    return default
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _default_max_inflight_groups(args: Any) -> int:
+    sample_capacity = max(1, int(args.sglang_server_concurrency) * get_rollout_num_engines(args))
+    group_size = max(1, int(args.n_samples_per_prompt))
+    return max(1, math.ceil(sample_capacity / group_size))
+
+
+def _max_inflight_groups(args: Any) -> int:
+    configured = _positive_int(_runtime_env(args, "AGENT_ENV_ASYNC_MAX_INFLIGHT_GROUPS", ""))
+    if configured is not None:
+        return configured
+    return _default_max_inflight_groups(args)
+
+
+def _get_worker(args: Any, data_buffer: Any) -> AsyncRolloutWorker:
+    global _worker, _worker_key
+    max_groups = _max_inflight_groups(args)
+    key = (id(data_buffer), max_groups)
+    with _worker_lock:
+        if _worker is None or not _worker.worker_thread or not _worker.worker_thread.is_alive() or _worker_key != key:
+            if _worker is not None:
+                _worker.stop()
+            logger.info(
+                "starting agent-env fully-async worker: max_inflight_groups=%d, "
+                "sample_capacity=%d, group_size=%d",
+                max_groups,
+                int(args.sglang_server_concurrency) * get_rollout_num_engines(args),
+                int(args.n_samples_per_prompt),
+            )
+            _worker = AsyncRolloutWorker(args, data_buffer, concurrency=max_groups)
+            _worker.start()
+            _worker_key = key
+        return _worker
+
+
+def _stop_worker() -> None:
+    global _worker, _worker_key
+    with _worker_lock:
+        if _worker is not None:
+            _worker.stop()
+            _worker = None
+            _worker_key = None
+
+
+atexit.register(_stop_worker)
+
 
 async def _generate_rollout_async(args: Any, rollout_id: int, data_buffer: Any) -> RolloutFnTrainOutput:
     assert args.rollout_global_dataset
 
-    worker = _get_global_worker(args, data_buffer)
+    worker = _get_worker(args, data_buffer)
     dynamic_filter = (
         load_function(args.dynamic_sampling_filter_path) if args.dynamic_sampling_filter_path is not None else None
     )
