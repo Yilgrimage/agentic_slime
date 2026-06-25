@@ -3,6 +3,7 @@ set -euo pipefail
 
 MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
 REPO_DIR=${REPO_DIR:-${MLF_NAS_ROOT}/code/slime}
+OPS_SCRIPTS_DIR=${OPS_SCRIPTS_DIR:-${MLF_NAS_ROOT}/scripts}
 MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
 MLF_LOCAL_ROOT=${MLF_LOCAL_ROOT:-/tmp/mlf-runtime}
 WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${MLF_NAS_ROOT}/secrets/wandb.env}
@@ -367,7 +368,7 @@ run_bench_nodes() {
   [ -n "${nodes_file}" ] || return 0
   local cmd
   cmd=$(printf 'MLF_NAS_ROOT=%q SSH_KEY=%q SSH_IPV6=%q bash %q %q --nodes %q' \
-    "${MLF_NAS_ROOT}" "${SSH_KEY}" "${SSH_IPV6}" "${MLF_NAS_ROOT}/bash/run_bench.sh" "${action}" "${nodes_file}")
+    "${MLF_NAS_ROOT}" "${SSH_KEY}" "${SSH_IPV6}" "${OPS_SCRIPTS_DIR}/run_bench.sh" "${action}" "${nodes_file}")
   [ -z "${selector}" ] || cmd+=$(printf ' --node %q' "${selector}")
   if [ "${DRY_RUN}" = "1" ]; then
     echo "+ ${cmd}"
@@ -681,7 +682,7 @@ start_train_driver() {
     printf 'BENCH_LOG=%q\n' "${bench_log}"
     printf 'BENCH_ON_TRAIN_EXIT=%q\n' "${BENCH_ON_TRAIN_EXIT}"
     printf 'MLF_NAS_ROOT=%q\n' "${MLF_NAS_ROOT}"
-    printf 'RUN_BENCH=%q\n' "${MLF_NAS_ROOT}/bash/run_bench.sh"
+    printf 'RUN_BENCH=%q\n' "${OPS_SCRIPTS_DIR}/run_bench.sh"
     printf 'NODES_FILE=%q\n' "${NODES_FILE}"
     printf 'NODE_INDICES=%q\n' "${NODE_INDICES}"
     printf 'SSH_USER=%q\n' "${SSH_USER}"
@@ -772,8 +773,8 @@ run_head() {
       node_addr=$(remote_first_ip "${node}")
     fi
     env_urls+=("http://$(http_host "${node_addr}"):${ENV_PORT}")
-    worker_script=$(printf 'cd %q\nMLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q bash scripts/utils/launch_agentic_training.sh --internal-role worker --resolved %q --head-address %q\n' \
-      "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_CONFIG}" "${head_addr}")
+    worker_script=$(printf 'cd %q\nMLF_NAS_ROOT=%q OPS_SCRIPTS_DIR=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q bash scripts/utils/launch_agentic_training.sh --internal-role worker --resolved %q --head-address %q\n' \
+      "${REPO_DIR}" "${MLF_NAS_ROOT}" "${OPS_SCRIPTS_DIR}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_CONFIG}" "${head_addr}")
     tmux_start_remote "${node}" mlf_multi_worker "${worker_script}" "${LOG_DIR}/multi_worker_$(safe_label "${node}").log"
   done
   for node in $(read_nodes | tail -n +2); do
@@ -793,7 +794,7 @@ run_head() {
 write_resolved_launch_config() {
   load_aux_endpoint_env
   write_named_env "${RESOLVED_LAUNCH_CONFIG}" \
-    MLF_NAS_ROOT REPO_DIR MLF_LOCAL_ENVS MLF_LOCAL_ROOT WANDB_SECRET_FILE SLIME_ENV SLIME_PYTHON \
+    MLF_NAS_ROOT REPO_DIR OPS_SCRIPTS_DIR MLF_LOCAL_ENVS MLF_LOCAL_ROOT WANDB_SECRET_FILE SLIME_ENV SLIME_PYTHON \
     ENV_NAME ENV_CONFIG MODEL_PROFILE TRAIN_PROFILE TRAIN_ADAPTER RESOLVED_TRAIN_PROFILE \
     NODES_FILE NODE_INDICES AUX_NODES_FILE AUX_NODE_INDICES AUX_ENV_FILE ENV_PORT ROUTER_PORT RAY_PORT \
     RAY_CUDA_VISIBLE_DEVICES NUM_GPUS_PER_NODE_FOR_RAY RAY_MIN_WORKER_PORT RAY_MAX_WORKER_PORT \
@@ -862,7 +863,7 @@ prepare_run() {
     write_resolved_profile "${RESOLVED_AUX_PROFILE}" "${aux_path}"
     {
       printf '\n'
-      quote_exports MLF_NAS_ROOT MLF_LOCAL_ENVS REPO_DIR LOG_DIR AUX_ENV_FILE AUX_NODES_FILE AUX_NODE_INDICES
+      quote_exports MLF_NAS_ROOT OPS_SCRIPTS_DIR MLF_LOCAL_ENVS REPO_DIR LOG_DIR AUX_ENV_FILE AUX_NODES_FILE AUX_NODE_INDICES
     } >> "${RESOLVED_AUX_PROFILE}"
   else
     RESOLVED_AUX_PROFILE=
@@ -894,8 +895,8 @@ submit_head() {
   else
     head_addr=$(remote_first_ip "${head}")
   fi
-  script=$(printf 'cd %q\nMLF_NAS_ROOT=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q SSH_JUMP= bash scripts/utils/launch_agentic_training.sh --internal-role head --resolved %q --head-address %q\n' \
-    "${REPO_DIR}" "${MLF_NAS_ROOT}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_LAUNCH_CONFIG}" "${head_addr}")
+  script=$(printf 'cd %q\nMLF_NAS_ROOT=%q OPS_SCRIPTS_DIR=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q SSH_JUMP= bash scripts/utils/launch_agentic_training.sh --internal-role head --resolved %q --head-address %q\n' \
+    "${REPO_DIR}" "${MLF_NAS_ROOT}" "${OPS_SCRIPTS_DIR}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_LAUNCH_CONFIG}" "${head_addr}")
   if is_current_node "${head}"; then
     RESOLVED_CONFIG="${RESOLVED_LAUNCH_CONFIG}" HEAD_ADDRESS="${head_addr}" run_head
   else

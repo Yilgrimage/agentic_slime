@@ -42,11 +42,12 @@ bash scripts/utils/launch_agentic_training.sh \
 
 ## Keepalive
 
-GPU keepalive is intentionally outside this repo:
+GPU keepalive is intentionally outside this repo and should be called through
+the root-level ops interface:
 
 ```bash
-/mnt/bn/jixf-nas-lq/mlf/bash/run_bench.sh start|stop|status
-/mnt/bn/jixf-nas-lq/mlf/bash/gpu_idle_watchdog.sh start|status|stop
+${MLF_NAS_ROOT}/scripts/run_bench.sh start|stop|status
+${MLF_NAS_ROOT}/scripts/gpu_idle_watchdog.sh start|status|stop
 ```
 
 The watchdog should protect idle GPUs by utilization only. It should not depend

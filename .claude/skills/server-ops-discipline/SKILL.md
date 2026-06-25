@@ -9,6 +9,38 @@ Keep server operations reproducible. Durable state belongs on shared storage or
 in git; node-local state is disposable and should be rebuilt from packs or
 scripts.
 
+## Bundled Scripts
+
+This skill ships reusable ops scripts under `scripts/`. Install or sync them to
+the shared cluster root before wiring project launchers to them:
+
+```bash
+mkdir -p "${ROOT_DIR}/scripts"
+cp -a server-ops-discipline/scripts/. "${ROOT_DIR}/scripts/"
+chmod +x "${ROOT_DIR}/scripts/"*.sh
+```
+
+Use `ROOT_DIR` as the portable root for the cluster workspace. Existing MLF
+deployments may still export `MLF_NAS_ROOT`; the bundled scripts accept it as a
+compatibility alias, but new project code should locate ops helpers through
+`${ROOT_DIR}/scripts`.
+
+Stable interfaces:
+
+```text
+${ROOT_DIR}/scripts/run_bench.sh start|stop|status|restart [--nodes nodes.txt --node 0,1]
+${ROOT_DIR}/scripts/gpu_idle_watchdog.sh start|stop|status|restart
+${ROOT_DIR}/scripts/prepare_node_runtime.sh --local-only|--all-nodes ...
+${ROOT_DIR}/scripts/materialize_node_runtime.sh --envs ... --data ... --sources ...
+${ROOT_DIR}/scripts/pack_data.sh
+```
+
+Launchers that need `bench_on_exit` must call `${ROOT_DIR}/scripts/run_bench.sh`
+instead of embedding their own keepalive implementation. Watchdogs must call the
+same `run_bench.sh` interface. Repo-specific launch code may set `ROOT_DIR`,
+`LOCAL_ENVS_DIR`, `LOCAL_ROOT`, `PACK_DIR`, SSH variables, and node selectors,
+but should not duplicate these scripts.
+
 ## State Model
 
 - Treat shared storage as the source of truth for code, data, models, packs,
@@ -29,6 +61,7 @@ Current MLF layout:
 /mnt/bn/jixf-nas-lq/mlf/packs
 /mnt/bn/jixf-nas-lq/mlf/runs
 /mnt/bn/jixf-nas-lq/mlf/secrets
+/mnt/bn/jixf-nas-lq/mlf/scripts
 /tmp/mlf-envs
 /tmp/mlf-runtime
 ```
@@ -50,6 +83,10 @@ When moving clusters, preserve the same roles even if the paths change.
 
 - Split runtime packs by dependency domain. Do not create one giant mutable
   environment that every task edits.
+- Use `${ROOT_DIR}/scripts/pack_data.sh`,
+  `${ROOT_DIR}/scripts/prepare_node_runtime.sh`, and
+  `${ROOT_DIR}/scripts/materialize_node_runtime.sh` as the shared vocabulary for
+  pack creation and node-local installation.
 - Keep data/source packs separate from conda or Python environment packs.
 - Keep model checkpoints on shared storage unless local copies are explicitly
   needed and documented.
@@ -77,6 +114,8 @@ When moving clusters, preserve the same roles even if the paths change.
   Ray, tmux session names, or process names.
 - Bench should be a replaceable keepalive workload. Starting bench should not
   destroy unrelated tmux sessions or user processes.
+- Put bench and watchdog under `${ROOT_DIR}/scripts`, not under a repo-specific
+  `bash/` or `utils/` directory.
 - Before launching training, stop bench on nodes used by the job. If a job fails
   and GPUs stay idle, watchdog should restart bench after the configured window.
 

@@ -18,6 +18,11 @@ or patch-style fixes.
   launch/adapter scripts.
 - Do not hide experiment semantics in launch scripts. Launchers orchestrate;
   profiles own configuration; env code owns environment behavior.
+- Do not reimplement server keepalive or node materialization in agentic Slime.
+  Use the server ops root interfaces, for example
+  `${ROOT_DIR}/scripts/run_bench.sh`,
+  `${ROOT_DIR}/scripts/gpu_idle_watchdog.sh`, and
+  `${ROOT_DIR}/scripts/prepare_node_runtime.sh`.
 
 Common hook paths:
 

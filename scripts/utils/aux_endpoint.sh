@@ -3,6 +3,7 @@ set -euo pipefail
 
 MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
 REPO_DIR=${REPO_DIR:-${MLF_NAS_ROOT}/code/slime}
+OPS_SCRIPTS_DIR=${OPS_SCRIPTS_DIR:-${MLF_NAS_ROOT}/scripts}
 MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
 LOG_DIR=${LOG_DIR:-/tmp/mlf-runtime/logs}
 SLIME_ENV=${SLIME_ENV:-${MLF_LOCAL_ENVS}/slime}
@@ -514,7 +515,7 @@ stop_bench_for_aux_node() {
   local nodes_file=$1
   [ "${DRY_RUN}" = "0" ] || return 0
   [ "${BENCH_ON_AUX_START}" = "1" ] || return 0
-  [ -f "${MLF_NAS_ROOT}/bash/run_bench.sh" ] || return 0
+  [ -f "${OPS_SCRIPTS_DIR}/run_bench.sh" ] || return 0
   local selected_count
   selected_count=$(selected_aux_nodes "${nodes_file}" "${AUX_NODE_INDICES}" | wc -l | tr -d ' ')
   if [ -z "${AUX_NODE_INDICES}" ] && [ "${selected_count}" -ne 1 ]; then
@@ -523,9 +524,9 @@ stop_bench_for_aux_node() {
   fi
   echo "Stopping GPU bench for aux node"
   if [ -n "${AUX_NODE_INDICES}" ]; then
-    bash "${MLF_NAS_ROOT}/bash/run_bench.sh" stop --nodes "${nodes_file}" --node "${AUX_NODE_INDICES}" || true
+    bash "${OPS_SCRIPTS_DIR}/run_bench.sh" stop --nodes "${nodes_file}" --node "${AUX_NODE_INDICES}" || true
   else
-    bash "${MLF_NAS_ROOT}/bash/run_bench.sh" stop --nodes "${nodes_file}" || true
+    bash "${OPS_SCRIPTS_DIR}/run_bench.sh" stop --nodes "${nodes_file}" || true
   fi
 }
 
