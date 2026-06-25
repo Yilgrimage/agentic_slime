@@ -140,6 +140,33 @@ quote_exports() {
   done
 }
 
+configure_runtime_paths() {
+  local run_user
+  run_user=${USER:-$(id -un 2>/dev/null || echo unknown)}
+  export USER=${USER:-${run_user}}
+  RAY_TEMP_DIR=${RAY_TEMP_DIR:-${MLF_LOCAL_ROOT}/ray/${ENV_NAME:-agent_env}_${run_user}}
+  TMPDIR=${TMPDIR:-${MLF_LOCAL_ROOT}/tmp}
+  XDG_CACHE_HOME=${XDG_CACHE_HOME:-${MLF_LOCAL_ROOT}/cache/xdg}
+  HF_HOME=${HF_HOME:-${MLF_LOCAL_ROOT}/cache/huggingface}
+  TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}
+  TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-${MLF_LOCAL_ROOT}/cache/torch_extensions}
+  TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-${MLF_LOCAL_ROOT}/cache/triton}
+  CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-${MLF_LOCAL_ROOT}/cache/cuda}
+  export RAY_TEMP_DIR TMPDIR XDG_CACHE_HOME HF_HOME TRANSFORMERS_CACHE TORCH_EXTENSIONS_DIR TRITON_CACHE_DIR CUDA_CACHE_PATH
+}
+
+runtime_path_exports() {
+  printf 'export RAY_TEMP_DIR=%q\n' "${RAY_TEMP_DIR}"
+  printf 'export RAY_TMPDIR=%q\n' "${RAY_TEMP_DIR}"
+  printf 'export TMPDIR=%q\n' "${TMPDIR}"
+  printf 'export XDG_CACHE_HOME=%q\n' "${XDG_CACHE_HOME}"
+  printf 'export HF_HOME=%q\n' "${HF_HOME}"
+  printf 'export TRANSFORMERS_CACHE=%q\n' "${TRANSFORMERS_CACHE}"
+  printf 'export TORCH_EXTENSIONS_DIR=%q\n' "${TORCH_EXTENSIONS_DIR}"
+  printf 'export TRITON_CACHE_DIR=%q\n' "${TRITON_CACHE_DIR}"
+  printf 'export CUDA_CACHE_PATH=%q\n' "${CUDA_CACHE_PATH}"
+}
+
 source_env_file() {
   local path=$1
   local label=${2:-profile}
@@ -439,6 +466,7 @@ load_aux_endpoint_env() {
 }
 
 server_runtime_exports() {
+  runtime_path_exports
   printf 'export MLF_NAS_ROOT=%q\n' "${MLF_NAS_ROOT}"
   printf 'export MLF_LOCAL_ROOT=%q\n' "${MLF_LOCAL_ROOT}"
   printf 'export MLF_LOCAL_ENVS=%q\n' "${MLF_LOCAL_ENVS}"
@@ -491,9 +519,12 @@ start_env_server() {
 start_ray_head() {
   local node_ip=${HEAD_ADDRESS:-}
   [ -n "${node_ip}" ] || node_ip=$(hostname -I | tr ' ' '\n' | grep -m1 .)
-  local script attempt
-  script=$(printf 'export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1\n[ ! -f %q ] || { set -a; source %q; set +a; }\nexport CUDA_VISIBLE_DEVICES=%q\nmkdir -p %q\n%q -m ray.scripts.scripts start --head --node-ip-address %q --port %q --num-gpus %q --min-worker-port %q --max-worker-port %q --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265 --block\n' \
-    "${WANDB_SECRET_FILE}" "${WANDB_SECRET_FILE}" "${RAY_CUDA_VISIBLE_DEVICES}" "${LOG_DIR}" "${SLIME_PYTHON}" "${node_ip}" "${RAY_PORT}" "${NUM_GPUS_PER_NODE_FOR_RAY}" "${RAY_MIN_WORKER_PORT}" "${RAY_MAX_WORKER_PORT}")
+  local script attempt runtime_env
+  runtime_env=$(runtime_path_exports)
+  script=$(printf 'export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1\n%s\n[ ! -f %q ] || { set -a; source %q; set +a; }\nexport CUDA_VISIBLE_DEVICES=%q\nmkdir -p %q %q %q %q %q %q %q %q %q\n%q -m ray.scripts.scripts start --head --node-ip-address %q --port %q --temp-dir %q --num-gpus %q --min-worker-port %q --max-worker-port %q --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265 --block\n' \
+    "${runtime_env}" "${WANDB_SECRET_FILE}" "${WANDB_SECRET_FILE}" "${RAY_CUDA_VISIBLE_DEVICES}" \
+    "${LOG_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}" "${XDG_CACHE_HOME}" "${HF_HOME}" "${TRANSFORMERS_CACHE}" "${TORCH_EXTENSIONS_DIR}" "${TRITON_CACHE_DIR}" "${CUDA_CACHE_PATH}" \
+    "${SLIME_PYTHON}" "${node_ip}" "${RAY_PORT}" "${RAY_TEMP_DIR}" "${NUM_GPUS_PER_NODE_FOR_RAY}" "${RAY_MIN_WORKER_PORT}" "${RAY_MAX_WORKER_PORT}")
   for attempt in $(seq 1 "${RAY_START_MAX_ATTEMPTS}"); do
     echo "Starting Ray head attempt ${attempt}/${RAY_START_MAX_ATTEMPTS}"
     [ "${DRY_RUN}" = "1" ] || "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force || true
@@ -513,9 +544,12 @@ start_ray_worker() {
   local node_ip
   node_ip=$(hostname -I | tr ' ' '\n' | grep -m1 .)
   [ "${DRY_RUN}" = "1" ] || "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force || true
-  local script
-  script=$(printf 'export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1\n[ ! -f %q ] || { set -a; source %q; set +a; }\nexport CUDA_VISIBLE_DEVICES=%q\nmkdir -p %q\n%q -m ray.scripts.scripts start --address %q --node-ip-address %q --num-gpus %q --min-worker-port %q --max-worker-port %q --disable-usage-stats --block\n' \
-    "${WANDB_SECRET_FILE}" "${WANDB_SECRET_FILE}" "${RAY_CUDA_VISIBLE_DEVICES}" "${LOG_DIR}" "${SLIME_PYTHON}" "${head_addr}:${RAY_PORT}" "${node_ip}" "${NUM_GPUS_PER_NODE_FOR_RAY}" "${RAY_MIN_WORKER_PORT}" "${RAY_MAX_WORKER_PORT}")
+  local script runtime_env
+  runtime_env=$(runtime_path_exports)
+  script=$(printf 'export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1\n%s\n[ ! -f %q ] || { set -a; source %q; set +a; }\nexport CUDA_VISIBLE_DEVICES=%q\nmkdir -p %q %q %q %q %q %q %q %q %q\n%q -m ray.scripts.scripts start --address %q --node-ip-address %q --num-gpus %q --min-worker-port %q --max-worker-port %q --disable-usage-stats --block\n' \
+    "${runtime_env}" "${WANDB_SECRET_FILE}" "${WANDB_SECRET_FILE}" "${RAY_CUDA_VISIBLE_DEVICES}" \
+    "${LOG_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}" "${XDG_CACHE_HOME}" "${HF_HOME}" "${TRANSFORMERS_CACHE}" "${TORCH_EXTENSIONS_DIR}" "${TRITON_CACHE_DIR}" "${CUDA_CACHE_PATH}" \
+    "${SLIME_PYTHON}" "${head_addr}:${RAY_PORT}" "${node_ip}" "${NUM_GPUS_PER_NODE_FOR_RAY}" "${RAY_MIN_WORKER_PORT}" "${RAY_MAX_WORKER_PORT}")
   tmux_start_local mlf_ray_worker "${script}" "$(role_log_path "ray_worker.log")"
 }
 
@@ -634,6 +668,8 @@ start_router() {
 write_train_driver() {
   local router_url=$1
   local driver="${LOG_DIR}/${ENV_NAME}_train_driver.sh"
+  local runtime_env
+  runtime_env=$(runtime_path_exports)
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
     printf 'export MLF_NAS_ROOT=%q\n' "${MLF_NAS_ROOT}"
@@ -648,6 +684,7 @@ write_train_driver() {
     printf 'export RAY_CUDA_VISIBLE_DEVICES=%q\n' "${RAY_CUDA_VISIBLE_DEVICES}"
     printf 'export RAY_PORT=%q\n' "${RAY_PORT}"
     printf 'export RAY_ADDRESS=%q\n' "127.0.0.1:${RAY_PORT}"
+    printf '%s\n' "${runtime_env}"
     printf 'export RUN_ROOT=%q\n' "${RUN_ROOT}"
     printf 'export LOG_DIR=%q\n' "${LOG_DIR}"
     printf 'export WANDB_DIR=%q\n' "${WANDB_DIR}"
@@ -736,6 +773,7 @@ EOF
 
 run_worker() {
   source_env_file "${RESOLVED_CONFIG}" resolved
+  configure_runtime_paths
   start_env_server
   wait_http "http://127.0.0.1:${ENV_PORT}/health"
   start_ray_worker "${HEAD_ADDRESS:?worker needs --head-address}"
@@ -743,6 +781,7 @@ run_worker() {
 
 run_head() {
   source_env_file "${RESOLVED_CONFIG}" resolved
+  configure_runtime_paths
   mkdir -p "${LOG_DIR}"
   HEAD_ORCHESTRATION_COMPLETE=0
   head_failure_guard() {
@@ -794,6 +833,7 @@ write_resolved_launch_config() {
   load_aux_endpoint_env
   write_named_env "${RESOLVED_LAUNCH_CONFIG}" \
     MLF_NAS_ROOT REPO_DIR MLF_LOCAL_ENVS MLF_LOCAL_ROOT WANDB_SECRET_FILE SLIME_ENV SLIME_PYTHON \
+    RAY_TEMP_DIR TMPDIR XDG_CACHE_HOME HF_HOME TRANSFORMERS_CACHE TORCH_EXTENSIONS_DIR TRITON_CACHE_DIR CUDA_CACHE_PATH \
     ENV_NAME ENV_CONFIG MODEL_PROFILE TRAIN_PROFILE TRAIN_ADAPTER RESOLVED_TRAIN_PROFILE \
     NODES_FILE NODE_INDICES AUX_NODES_FILE AUX_NODE_INDICES AUX_ENV_FILE ENV_PORT ROUTER_PORT RAY_PORT \
     RAY_CUDA_VISIBLE_DEVICES NUM_GPUS_PER_NODE_FOR_RAY RAY_MIN_WORKER_PORT RAY_MAX_WORKER_PORT \
@@ -844,14 +884,17 @@ prepare_run() {
   WANDB_DIR=${WANDB_DIR:-${RUN_ROOT}/wandb}
   SAVE_DIR=${SAVE_DIR:-${RUN_ROOT}/checkpoints}
   AUX_ENV_FILE=${AUX_ENV_FILE:-${LOG_DIR}/aux_endpoint.env}
+  configure_runtime_paths
   RESOLVED_TRAIN_PROFILE=${LOG_DIR}/resolved_train_profile.env
   RESOLVED_LAUNCH_CONFIG=${LOG_DIR}/resolved_launch.env
-  mkdir -p "${LOG_DIR}" "${WANDB_DIR}" "${SAVE_DIR}"
+  mkdir -p "${LOG_DIR}" "${WANDB_DIR}" "${SAVE_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}" \
+    "${XDG_CACHE_HOME}" "${HF_HOME}" "${TRANSFORMERS_CACHE}" "${TORCH_EXTENSIONS_DIR}" "${TRITON_CACHE_DIR}" "${CUDA_CACHE_PATH}"
 
   write_resolved_profile "${RESOLVED_TRAIN_PROFILE}" "${run_profile_path}" "${topology_path}" "${model_path}" "${train_path}"
   {
     printf '\n'
     quote_exports MLF_NAS_ROOT MLF_LOCAL_ROOT MLF_LOCAL_ENVS REPO_DIR TRAIN_ADAPTER \
+      RAY_TEMP_DIR TMPDIR XDG_CACHE_HOME HF_HOME TRANSFORMERS_CACHE TORCH_EXTENSIONS_DIR TRITON_CACHE_DIR CUDA_CACHE_PATH \
       RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR
   } >> "${RESOLVED_TRAIN_PROFILE}"
 
@@ -862,7 +905,8 @@ prepare_run() {
     write_resolved_profile "${RESOLVED_AUX_PROFILE}" "${aux_path}"
     {
       printf '\n'
-      quote_exports MLF_NAS_ROOT MLF_LOCAL_ENVS REPO_DIR LOG_DIR AUX_ENV_FILE AUX_NODES_FILE AUX_NODE_INDICES
+      quote_exports MLF_NAS_ROOT MLF_LOCAL_ROOT MLF_LOCAL_ENVS REPO_DIR LOG_DIR AUX_ENV_FILE AUX_NODES_FILE AUX_NODE_INDICES \
+        RAY_TEMP_DIR TMPDIR XDG_CACHE_HOME HF_HOME TRANSFORMERS_CACHE TORCH_EXTENSIONS_DIR TRITON_CACHE_DIR CUDA_CACHE_PATH
     } >> "${RESOLVED_AUX_PROFILE}"
   else
     RESOLVED_AUX_PROFILE=
