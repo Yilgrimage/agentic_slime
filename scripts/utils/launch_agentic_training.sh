@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
-REPO_DIR=${REPO_DIR:-${MLF_NAS_ROOT}/code/slime}
-OPS_SCRIPTS_DIR=${OPS_SCRIPTS_DIR:-${MLF_NAS_ROOT}/scripts}
-MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
-MLF_LOCAL_ROOT=${MLF_LOCAL_ROOT:-/tmp/mlf-runtime}
-WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${MLF_NAS_ROOT}/secrets/wandb.env}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG_FILE="${SERVER_OPS_CONFIG:-${HOME}/.jingyuan/server_ops.env}"
+if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+fi
+REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
+ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+OPS_SCRIPTS_DIR=${OPS_SCRIPTS_DIR:-${ROOT_DIR}/scripts}
+LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
+LOCAL_RUNTIME_DIR=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
+WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${ROOT_DIR}/secrets/wandb.env}
 
 RUN_PROFILE=${RUN_PROFILE:-}
 INTERNAL_ROLE=
@@ -45,13 +51,13 @@ SAVE_DIR=${SAVE_DIR:-}
 RESET_TRAIN_RUNTIME_ON_START=${RESET_TRAIN_RUNTIME_ON_START:-1}
 BENCH_ON_TRAIN_EXIT=${BENCH_ON_TRAIN_EXIT:-1}
 BENCH_ON_LAUNCH_FAILURE=${BENCH_ON_LAUNCH_FAILURE:-1}
-BENCH_ON_EXIT_SUPPRESS_FILE=${BENCH_ON_EXIT_SUPPRESS_FILE:-/tmp/mlf_suppress_bench_on_train_exit_until}
+BENCH_ON_EXIT_SUPPRESS_FILE=${BENCH_ON_EXIT_SUPPRESS_FILE:-/tmp/server_ops_suppress_bench_on_train_exit_until}
 
 SSH_USER=${SSH_USER:-tiger}
 SSH_PORT=${SSH_PORT:-10413}
 if [ -z "${SSH_KEY:-}" ]; then
-  if [ -f "${MLF_NAS_ROOT}/secrets/byte_id_rsa" ]; then
-    SSH_KEY="${MLF_NAS_ROOT}/secrets/byte_id_rsa"
+  if [ -f "${ROOT_DIR}/secrets/byte_id_rsa" ]; then
+    SSH_KEY="${ROOT_DIR}/secrets/byte_id_rsa"
   else
     SSH_KEY="/home/${SSH_USER}/.ssh/byte_id_rsa"
   fi
@@ -60,7 +66,7 @@ SSH_KEY=${SSH_KEY/#\~/${HOME}}
 SSH_IPV6=${SSH_IPV6:-1}
 SSH_JUMP=${SSH_JUMP:-}
 
-SLIME_ENV=${SLIME_ENV:-${MLF_LOCAL_ENVS}/slime}
+SLIME_ENV=${SLIME_ENV:-${LOCAL_ENVS_DIR}/slime}
 SLIME_PYTHON=${SLIME_PYTHON:-${SLIME_ENV}/bin/python}
 
 usage() {
@@ -367,8 +373,8 @@ run_bench_nodes() {
   local selector=${3:-}
   [ -n "${nodes_file}" ] || return 0
   local cmd
-  cmd=$(printf 'MLF_NAS_ROOT=%q SSH_KEY=%q SSH_IPV6=%q bash %q %q --nodes %q' \
-    "${MLF_NAS_ROOT}" "${SSH_KEY}" "${SSH_IPV6}" "${OPS_SCRIPTS_DIR}/run_bench.sh" "${action}" "${nodes_file}")
+  cmd=$(printf 'ROOT_DIR=%q LOCAL_ENVS_DIR=%q BENCH_PYTHON=%q SSH_KEY=%q SSH_IPV6=%q bash %q %q --nodes %q' \
+    "${ROOT_DIR}" "${LOCAL_ENVS_DIR}" "${BENCH_PYTHON:-${SLIME_PYTHON}}" "${SSH_KEY}" "${SSH_IPV6}" "${OPS_SCRIPTS_DIR}/run_bench.sh" "${action}" "${nodes_file}")
   [ -z "${selector}" ] || cmd+=$(printf ' --node %q' "${selector}")
   if [ "${DRY_RUN}" = "1" ]; then
     echo "+ ${cmd}"
@@ -386,13 +392,13 @@ if [ -n "${BENCH_ON_EXIT_SUPPRESS_FILE}" ]; then
   mkdir -p "$(dirname "${BENCH_ON_EXIT_SUPPRESS_FILE}")" 2>/dev/null || true
   printf '%s\n' "${suppress_until}" > "${BENCH_ON_EXIT_SUPPRESS_FILE}" 2>/dev/null || true
 fi
-for session in mlf_ray_head mlf_ray_worker mlf_${ENV_NAME}_env mlf_${ENV_NAME}_router mlf_${ENV_NAME}_train mlf_multi_head mlf_multi_worker; do
+for session in agent_env_ray_head agent_env_ray_worker agent_env_${ENV_NAME}_env agent_env_${ENV_NAME}_router agent_env_${ENV_NAME}_train agent_env_multi_head agent_env_multi_worker; do
   tmux kill-session -t "\${session}" 2>/dev/null || true
 done
 if [ -x "${SLIME_PYTHON}" ]; then
-  "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force >/tmp/mlf_ray_stop.log 2>&1 || true
+  "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force >/tmp/server_ops_ray_stop.log 2>&1 || true
 elif command -v ray >/dev/null 2>&1; then
-  ray stop --force >/tmp/mlf_ray_stop.log 2>&1 || true
+  ray stop --force >/tmp/server_ops_ray_stop.log 2>&1 || true
 fi
 pkill -f '[s]glang.launch_server' 2>/dev/null || true
 pkill -f '[s]lime/ray/train' 2>/dev/null || true
@@ -423,10 +429,10 @@ require_runtime() {
   [ "${DRY_RUN}" = "1" ] && return 0
   [ -x "${SLIME_PYTHON}" ] || { echo "Missing slime python: ${SLIME_PYTHON}" >&2; exit 1; }
   case "${ENV_NAME}" in
-    webshop) [ -x "${MLF_LOCAL_ENVS}/webshop/bin/python" ] || { echo "Missing WebShop env" >&2; exit 1; } ;;
-    alfworld) [ -x "${MLF_LOCAL_ENVS}/alfworld/bin/python" ] || { echo "Missing ALFWorld env" >&2; exit 1; } ;;
-    tau2) [ -x "${MLF_LOCAL_ENVS}/tau2/bin/python" ] || { echo "Missing tau2 env" >&2; exit 1; } ;;
-    appworld) [ -x "${MLF_LOCAL_ENVS}/appworld/bin/python" ] || { echo "Missing AppWorld env" >&2; exit 1; } ;;
+    webshop) [ -x "${LOCAL_ENVS_DIR}/webshop/bin/python" ] || { echo "Missing WebShop env" >&2; exit 1; } ;;
+    alfworld) [ -x "${LOCAL_ENVS_DIR}/alfworld/bin/python" ] || { echo "Missing ALFWorld env" >&2; exit 1; } ;;
+    tau2) [ -x "${LOCAL_ENVS_DIR}/tau2/bin/python" ] || { echo "Missing tau2 env" >&2; exit 1; } ;;
+    appworld) [ -x "${LOCAL_ENVS_DIR}/appworld/bin/python" ] || { echo "Missing AppWorld env" >&2; exit 1; } ;;
     *) echo "Unsupported env: ${ENV_NAME}" >&2; exit 1 ;;
   esac
 }
@@ -440,15 +446,15 @@ load_aux_endpoint_env() {
 }
 
 server_runtime_exports() {
-  printf 'export MLF_NAS_ROOT=%q\n' "${MLF_NAS_ROOT}"
-  printf 'export MLF_LOCAL_ROOT=%q\n' "${MLF_LOCAL_ROOT}"
-  printf 'export MLF_LOCAL_ENVS=%q\n' "${MLF_LOCAL_ENVS}"
+  printf 'export ROOT_DIR=%q\n' "${ROOT_DIR}"
+  printf 'export LOCAL_RUNTIME_DIR=%q\n' "${LOCAL_RUNTIME_DIR}"
+  printf 'export LOCAL_ENVS_DIR=%q\n' "${LOCAL_ENVS_DIR}"
   printf 'export REPO_DIR=%q\n' "${REPO_DIR}"
-  printf 'export WEBSHOP_DATA=%q\n' "${MLF_LOCAL_ROOT}/data/webshop"
-  printf 'export ALFWORLD_DATA=%q\n' "${MLF_LOCAL_ROOT}/data/alfworld"
-  printf 'export ALFWORLD_LIB=%q\n' "${MLF_NAS_ROOT}/code/alfworld"
-  printf 'export APPWORLD_ROOT=%q\n' "${MLF_LOCAL_ROOT}/data/appworld"
-  printf 'export TAU2_DATA_DIR=%q\n' "${MLF_LOCAL_ROOT}/data/tau2/data"
+  printf 'export WEBSHOP_DATA=%q\n' "${LOCAL_RUNTIME_DIR}/data/webshop"
+  printf 'export ALFWORLD_DATA=%q\n' "${LOCAL_RUNTIME_DIR}/data/alfworld"
+  printf 'export ALFWORLD_LIB=%q\n' "${ROOT_DIR}/code/alfworld"
+  printf 'export APPWORLD_ROOT=%q\n' "${LOCAL_RUNTIME_DIR}/data/appworld"
+  printf 'export TAU2_DATA_DIR=%q\n' "${LOCAL_RUNTIME_DIR}/data/tau2/data"
   printf 'export AUX_ENDPOINT_PROVIDER=%q\n' "${AUX_ENDPOINT_PROVIDER:-}"
   printf 'export AUX_ENDPOINT_MODEL=%q\n' "${AUX_ENDPOINT_MODEL:-}"
   printf 'export AUX_ENDPOINT_BASE_URL=%q\n' "${AUX_ENDPOINT_BASE_URL:-}"
@@ -471,22 +477,22 @@ start_env_server() {
   case "${ENV_NAME}" in
     webshop)
       script=$(printf 'cd %q\n%s\nexport PYTHONNOUSERSITE=1 WEBSHOP_LIB=%q JAVA_HOME=%q JVM_PATH=%q PYTHONPATH=%q\n%q examples/agent_env/webshop/server.py --host 0.0.0.0 --port %q --config %q\n' \
-        "${REPO_DIR}" "${runtime_env}" "${MLF_LOCAL_ROOT}/code/WebShop" "${MLF_LOCAL_ENVS}/webshop/lib/jvm" "${MLF_LOCAL_ENVS}/webshop/lib/jvm/lib/server/libjvm.so" "${REPO_DIR}:${MLF_LOCAL_ROOT}/code/WebShop" "${MLF_LOCAL_ENVS}/webshop/bin/python" "${ENV_PORT}" "${config}")
+        "${REPO_DIR}" "${runtime_env}" "${LOCAL_RUNTIME_DIR}/code/WebShop" "${LOCAL_ENVS_DIR}/webshop/lib/jvm" "${LOCAL_ENVS_DIR}/webshop/lib/jvm/lib/server/libjvm.so" "${REPO_DIR}:${LOCAL_RUNTIME_DIR}/code/WebShop" "${LOCAL_ENVS_DIR}/webshop/bin/python" "${ENV_PORT}" "${config}")
       ;;
     alfworld)
       script=$(printf 'cd %q\n%s\nexport PYTHONNOUSERSITE=1 PYTHONPATH=%q\n%q examples/agent_env/alfworld/server.py --host 0.0.0.0 --port %q --config %q\n' \
-        "${REPO_DIR}" "${runtime_env}" "${REPO_DIR}" "${MLF_LOCAL_ENVS}/alfworld/bin/python" "${ENV_PORT}" "${config}")
+        "${REPO_DIR}" "${runtime_env}" "${REPO_DIR}" "${LOCAL_ENVS_DIR}/alfworld/bin/python" "${ENV_PORT}" "${config}")
       ;;
     tau2)
       script=$(printf 'cd %q\n%s\nexport PYTHONNOUSERSITE=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=%q\n%q examples/agent_env/tau2/server.py --host 0.0.0.0 --port %q --config %q\n' \
-        "${REPO_DIR}" "${runtime_env}" "${REPO_DIR}" "${MLF_LOCAL_ENVS}/tau2/bin/python" "${ENV_PORT}" "${config}")
+        "${REPO_DIR}" "${runtime_env}" "${REPO_DIR}" "${LOCAL_ENVS_DIR}/tau2/bin/python" "${ENV_PORT}" "${config}")
       ;;
     appworld)
       script=$(printf 'cd %q\n%s\nexport PYTHONNOUSERSITE=1 HOME=%q PYTHONPATH=%q\n%q examples/agent_env/appworld/server.py --host 0.0.0.0 --port %q --config %q\n' \
-        "${REPO_DIR}" "${runtime_env}" "${MLF_LOCAL_ROOT}/data/appworld" "${REPO_DIR}" "${MLF_LOCAL_ENVS}/appworld/bin/python" "${ENV_PORT}" "${config}")
+        "${REPO_DIR}" "${runtime_env}" "${LOCAL_RUNTIME_DIR}/data/appworld" "${REPO_DIR}" "${LOCAL_ENVS_DIR}/appworld/bin/python" "${ENV_PORT}" "${config}")
       ;;
   esac
-  tmux_start_local "mlf_${ENV_NAME}_env" "${script}" "$(role_log_path "${ENV_NAME}_env_server.log")"
+  tmux_start_local "agent_env_${ENV_NAME}_env" "${script}" "$(role_log_path "${ENV_NAME}_env_server.log")"
 }
 
 start_ray_head() {
@@ -498,11 +504,11 @@ start_ray_head() {
   for attempt in $(seq 1 "${RAY_START_MAX_ATTEMPTS}"); do
     echo "Starting Ray head attempt ${attempt}/${RAY_START_MAX_ATTEMPTS}"
     [ "${DRY_RUN}" = "1" ] || "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force || true
-    tmux_start_local mlf_ray_head "${script}" "${LOG_DIR}/ray_head.log"
+    tmux_start_local agent_env_ray_head "${script}" "${LOG_DIR}/ray_head.log"
     if wait_ray_head_ready; then
       return 0
     fi
-    tmux kill-session -t mlf_ray_head 2>/dev/null || true
+    tmux kill-session -t agent_env_ray_head 2>/dev/null || true
     sleep 5
   done
   echo "Ray head failed after ${RAY_START_MAX_ATTEMPTS} attempts" >&2
@@ -517,7 +523,7 @@ start_ray_worker() {
   local script
   script=$(printf 'export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1\n[ ! -f %q ] || { set -a; source %q; set +a; }\nexport CUDA_VISIBLE_DEVICES=%q\nmkdir -p %q\n%q -m ray.scripts.scripts start --address %q --node-ip-address %q --num-gpus %q --min-worker-port %q --max-worker-port %q --disable-usage-stats --block\n' \
     "${WANDB_SECRET_FILE}" "${WANDB_SECRET_FILE}" "${RAY_CUDA_VISIBLE_DEVICES}" "${LOG_DIR}" "${SLIME_PYTHON}" "${head_addr}:${RAY_PORT}" "${node_ip}" "${NUM_GPUS_PER_NODE_FOR_RAY}" "${RAY_MIN_WORKER_PORT}" "${RAY_MAX_WORKER_PORT}")
-  tmux_start_local mlf_ray_worker "${script}" "$(role_log_path "ray_worker.log")"
+  tmux_start_local agent_env_ray_worker "${script}" "$(role_log_path "ray_worker.log")"
 }
 
 wait_http() {
@@ -592,7 +598,7 @@ wait_ray_head_ready() {
       echo "Ray head ready: alive=${alive}"
       return 0
     fi
-    if ! tmux_session_active mlf_ray_head; then
+    if ! tmux_session_active agent_env_ray_head; then
       echo "Ray head tmux exited before ready" >&2
       tail -n 80 "${LOG_DIR}/ray_head.log" >&2 || true
       return 1
@@ -629,7 +635,7 @@ start_router() {
   local script
   script=$(printf 'cd %q\nexport PYTHONNOUSERSITE=1\nmkdir -p %q\n%q examples/agent_env/router.py --host 0.0.0.0 --port %q --workers %q\n' \
     "${REPO_DIR}" "${LOG_DIR}" "${SLIME_PYTHON}" "${ROUTER_PORT}" "${workers_csv}")
-  tmux_start_local "mlf_${ENV_NAME}_router" "${script}" "${LOG_DIR}/${ENV_NAME}_router.log"
+  tmux_start_local "agent_env_${ENV_NAME}_router" "${script}" "${LOG_DIR}/${ENV_NAME}_router.log"
 }
 
 write_train_driver() {
@@ -637,9 +643,9 @@ write_train_driver() {
   local driver="${LOG_DIR}/${ENV_NAME}_train_driver.sh"
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
-    printf 'export MLF_NAS_ROOT=%q\n' "${MLF_NAS_ROOT}"
-    printf 'export MLF_LOCAL_ROOT=%q\n' "${MLF_LOCAL_ROOT}"
-    printf 'export MLF_LOCAL_ENVS=%q\n' "${MLF_LOCAL_ENVS}"
+    printf 'export ROOT_DIR=%q\n' "${ROOT_DIR}"
+    printf 'export LOCAL_RUNTIME_DIR=%q\n' "${LOCAL_RUNTIME_DIR}"
+    printf 'export LOCAL_ENVS_DIR=%q\n' "${LOCAL_ENVS_DIR}"
     printf 'export REPO_DIR=%q\n' "${REPO_DIR}"
     printf 'export ENV_CONFIG=%q\n' "${ENV_CONFIG}"
     printf 'export TRAIN_PROFILE=%q\n' "${RESOLVED_TRAIN_PROFILE}"
@@ -681,7 +687,9 @@ start_train_driver() {
     printf 'STATUS_FILE=%q\n' "${status_file}"
     printf 'BENCH_LOG=%q\n' "${bench_log}"
     printf 'BENCH_ON_TRAIN_EXIT=%q\n' "${BENCH_ON_TRAIN_EXIT}"
-    printf 'MLF_NAS_ROOT=%q\n' "${MLF_NAS_ROOT}"
+    printf 'ROOT_DIR=%q\n' "${ROOT_DIR}"
+    printf 'LOCAL_ENVS_DIR=%q\n' "${LOCAL_ENVS_DIR}"
+    printf 'BENCH_PYTHON=%q\n' "${BENCH_PYTHON:-${SLIME_PYTHON}}"
     printf 'RUN_BENCH=%q\n' "${OPS_SCRIPTS_DIR}/run_bench.sh"
     printf 'NODES_FILE=%q\n' "${NODES_FILE}"
     printf 'NODE_INDICES=%q\n' "${NODE_INDICES}"
@@ -710,7 +718,7 @@ finish() {
       echo "[$(date -Is)] train exited code=${code}; running run_bench start --nodes ${NODES_FILE} --node ${NODE_INDICES}"
       bench_args=(start --nodes "${NODES_FILE}")
       [ -z "${NODE_INDICES}" ] || bench_args+=(--node "${NODE_INDICES}")
-      MLF_NAS_ROOT="${MLF_NAS_ROOT}" SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" \
+      ROOT_DIR="${ROOT_DIR}" LOCAL_ENVS_DIR="${LOCAL_ENVS_DIR}" BENCH_PYTHON="${BENCH_PYTHON}" SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" \
         SSH_KEY="${SSH_KEY}" SSH_IPV6="${SSH_IPV6}" SSH_JUMP="${SSH_JUMP}" \
         bash "${RUN_BENCH}" "${bench_args[@]}"
     } >> "${BENCH_LOG}" 2>&1 || true
@@ -729,8 +737,8 @@ EOF
     printf 'exit "$code"\n'
   } > "${wrapper}"
   chmod +x "${wrapper}"
-  tmux_start_local "mlf_${ENV_NAME}_train" "bash ${wrapper}"
-  echo "Training submitted in tmux: mlf_${ENV_NAME}_train"
+  tmux_start_local "agent_env_${ENV_NAME}_train" "bash ${wrapper}"
+  echo "Training submitted in tmux: agent_env_${ENV_NAME}_train"
   echo "Training log: ${train_log}"
   echo "Train status: ${status_file}"
 }
@@ -773,9 +781,9 @@ run_head() {
       node_addr=$(remote_first_ip "${node}")
     fi
     env_urls+=("http://$(http_host "${node_addr}"):${ENV_PORT}")
-    worker_script=$(printf 'cd %q\nMLF_NAS_ROOT=%q OPS_SCRIPTS_DIR=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q bash scripts/utils/launch_agentic_training.sh --internal-role worker --resolved %q --head-address %q\n' \
-      "${REPO_DIR}" "${MLF_NAS_ROOT}" "${OPS_SCRIPTS_DIR}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_CONFIG}" "${head_addr}")
-    tmux_start_remote "${node}" mlf_multi_worker "${worker_script}" "${LOG_DIR}/multi_worker_$(safe_label "${node}").log"
+    worker_script=$(printf 'cd %q\nROOT_DIR=%q OPS_SCRIPTS_DIR=%q LOCAL_ENVS_DIR=%q LOCAL_RUNTIME_DIR=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q bash scripts/utils/launch_agentic_training.sh --internal-role worker --resolved %q --head-address %q\n' \
+      "${REPO_DIR}" "${ROOT_DIR}" "${OPS_SCRIPTS_DIR}" "${LOCAL_ENVS_DIR}" "${LOCAL_RUNTIME_DIR}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_CONFIG}" "${head_addr}")
+    tmux_start_remote "${node}" agent_env_multi_worker "${worker_script}" "${LOG_DIR}/multi_worker_$(safe_label "${node}").log"
   done
   for node in $(read_nodes | tail -n +2); do
     remote_wait_http "${node}" "http://127.0.0.1:${ENV_PORT}/health"
@@ -794,7 +802,7 @@ run_head() {
 write_resolved_launch_config() {
   load_aux_endpoint_env
   write_named_env "${RESOLVED_LAUNCH_CONFIG}" \
-    MLF_NAS_ROOT REPO_DIR OPS_SCRIPTS_DIR MLF_LOCAL_ENVS MLF_LOCAL_ROOT WANDB_SECRET_FILE SLIME_ENV SLIME_PYTHON \
+    ROOT_DIR REPO_DIR OPS_SCRIPTS_DIR LOCAL_ENVS_DIR LOCAL_RUNTIME_DIR WANDB_SECRET_FILE SLIME_ENV SLIME_PYTHON \
     ENV_NAME ENV_CONFIG MODEL_PROFILE TRAIN_PROFILE TRAIN_ADAPTER RESOLVED_TRAIN_PROFILE \
     NODES_FILE NODE_INDICES AUX_NODES_FILE AUX_NODE_INDICES AUX_ENV_FILE ENV_PORT ROUTER_PORT RAY_PORT \
     RAY_CUDA_VISIBLE_DEVICES NUM_GPUS_PER_NODE_FOR_RAY RAY_MIN_WORKER_PORT RAY_MAX_WORKER_PORT \
@@ -840,7 +848,7 @@ prepare_run() {
   RAY_MAX_WORKER_PORT=${RAY_MAX_WORKER_PORT:-29999}
   EXP_PROJECT=${EXP_PROJECT:-${PROJECT_NAME:-${MODEL_BASENAME:-model}_${ENV_NAME}_grpo}}
   EXP_NAME=${EXP_NAME:-${RUN_NAME:-${MODEL_BASENAME:-model}-${ENV_NAME}-grpo}}
-  RUN_ROOT=${RUN_ROOT:-${MLF_NAS_ROOT}/runs/${EXP_PROJECT}/${EXP_NAME}}
+  RUN_ROOT=${RUN_ROOT:-${ROOT_DIR}/runs/${EXP_PROJECT}/${EXP_NAME}}
   LOG_DIR=${LOG_DIR:-${RUN_ROOT}/logs}
   WANDB_DIR=${WANDB_DIR:-${RUN_ROOT}/wandb}
   SAVE_DIR=${SAVE_DIR:-${RUN_ROOT}/checkpoints}
@@ -852,7 +860,7 @@ prepare_run() {
   write_resolved_profile "${RESOLVED_TRAIN_PROFILE}" "${run_profile_path}" "${topology_path}" "${model_path}" "${train_path}"
   {
     printf '\n'
-    quote_exports MLF_NAS_ROOT MLF_LOCAL_ROOT MLF_LOCAL_ENVS REPO_DIR TRAIN_ADAPTER \
+    quote_exports ROOT_DIR LOCAL_RUNTIME_DIR LOCAL_ENVS_DIR REPO_DIR TRAIN_ADAPTER \
       RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR
   } >> "${RESOLVED_TRAIN_PROFILE}"
 
@@ -863,7 +871,7 @@ prepare_run() {
     write_resolved_profile "${RESOLVED_AUX_PROFILE}" "${aux_path}"
     {
       printf '\n'
-      quote_exports MLF_NAS_ROOT OPS_SCRIPTS_DIR MLF_LOCAL_ENVS REPO_DIR LOG_DIR AUX_ENV_FILE AUX_NODES_FILE AUX_NODE_INDICES
+      quote_exports ROOT_DIR OPS_SCRIPTS_DIR LOCAL_ENVS_DIR REPO_DIR LOG_DIR AUX_ENV_FILE AUX_NODES_FILE AUX_NODE_INDICES
     } >> "${RESOLVED_AUX_PROFILE}"
   else
     RESOLVED_AUX_PROFILE=
@@ -895,12 +903,12 @@ submit_head() {
   else
     head_addr=$(remote_first_ip "${head}")
   fi
-  script=$(printf 'cd %q\nMLF_NAS_ROOT=%q OPS_SCRIPTS_DIR=%q MLF_LOCAL_ENVS=%q MLF_LOCAL_ROOT=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q SSH_JUMP= bash scripts/utils/launch_agentic_training.sh --internal-role head --resolved %q --head-address %q\n' \
-    "${REPO_DIR}" "${MLF_NAS_ROOT}" "${OPS_SCRIPTS_DIR}" "${MLF_LOCAL_ENVS}" "${MLF_LOCAL_ROOT}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_LAUNCH_CONFIG}" "${head_addr}")
+  script=$(printf 'cd %q\nROOT_DIR=%q OPS_SCRIPTS_DIR=%q LOCAL_ENVS_DIR=%q LOCAL_RUNTIME_DIR=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q SSH_JUMP= bash scripts/utils/launch_agentic_training.sh --internal-role head --resolved %q --head-address %q\n' \
+    "${REPO_DIR}" "${ROOT_DIR}" "${OPS_SCRIPTS_DIR}" "${LOCAL_ENVS_DIR}" "${LOCAL_RUNTIME_DIR}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_LAUNCH_CONFIG}" "${head_addr}")
   if is_current_node "${head}"; then
     RESOLVED_CONFIG="${RESOLVED_LAUNCH_CONFIG}" HEAD_ADDRESS="${head_addr}" run_head
   else
-    tmux_start_remote "${head}" mlf_multi_head "${script}" "${LOG_DIR}/multi_head.log"
+    tmux_start_remote "${head}" agent_env_multi_head "${script}" "${LOG_DIR}/multi_head.log"
     echo "Head orchestration submitted."
     echo "Head log: ${head}:${LOG_DIR}/multi_head.log"
   fi

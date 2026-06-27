@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
-MICROMAMBA=${MICROMAMBA:-${MLF_NAS_ROOT}/tools/micromamba/bin/micromamba}
-MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-${MLF_NAS_ROOT}/tools/micromamba/root}
-CONDA_PKGS_DIRS=${CONDA_PKGS_DIRS:-/tmp/mlf-runtime/tau2/conda-pkgs}
-PIP_CACHE_DIR=${PIP_CACHE_DIR:-${MLF_NAS_ROOT}/envs/pip-cache}
-ENV_PREFIX=${TAU2_ENV_PREFIX:-${MLF_NAS_ROOT}/envs/tau2}
-TAU2_LIB=${TAU2_LIB:-${MLF_NAS_ROOT}/code/tau2-bench}
-PACK_DIR=${PACK_DIR:-${MLF_NAS_ROOT}/packs}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG_FILE="${SERVER_OPS_CONFIG:-${HOME}/.jingyuan/server_ops.env}"
+if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+fi
+REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
+ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+LOCAL_RUNTIME_DIR=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
+MICROMAMBA=${MICROMAMBA:-${ROOT_DIR}/tools/micromamba/bin/micromamba}
+MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-${ROOT_DIR}/tools/micromamba/root}
+CONDA_PKGS_DIRS=${CONDA_PKGS_DIRS:-${LOCAL_RUNTIME_DIR}/tau2/conda-pkgs}
+PIP_CACHE_DIR=${PIP_CACHE_DIR:-${ROOT_DIR}/envs/pip-cache}
+ENV_PREFIX=${TAU2_ENV_PREFIX:-${ROOT_DIR}/envs/tau2}
+TAU2_LIB=${TAU2_LIB:-${ROOT_DIR}/code/tau2-bench}
+PACK_DIR=${PACK_DIR:-${ROOT_DIR}/packs}
 REVISION=${TAU2_REVISION:-tau2-$(date +%Y%m%d)}
 
 export MAMBA_ROOT_PREFIX CONDA_PKGS_DIRS PIP_CACHE_DIR PYTHONNOUSERSITE=1

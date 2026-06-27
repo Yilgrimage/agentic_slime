@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
-MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
-REPO_DIR=${REPO_DIR:-${MLF_NAS_ROOT}/code/slime}
-MEGATRON_PATH=${MEGATRON_PATH:-${MLF_NAS_ROOT}/code/Megatron-LM}
-SLIME_ENV=${SLIME_ENV:-${MLF_LOCAL_ENVS}/slime}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG_FILE="${SERVER_OPS_CONFIG:-${HOME}/.jingyuan/server_ops.env}"
+if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+fi
+REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
+ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
+MEGATRON_PATH=${MEGATRON_PATH:-${ROOT_DIR}/code/Megatron-LM}
+SLIME_ENV=${SLIME_ENV:-${LOCAL_ENVS_DIR}/slime}
 
 MODEL_BASENAME=${MODEL_BASENAME:-Qwen3.5-9B}
 MODEL_ARGS_SCRIPT=${MODEL_ARGS_SCRIPT:-scripts/models/qwen3.5-9B.sh}
-MODEL_DIR=${MODEL_DIR:-${MLF_NAS_ROOT}/models/${MODEL_BASENAME}}
-TORCH_DIST_DIR=${TORCH_DIST_DIR:-${MLF_NAS_ROOT}/models/${MODEL_BASENAME}_torch_dist}
+MODEL_DIR=${MODEL_DIR:-${ROOT_DIR}/models/${MODEL_BASENAME}}
+TORCH_DIST_DIR=${TORCH_DIST_DIR:-${ROOT_DIR}/models/${MODEL_BASENAME}_torch_dist}
 NPROC_PER_NODE=${NPROC_PER_NODE:-8}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 MASTER_PORT=${MASTER_PORT:-0}
@@ -23,8 +29,8 @@ Usage: $(basename "$0") [--force]
 Environment overrides:
   MODEL_BASENAME       Default: Qwen3.5-9B
   MODEL_ARGS_SCRIPT    Default: scripts/models/qwen3.5-9B.sh
-  MODEL_DIR            Default: \${MLF_NAS_ROOT}/models/\${MODEL_BASENAME}
-  TORCH_DIST_DIR       Default: \${MLF_NAS_ROOT}/models/\${MODEL_BASENAME}_torch_dist
+  MODEL_DIR            Default: \${ROOT_DIR}/models/\${MODEL_BASENAME}
+  TORCH_DIST_DIR       Default: \${ROOT_DIR}/models/\${MODEL_BASENAME}_torch_dist
   NPROC_PER_NODE       Default: 8
   MASTER_PORT          Default: random free-ish port
 EOF

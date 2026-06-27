@@ -21,10 +21,16 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
-MLF_LOCAL_ROOT=${MLF_LOCAL_ROOT:-/tmp/mlf-runtime}
-MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
-REPO_DIR=${REPO_DIR:-${MLF_NAS_ROOT}/code/slime}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG_FILE="${SERVER_OPS_CONFIG:-${HOME}/.jingyuan/server_ops.env}"
+if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+fi
+REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../../.." && pwd -P)}
+ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+LOCAL_RUNTIME_DIR=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
+LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
 
 resolve_repo_path() {
   local path=$1
@@ -49,17 +55,17 @@ if [ -n "${RESUME_FROM:-}" ] && [ -z "${LOAD_DIR:-}" ]; then
 fi
 
 ENV_NAME=${ENV_NAME:?Set ENV_NAME to alfworld, webshop, tau2, or appworld}
-WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${MLF_NAS_ROOT}/secrets/wandb.env}
-MEGATRON_PATH=${MEGATRON_PATH:-${MLF_NAS_ROOT}/code/Megatron-LM}
+WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${ROOT_DIR}/secrets/wandb.env}
+MEGATRON_PATH=${MEGATRON_PATH:-${ROOT_DIR}/code/Megatron-LM}
 if [ -z "${SLIME_ENV:-}" ]; then
-  if [ -x "${MLF_LOCAL_ENVS}/slime-official/bin/python" ]; then
-    SLIME_ENV="${MLF_LOCAL_ENVS}/slime-official"
-  elif [ -x "${MLF_LOCAL_ENVS}/slime/bin/python" ]; then
-    SLIME_ENV="${MLF_LOCAL_ENVS}/slime"
-  elif [ -x "${MLF_NAS_ROOT}/envs/slime-official/bin/python" ]; then
-    SLIME_ENV="${MLF_NAS_ROOT}/envs/slime-official"
+  if [ -x "${LOCAL_ENVS_DIR}/slime-official/bin/python" ]; then
+    SLIME_ENV="${LOCAL_ENVS_DIR}/slime-official"
+  elif [ -x "${LOCAL_ENVS_DIR}/slime/bin/python" ]; then
+    SLIME_ENV="${LOCAL_ENVS_DIR}/slime"
+  elif [ -x "${ROOT_DIR}/envs/slime-official/bin/python" ]; then
+    SLIME_ENV="${ROOT_DIR}/envs/slime-official"
   else
-    SLIME_ENV="${MLF_NAS_ROOT}/envs/slime"
+    SLIME_ENV="${ROOT_DIR}/envs/slime"
   fi
 fi
 SLIME_PYTHON=${SLIME_PYTHON:-${SLIME_ENV}/bin/python}
@@ -71,27 +77,27 @@ configure_env_defaults() {
     alfworld)
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.alfworld.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ALFWORLD_CONFIG:-${ENV_CONFIG:-examples/agent_env/alfworld/env_config.yaml}}}
-      export DATA_DIR=${DATA_DIR:-${MLF_LOCAL_ROOT}/data/alfworld}
+      export DATA_DIR=${DATA_DIR:-${LOCAL_RUNTIME_DIR}/data/alfworld}
       export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/alfworld/prompt_data.py}
       ;;
     webshop)
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.webshop.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${WEBSHOP_CONFIG:-${ENV_CONFIG:-examples/agent_env/webshop/env_config.yaml}}}
-      export DATA_DIR=${DATA_DIR:-${MLF_LOCAL_ROOT}/data/webshop}
+      export DATA_DIR=${DATA_DIR:-${LOCAL_RUNTIME_DIR}/data/webshop}
       export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/webshop/prompt_data.py}
       ;;
     tau2)
       export LITELLM_LOCAL_MODEL_COST_MAP=${LITELLM_LOCAL_MODEL_COST_MAP:-True}
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.tau2.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/tau2/env_config.yaml}}
-      export PROMPT_DATA_PYTHON=${PROMPT_DATA_PYTHON:-${TAU2_ENV:-${MLF_LOCAL_ENVS}/tau2}/bin/python}
+      export PROMPT_DATA_PYTHON=${PROMPT_DATA_PYTHON:-${TAU2_ENV:-${LOCAL_ENVS_DIR}/tau2}/bin/python}
       export PROMPT_USE_SERVER_NUM_TASKS=${PROMPT_USE_SERVER_NUM_TASKS:-0}
       configure_tau2_prompt_data
       ;;
     appworld)
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.appworld.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/appworld/env_config.yaml}}
-      export APPWORLD_ROOT=${APPWORLD_ROOT:-${MLF_LOCAL_ROOT}/data/appworld}
+      export APPWORLD_ROOT=${APPWORLD_ROOT:-${LOCAL_RUNTIME_DIR}/data/appworld}
       export HOME=${APPWORLD_ROOT}
       ;;
     *)
@@ -112,8 +118,8 @@ import yaml
 config_path = Path(os.environ["CUSTOM_CONFIG_PATH"])
 cfg = yaml.safe_load(config_path.read_text()) if config_path.exists() else {}
 prompt = (cfg or {}).get("agent_prompt_data") or {}
-local_root = os.environ.get("MLF_LOCAL_ROOT", "/tmp/mlf-runtime")
-repo_dir = os.environ.get("REPO_DIR", "/mnt/bn/jixf-nas-lq/mlf/code/slime")
+local_root = os.environ.get("LOCAL_RUNTIME_DIR", "/tmp/server-ops-runtime")
+repo_dir = os.environ["REPO_DIR"]
 
 def expand(value):
     if value is None:
@@ -197,8 +203,8 @@ is_async_entrypoint() {
   esac
 }
 
-if [ -f "${MLF_LOCAL_ROOT}/env.sh" ]; then
-  source "${MLF_LOCAL_ROOT}/env.sh"
+if [ -f "${LOCAL_RUNTIME_DIR}/env.sh" ]; then
+  source "${LOCAL_RUNTIME_DIR}/env.sh"
 fi
 if [ -f "${WANDB_SECRET_FILE}" ]; then
   case "$-" in
@@ -239,37 +245,37 @@ fi
 
 MODEL_BASENAME=${MODEL_BASENAME:-Qwen3.5-9B}
 MODEL_ARGS_SCRIPT=${MODEL_ARGS_SCRIPT:-scripts/models/qwen3.5-9B.sh}
-MODEL_DIR=${MODEL_DIR:-${MLF_NAS_ROOT}/models/${MODEL_BASENAME}}
-TORCH_DIST_DIR=${TORCH_DIST_DIR:-${MLF_NAS_ROOT}/models/${MODEL_BASENAME}_torch_dist}
+MODEL_DIR=${MODEL_DIR:-${ROOT_DIR}/models/${MODEL_BASENAME}}
+TORCH_DIST_DIR=${TORCH_DIST_DIR:-${ROOT_DIR}/models/${MODEL_BASENAME}_torch_dist}
 
 EXP_PROJECT=${EXP_PROJECT:-${PROJECT_NAME:-${MODEL_BASENAME}_${ENV_NAME}_grpo}}
 EXP_NAME=${EXP_NAME:-${RUN_NAME:-${MODEL_BASENAME}-${ENV_NAME}-grpo}}
-RUN_ROOT=${RUN_ROOT:-${MLF_NAS_ROOT}/runs/${EXP_PROJECT}/${EXP_NAME}}
+RUN_ROOT=${RUN_ROOT:-${ROOT_DIR}/runs/${EXP_PROJECT}/${EXP_NAME}}
 OUTPUT_ROOT=${OUTPUT_ROOT:-${RUN_ROOT}}
 SAVE_DIR=${SAVE_DIR:-${RUN_ROOT}/checkpoints}
 LOG_DIR=${LOG_DIR:-${RUN_ROOT}/logs}
 WANDB_DIR=${WANDB_DIR:-${RUN_ROOT}/wandb}
 RUN_USER=${USER:-$(id -un 2>/dev/null || echo unknown)}
 export USER=${USER:-${RUN_USER}}
-RAY_TEMP_DIR=${RAY_TEMP_DIR:-${MLF_LOCAL_ROOT}/ray/${ENV_NAME}_${RUN_USER}}
-DATA_DIR=${DATA_DIR:-${MLF_LOCAL_ROOT}/data/${ENV_NAME}}
+RAY_TEMP_DIR=${RAY_TEMP_DIR:-${LOCAL_RUNTIME_DIR}/ray/${ENV_NAME}_${RUN_USER}}
+DATA_DIR=${DATA_DIR:-${LOCAL_RUNTIME_DIR}/data/${ENV_NAME}}
 PROMPT_NUM_TASKS=${PROMPT_NUM_TASKS:-}
 DATA_PATH=${DATA_PATH:-}
 PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/scripts/prompt_data.py}
 PROMPT_DATA_PYTHON=${PROMPT_DATA_PYTHON:-${SLIME_PYTHON}}
 PROMPT_USE_SERVER_NUM_TASKS=${PROMPT_USE_SERVER_NUM_TASKS:-1}
 
-export TMPDIR=${TMPDIR:-${MLF_LOCAL_ROOT}/tmp}
+export TMPDIR=${TMPDIR:-${LOCAL_RUNTIME_DIR}/tmp}
 export no_proxy="localhost,127.0.0.1,0.0.0.0,::1,${MASTER_ADDR:-},${no_proxy:-}"
 export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,${MASTER_ADDR:-},${NO_PROXY:-}"
-export XDG_CACHE_HOME=${XDG_CACHE_HOME:-${MLF_LOCAL_ROOT}/cache/xdg}
-export HF_HOME=${HF_HOME:-${MLF_LOCAL_ROOT}/cache/huggingface}
+export XDG_CACHE_HOME=${XDG_CACHE_HOME:-${LOCAL_RUNTIME_DIR}/cache/xdg}
+export HF_HOME=${HF_HOME:-${LOCAL_RUNTIME_DIR}/cache/huggingface}
 export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-${HF_HOME}/transformers}
-export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-${MLF_LOCAL_ROOT}/cache/torch_extensions}
-export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-${MLF_LOCAL_ROOT}/cache/triton}
-export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-${MLF_LOCAL_ROOT}/cache/cuda}
+export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-${LOCAL_RUNTIME_DIR}/cache/torch_extensions}
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-${LOCAL_RUNTIME_DIR}/cache/triton}
+export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-${LOCAL_RUNTIME_DIR}/cache/cuda}
 
-mkdir -p "${MLF_LOCAL_ROOT}/logs" "${DATA_DIR}" "${SAVE_DIR}" "${LOG_DIR}" "${WANDB_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}" \
+mkdir -p "${LOCAL_RUNTIME_DIR}/logs" "${DATA_DIR}" "${SAVE_DIR}" "${LOG_DIR}" "${WANDB_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}" \
   "${XDG_CACHE_HOME}" "${HF_HOME}" "${TRANSFORMERS_CACHE}" "${TORCH_EXTENSIONS_DIR}" "${TRITON_CACHE_DIR}" "${CUDA_CACHE_PATH}"
 
 if [ -z "${PROMPT_NUM_TASKS}" ] && [ "${PROMPT_USE_SERVER_NUM_TASKS}" = "1" ]; then

@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
-ARCHIVE_DIR=${ARCHIVE_DIR:-${MLF_NAS_ROOT}/envs/archives}
-PACK_DIR=${PACK_DIR:-${MLF_NAS_ROOT}/packs}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG_FILE="${SERVER_OPS_CONFIG:-${HOME}/.jingyuan/server_ops.env}"
+if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+fi
+REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
+ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+ARCHIVE_DIR=${ARCHIVE_DIR:-${ROOT_DIR}/envs/archives}
+PACK_DIR=${PACK_DIR:-${ROOT_DIR}/packs}
 CURRENT_FILE=${CURRENT_FILE:-${ARCHIVE_DIR}/slime-official.current}
 
 mkdir -p "${PACK_DIR}"

@@ -1,6 +1,6 @@
 ---
 name: server-ops-discipline
-description: "Use when preparing remote servers or GPU nodes, managing reusable runtime or data packs, materializing node-local environments, handling node IP files, launching distributed jobs, preserving idle GPUs with watchdog/bench, separating durable NAS state from disposable local state, or moving this workflow to another cluster."
+description: "Use when preparing remote servers or GPU nodes, managing reusable runtime or data packs, materializing node-local environments, handling node IP files, launching distributed jobs, preserving idle GPUs with watchdog/bench, separating durable shared-storage state from disposable local state, or moving this workflow to another cluster."
 ---
 
 # Server Ops Discipline
@@ -20,16 +20,30 @@ cp -a server-ops-discipline/scripts/. "${ROOT_DIR}/scripts/"
 chmod +x "${ROOT_DIR}/scripts/"*.sh
 ```
 
-Use `ROOT_DIR` as the portable root for the cluster workspace. Existing MLF
-deployments may still export `MLF_NAS_ROOT`; the bundled scripts accept it as a
-compatibility alias, but new project code should locate ops helpers through
-`${ROOT_DIR}/scripts`.
+Before using these scripts on a new machine or cluster, determine the current
+shared workspace root with the user and confirm it explicitly. Store that value
+in a local, non-git config file:
+
+```bash
+server-ops-discipline/scripts/configure_root.sh /path/to/current/root
+```
+
+By default this writes `${HOME}/.jingyuan/server_ops.env`. Do not commit this
+file or any concrete root path. If a different config location is needed, set
+`SERVER_OPS_CONFIG=/path/to/local/env`.
+
+Use `ROOT_DIR` as the portable root for the cluster workspace. Do not introduce
+project- or cluster-branded root variables in reusable ops scripts. The mounted
+cloud disk, user, and workspace name can change across clusters; callers should
+set `ROOT_DIR` explicitly or install the scripts under `${ROOT_DIR}/scripts` so
+they can infer it from their location.
 
 Stable interfaces:
 
 ```text
 ${ROOT_DIR}/scripts/run_bench.sh start|stop|status|restart [--nodes nodes.txt --node 0,1]
 ${ROOT_DIR}/scripts/gpu_idle_watchdog.sh start|stop|status|restart
+${ROOT_DIR}/scripts/configure_root.sh /path/to/current/root
 ${ROOT_DIR}/scripts/prepare_node_runtime.sh --local-only|--all-nodes ...
 ${ROOT_DIR}/scripts/materialize_node_runtime.sh --envs ... --data ... --sources ...
 ${ROOT_DIR}/scripts/pack_data.sh
@@ -38,8 +52,14 @@ ${ROOT_DIR}/scripts/pack_data.sh
 Launchers that need `bench_on_exit` must call `${ROOT_DIR}/scripts/run_bench.sh`
 instead of embedding their own keepalive implementation. Watchdogs must call the
 same `run_bench.sh` interface. Repo-specific launch code may set `ROOT_DIR`,
-`LOCAL_ENVS_DIR`, `LOCAL_ROOT`, `PACK_DIR`, SSH variables, and node selectors,
-but should not duplicate these scripts.
+`LOCAL_ENVS_DIR`, `LOCAL_RUNTIME_DIR`, `PACK_DIR`, `BENCH_PYTHON`, SSH
+variables, and node selectors, but should not duplicate these scripts.
+
+Reusable ops scripts must not default to one training stack. Runtime
+materialization defaults to `none`; callers choose environment packs, datasets,
+and source mirrors explicitly. `run_bench.sh` defaults to system Python, and
+training repos should pass `BENCH_PYTHON` when CUDA torch lives in a project
+environment.
 
 ## State Model
 
@@ -52,18 +72,18 @@ but should not duplicate these scripts.
 - Keep generated outputs out of git: run logs, checkpoints, W&B outputs, data,
   model weights, env packs, secrets, and node-local runtime files.
 
-Current MLF layout:
+Recommended root layout:
 
 ```text
-/mnt/bn/jixf-nas-lq/mlf/code
-/mnt/bn/jixf-nas-lq/mlf/data
-/mnt/bn/jixf-nas-lq/mlf/models
-/mnt/bn/jixf-nas-lq/mlf/packs
-/mnt/bn/jixf-nas-lq/mlf/runs
-/mnt/bn/jixf-nas-lq/mlf/secrets
-/mnt/bn/jixf-nas-lq/mlf/scripts
-/tmp/mlf-envs
-/tmp/mlf-runtime
+${ROOT_DIR}/code
+${ROOT_DIR}/data
+${ROOT_DIR}/models
+${ROOT_DIR}/packs
+${ROOT_DIR}/runs
+${ROOT_DIR}/secrets
+${ROOT_DIR}/scripts
+${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
+${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
 ```
 
 When moving clusters, preserve the same roles even if the paths change.
@@ -83,6 +103,14 @@ When moving clusters, preserve the same roles even if the paths change.
 
 - Split runtime packs by dependency domain. Do not create one giant mutable
   environment that every task edits.
+- For foundation training stacks such as Slime, Verl, SGLang, vLLM, Megatron,
+  and PyTorch, prefer the node/container image's preinstalled environment when
+  it matches the target stack. If the image does not provide a compatible stack,
+  use a separately packed conda environment as the fallback.
+- Keep task or environment dependencies such as ALFWorld, WebShop, tau2, and
+  custom env servers in dedicated conda environment packs even when the training
+  stack comes from the image. Do not mix these env dependencies into the base
+  training environment during launch.
 - Use `${ROOT_DIR}/scripts/pack_data.sh`,
   `${ROOT_DIR}/scripts/prepare_node_runtime.sh`, and
   `${ROOT_DIR}/scripts/materialize_node_runtime.sh` as the shared vocabulary for

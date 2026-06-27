@@ -4,12 +4,19 @@ set -euo pipefail
 NODES_FILE=""
 NODE_SELECTOR=""
 WATCH_INTERVAL=0
-MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG_FILE="${SERVER_OPS_CONFIG:-${HOME}/.jingyuan/server_ops.env}"
+if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+fi
+REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
+ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
 SSH_USER=${SSH_USER:-tiger}
 SSH_PORT=${SSH_PORT:-10413}
 if [ -z "${SSH_KEY:-}" ]; then
-  if [ -f "${MLF_NAS_ROOT}/secrets/byte_id_rsa" ]; then
-    SSH_KEY="${MLF_NAS_ROOT}/secrets/byte_id_rsa"
+  if [ -f "${ROOT_DIR}/secrets/byte_id_rsa" ]; then
+    SSH_KEY="${ROOT_DIR}/secrets/byte_id_rsa"
   else
     SSH_KEY="/home/${SSH_USER}/.ssh/byte_id_rsa"
   fi

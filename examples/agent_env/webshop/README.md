@@ -21,19 +21,21 @@ Expected packs:
 
 Runtime convention:
 
-- NAS stores reusable packs, source checkouts, and data under `/mnt/bn/jixf-nas-lq/mlf`.
-- The launch script copies IO-heavy runtime pieces to `/tmp/mlf-runtime`.
+- Shared storage keeps reusable packs, source checkouts, and data under
+  `${ROOT_DIR}`.
+- Runtime materialization copies IO-heavy runtime pieces to
+  `${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}`.
 - No WebShop Python dependency should be installed into the slime pack.
 
 Runtime setup:
 
-1. Ensure the WebShop pack exists at `/mnt/bn/jixf-nas-lq/mlf/packs/webshop.tar.gz`.
-2. Ensure the WebShop data backup exists at `/mnt/bn/jixf-nas-lq/mlf/data/webshop`.
-3. Materialize node-local runtime with `scripts/utils/prepare_agentic_runtime.sh`.
+1. Ensure the WebShop pack exists at `${ROOT_DIR}/packs/webshop.tar.gz`.
+2. Ensure the WebShop data backup exists at `${ROOT_DIR}/data/webshop`.
+3. Materialize node-local runtime with `${ROOT_DIR}/scripts/prepare_node_runtime.sh`.
 
 Use `scripts/utils/build_webshop_env.sh`, `scripts/utils/pack_webshop_env.sh`, and
-`scripts/utils/pack_agent_data.sh` only when rebuilding NAS packs/data. They are
-not part of normal training startup.
+`${ROOT_DIR}/scripts/pack_data.sh` only when rebuilding shared packs/data. They
+are not part of normal training startup.
 
 ## Data Scope
 
@@ -60,15 +62,15 @@ smoke tests.
 
 Do not claim full WebShop coverage until the NAS/runtime contains:
 
-- `${MLF_NAS_ROOT}/data/webshop/data/items_shuffle.json`
-- `${MLF_NAS_ROOT}/data/webshop/data/items_ins_v2.json`
-- `${MLF_NAS_ROOT}/data/webshop/data/items_human_ins.json`
-- `${MLF_NAS_ROOT}/data/webshop/search_engine/indexes_100k`
+- `${ROOT_DIR}/data/webshop/data/items_shuffle.json`
+- `${ROOT_DIR}/data/webshop/data/items_ins_v2.json`
+- `${ROOT_DIR}/data/webshop/data/items_human_ins.json`
+- `${ROOT_DIR}/data/webshop/search_engine/indexes_100k`
 
 Pack full data with:
 
 ```bash
-DATASETS=webshop bash scripts/utils/pack_agent_data.sh
+DATASETS=webshop ${ROOT_DIR}/scripts/pack_data.sh
 ```
 
 ## Shared backend direction

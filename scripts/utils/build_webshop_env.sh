@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
-MICROMAMBA=${MICROMAMBA:-${MLF_NAS_ROOT}/tools/micromamba/bin/micromamba}
-MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-${MLF_NAS_ROOT}/tools/micromamba/root}
-CONDA_PKGS_DIRS=${CONDA_PKGS_DIRS:-/tmp/mlf-runtime/webshop/conda-pkgs}
-PIP_CACHE_DIR=${PIP_CACHE_DIR:-${MLF_NAS_ROOT}/envs/pip-cache}
-ENV_PREFIX=${WEBSHOP_ENV_PREFIX:-${MLF_NAS_ROOT}/envs/webshop-clean}
-WEBSHOP_LIB=${WEBSHOP_LIB:-${MLF_NAS_ROOT}/code/WebShop}
-WEBSHOP_DATA=${WEBSHOP_DATA:-${MLF_NAS_ROOT}/data/webshop}
-WEBSHOP_MODEL_SOURCE_SITE=${WEBSHOP_MODEL_SOURCE_SITE:-${MLF_NAS_ROOT}/envs/webshop/lib/python3.8/site-packages}
-PACK_DIR=${PACK_DIR:-${MLF_NAS_ROOT}/packs}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG_FILE="${SERVER_OPS_CONFIG:-${HOME}/.jingyuan/server_ops.env}"
+if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+fi
+REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
+ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+LOCAL_RUNTIME_DIR=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
+MICROMAMBA=${MICROMAMBA:-${ROOT_DIR}/tools/micromamba/bin/micromamba}
+MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-${ROOT_DIR}/tools/micromamba/root}
+CONDA_PKGS_DIRS=${CONDA_PKGS_DIRS:-${LOCAL_RUNTIME_DIR}/webshop/conda-pkgs}
+PIP_CACHE_DIR=${PIP_CACHE_DIR:-${ROOT_DIR}/envs/pip-cache}
+ENV_PREFIX=${WEBSHOP_ENV_PREFIX:-${ROOT_DIR}/envs/webshop-clean}
+WEBSHOP_LIB=${WEBSHOP_LIB:-${ROOT_DIR}/code/WebShop}
+WEBSHOP_DATA=${WEBSHOP_DATA:-${ROOT_DIR}/data/webshop}
+WEBSHOP_MODEL_SOURCE_SITE=${WEBSHOP_MODEL_SOURCE_SITE:-${ROOT_DIR}/envs/webshop/lib/python3.8/site-packages}
+PACK_DIR=${PACK_DIR:-${ROOT_DIR}/packs}
 REVISION=${WEBSHOP_REVISION:-webshop-clean-$(date +%Y%m%d)}
 
 export MAMBA_ROOT_PREFIX CONDA_PKGS_DIRS PIP_CACHE_DIR PYTHONNOUSERSITE=1
@@ -75,7 +83,7 @@ then
   cp -a "${WEBSHOP_MODEL_SOURCE_SITE}"/en_core_web_sm-*.dist-info "${TARGET_SITE}/"
 fi
 
-PYTHONPATH="${MLF_NAS_ROOT}/code/slime:${WEBSHOP_LIB}" WEBSHOP_LIB="${WEBSHOP_LIB}" WEBSHOP_DATA="${WEBSHOP_DATA}" python - <<'PY'
+PYTHONPATH="${REPO_DIR}:${WEBSHOP_LIB}" WEBSHOP_LIB="${WEBSHOP_LIB}" WEBSHOP_DATA="${WEBSHOP_DATA}" python - <<'PY'
 import os
 
 from examples.agent_env.webshop.server import _install_text_env_import_stubs, _load_text_env_class

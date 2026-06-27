@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MLF_NAS_ROOT=${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}
-REPO_DIR=${REPO_DIR:-${MLF_NAS_ROOT}/code/slime}
-OPS_SCRIPTS_DIR=${OPS_SCRIPTS_DIR:-${MLF_NAS_ROOT}/scripts}
-MLF_LOCAL_ENVS=${MLF_LOCAL_ENVS:-/tmp/mlf-envs}
-LOG_DIR=${LOG_DIR:-/tmp/mlf-runtime/logs}
-SLIME_ENV=${SLIME_ENV:-${MLF_LOCAL_ENVS}/slime}
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+CONFIG_FILE="${SERVER_OPS_CONFIG:-${HOME}/.jingyuan/server_ops.env}"
+if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+fi
+REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
+ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+OPS_SCRIPTS_DIR=${OPS_SCRIPTS_DIR:-${ROOT_DIR}/scripts}
+LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
+LOG_DIR=${LOG_DIR:-/tmp/server-ops-runtime/logs}
+SLIME_ENV=${SLIME_ENV:-${LOCAL_ENVS_DIR}/slime}
 SLIME_PYTHON=${SLIME_PYTHON:-${SLIME_ENV}/bin/python}
 AUX_PYTHON=${AUX_PYTHON:-}
 AUX_SERVE_PYTHON=${AUX_SERVE_PYTHON:-}
@@ -51,8 +57,8 @@ DRY_RUN=0
 SSH_USER=${SSH_USER:-tiger}
 SSH_PORT=${SSH_PORT:-10413}
 if [ -z "${SSH_KEY:-}" ]; then
-  if [ -f "${MLF_NAS_ROOT}/secrets/byte_id_rsa" ]; then
-    SSH_KEY="${MLF_NAS_ROOT}/secrets/byte_id_rsa"
+  if [ -f "${ROOT_DIR}/secrets/byte_id_rsa" ]; then
+    SSH_KEY="${ROOT_DIR}/secrets/byte_id_rsa"
   else
     SSH_KEY="/home/${SSH_USER}/.ssh/byte_id_rsa"
   fi
@@ -162,7 +168,7 @@ apply_aux_defaults() {
   AUX_PORT=${AUX_PORT:-18080}
   AUX_GPUS=${AUX_GPUS:-0,1,2,3,4,5,6,7}
   AUX_PP=${AUX_PP:-1}
-  AUX_SESSION=${AUX_SESSION:-mlf_aux_endpoint}
+  AUX_SESSION=${AUX_SESSION:-agent_env_aux_endpoint}
   AUX_MEM_FRACTION=${AUX_MEM_FRACTION:-0.65}
   AUX_GPU_MEMORY_UTILIZATION=${AUX_GPU_MEMORY_UTILIZATION:-0.90}
   AUX_MAX_MODEL_LEN=${AUX_MAX_MODEL_LEN:-4096}
@@ -431,19 +437,19 @@ start_external_endpoint() {
   case "${provider}" in
     deepseek)
       base_url=${AUX_BASE_URL:-https://api.deepseek.com}
-      api_key_path=${AUX_API_KEY_PATH:-${MLF_NAS_ROOT}/secrets/deepseek_api_key}
+      api_key_path=${AUX_API_KEY_PATH:-${ROOT_DIR}/secrets/deepseek_api_key}
       ;;
     ark)
       base_url=${AUX_BASE_URL:-https://ark-cn-beijing.bytedance.net/api/v3}
-      api_key_path=${AUX_API_KEY_PATH:-${MLF_NAS_ROOT}/secrets/ark_api_key}
+      api_key_path=${AUX_API_KEY_PATH:-${ROOT_DIR}/secrets/ark_api_key}
       ;;
     openai)
       base_url=${AUX_BASE_URL:-}
-      api_key_path=${AUX_API_KEY_PATH:-${MLF_NAS_ROOT}/secrets/openai_api_key}
+      api_key_path=${AUX_API_KEY_PATH:-${ROOT_DIR}/secrets/openai_api_key}
       ;;
     aicolate)
       base_url=${AUX_BASE_URL:-${AICOLATE_BASE_URL:-}}
-      api_key_path=${AUX_API_KEY_PATH:-${MLF_NAS_ROOT}/secrets/aicolate_api_key}
+      api_key_path=${AUX_API_KEY_PATH:-${ROOT_DIR}/secrets/aicolate_api_key}
       ;;
     *)
       echo "Unsupported external provider: ${provider}" >&2
@@ -472,7 +478,7 @@ resolve_local_model_path() {
     if [[ "${AUX_MODEL_NAME}" = /* ]]; then
       model_path=${AUX_MODEL_NAME}
     else
-      model_path="${MLF_NAS_ROOT}/models/${AUX_MODEL_NAME}"
+      model_path="${ROOT_DIR}/models/${AUX_MODEL_NAME}"
     fi
   fi
   printf '%s\n' "${model_path}"

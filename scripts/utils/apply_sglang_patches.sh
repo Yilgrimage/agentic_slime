@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-MLF_NAS_ROOT="${MLF_NAS_ROOT:-/mnt/bn/jixf-nas-lq/mlf}"
-SGLANG_REPO="${SGLANG_REPO:-${MLF_NAS_ROOT}/code/sglang}"
+CONFIG_FILE="${SERVER_OPS_CONFIG:-${HOME}/.jingyuan/server_ops.env}"
+if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+fi
+ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+SGLANG_REPO="${SGLANG_REPO:-${ROOT_DIR}/code/sglang}"
 ACTION="${1:-apply}"
 
 PATCHES=(

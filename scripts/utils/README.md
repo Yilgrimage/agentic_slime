@@ -1,33 +1,33 @@
 # Agent Env Utility Scripts
 
-These scripts manage runtime materialization and profile-driven training launch.
-They are operational glue, not a second experiment configuration layer.
+These scripts manage profile-driven training launch and repo-specific build
+helpers. Runtime materialization and GPU keepalive live in the root server-ops
+scripts, not in this repo.
 
 ## Runtime Layout
 
-- NAS root: `/mnt/bn/jixf-nas-lq/mlf`
-- reusable packs: `${MLF_NAS_ROOT}/packs`
-- reusable source/data/model assets: `${MLF_NAS_ROOT}/{code,data,models}`
-- node-local envs: `/tmp/mlf-envs`
-- node-local runtime assets: `/tmp/mlf-runtime`
-- run outputs: `${MLF_NAS_ROOT}/runs`
+- workspace root: `${ROOT_DIR}`; infer it from the repo location or set it
+  explicitly in the shell/local machine config, not in git
+- reusable packs: `${ROOT_DIR}/packs`
+- reusable source/data/model assets: `${ROOT_DIR}/{code,data,models}`
+- node-local envs: `/tmp/server-ops-envs`
+- node-local runtime assets: `/tmp/server-ops-runtime`
+- run outputs: `${ROOT_DIR}/runs`
 
 ## Main Entrypoints
 
-- `prepare_agentic_runtime.sh`: materialize selected env/data/source packs on
-  one or more nodes.
-- `materialize_node_runtime.sh`: single-node materializer called by the prepare
-  script.
 - `launch_agentic_training.sh`: profile-driven distributed launcher. It resolves
   run/topology/model/train/aux profiles, starts services, and submits the train
   adapter.
 - `aux_endpoint.sh`: optional OpenAI-compatible aux inference server manager.
 - `build_*.sh`, `pack_*.sh`, `publish_*.sh`: build and publish reusable packs.
+- Runtime materialization: use `${ROOT_DIR}/scripts/prepare_node_runtime.sh`.
+- Data packing: use `${ROOT_DIR}/scripts/pack_data.sh`.
 
 Example:
 
 ```bash
-bash scripts/utils/prepare_agentic_runtime.sh \
+${ROOT_DIR}/scripts/prepare_node_runtime.sh \
   --all-nodes \
   --nodes configs/nodes/agent_env_all.txt \
   --node 0,1,2,3 \
@@ -46,8 +46,8 @@ GPU keepalive is intentionally outside this repo and should be called through
 the root-level ops interface:
 
 ```bash
-${MLF_NAS_ROOT}/scripts/run_bench.sh start|stop|status
-${MLF_NAS_ROOT}/scripts/gpu_idle_watchdog.sh start|status|stop
+${ROOT_DIR}/scripts/run_bench.sh start|stop|status
+${ROOT_DIR}/scripts/gpu_idle_watchdog.sh start|status|stop
 ```
 
 The watchdog should protect idle GPUs by utilization only. It should not depend
