@@ -10,7 +10,7 @@ from huggingface_hub import snapshot_download
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Download AReaL synthetic tau2 RL data into a separated data root.")
-    parser.add_argument("--output-dir", required=True, help="Target directory, e.g. /tmp/mlf-runtime/data/tau2/areal_synthetic.")
+    parser.add_argument("--output-dir", required=True, help="Target directory, e.g. ${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}/data/tau2/areal_synthetic.")
     parser.add_argument("--repo-id", default="inclusionAI/AReaL-tau2-data")
     parser.add_argument("--revision", default="main")
     parser.add_argument("--cache-dir", default=None)

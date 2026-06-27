@@ -13,6 +13,8 @@ OPS_SCRIPTS_DIR=${OPS_SCRIPTS_DIR:-${ROOT_DIR}/scripts}
 LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
 LOCAL_RUNTIME_DIR=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
 WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${ROOT_DIR}/secrets/wandb.env}
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/slime_runtime.sh"
 
 RUN_PROFILE=${RUN_PROFILE:-}
 INTERNAL_ROLE=
@@ -51,7 +53,6 @@ SAVE_DIR=${SAVE_DIR:-}
 RESET_TRAIN_RUNTIME_ON_START=${RESET_TRAIN_RUNTIME_ON_START:-1}
 BENCH_ON_TRAIN_EXIT=${BENCH_ON_TRAIN_EXIT:-1}
 BENCH_ON_LAUNCH_FAILURE=${BENCH_ON_LAUNCH_FAILURE:-1}
-BENCH_ON_EXIT_SUPPRESS_FILE=${BENCH_ON_EXIT_SUPPRESS_FILE:-/tmp/server_ops_suppress_bench_on_train_exit_until}
 
 SSH_USER=${SSH_USER:-tiger}
 SSH_PORT=${SSH_PORT:-10413}
@@ -66,22 +67,43 @@ SSH_KEY=${SSH_KEY/#\~/${HOME}}
 SSH_IPV6=${SSH_IPV6:-1}
 SSH_JUMP=${SSH_JUMP:-}
 
-SLIME_ENV=${SLIME_ENV:-${LOCAL_ENVS_DIR}/slime}
-SLIME_PYTHON=${SLIME_PYTHON:-${SLIME_ENV}/bin/python}
+RESOLVED_TRAIN_EXTRA_KEYS=(
+  ROOT_DIR LOCAL_RUNTIME_DIR LOCAL_ENVS_DIR REPO_DIR RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR
+  ENV_CONFIG CUSTOM_CONFIG_PATH MODEL_DIR TORCH_DIST_DIR LOAD_DIR REF_LOAD_DIR
+  SLIME_RUNTIME SLIME_ENV SLIME_PYTHON SLIME_PACK_NAME SLIME_PACK_PATH SLIME_IMAGE_ENV SLIME_IMAGE_PYTHON
+  MEGATRON_PATH MEGATRON_IMAGE_PATH WANDB_SECRET_FILE
+)
+
+RESOLVED_LAUNCH_KEYS=(
+  ROOT_DIR REPO_DIR OPS_SCRIPTS_DIR LOCAL_ENVS_DIR LOCAL_RUNTIME_DIR WANDB_SECRET_FILE
+  SLIME_RUNTIME SLIME_ENV SLIME_PYTHON SLIME_PACK_NAME SLIME_PACK_PATH SLIME_IMAGE_ENV SLIME_IMAGE_PYTHON
+  MEGATRON_PATH MEGATRON_IMAGE_PATH
+  ENV_NAME ENV_CONFIG MODEL_PROFILE TRAIN_PROFILE TRAIN_ADAPTER RESOLVED_TRAIN_ENV
+  NODES_FILE NODE_INDICES AUX_NODES_FILE AUX_NODE_INDICES AUX_ENV_FILE ENV_PORT ROUTER_PORT RAY_PORT
+  RAY_CUDA_VISIBLE_DEVICES NUM_GPUS_PER_NODE_FOR_RAY RAY_MIN_WORKER_PORT RAY_MAX_WORKER_PORT
+  RAY_START_MAX_ATTEMPTS RAY_HEAD_START_TIMEOUT_S
+  RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR EXP_PROJECT EXP_NAME
+  RESET_TRAIN_RUNTIME_ON_START BENCH_ON_TRAIN_EXIT BENCH_ON_LAUNCH_FAILURE
+  SSH_USER SSH_PORT SSH_KEY SSH_IPV6 SSH_JUMP
+  AUX_ENDPOINT_PROVIDER AUX_ENDPOINT_MODEL AUX_ENDPOINT_BASE_URL AUX_ENDPOINT_API_KEY_PATH
+  AUX_ENDPOINT_TIMEOUT_S AUX_ENDPOINT_MAX_TOKENS AUX_ENDPOINT_TEMPERATURE AUX_ENDPOINT_TOP_P
+  AUX_ENDPOINT_ENABLE_THINKING AUX_ENDPOINT_SEPARATE_REASONING AUX_ENDPOINT_REASONING_EFFORT
+  AUX_ENDPOINT_STARTED_LOCAL AUX_ENDPOINT_NODES_FILE AUX_ENDPOINT_SESSION
+)
+
+AUX_PROFILE_APPEND_KEYS=(
+  ROOT_DIR OPS_SCRIPTS_DIR LOCAL_ENVS_DIR REPO_DIR LOG_DIR AUX_ENV_FILE AUX_NODES_FILE AUX_NODE_INDICES
+  SLIME_RUNTIME SLIME_ENV SLIME_PYTHON SLIME_PACK_NAME SLIME_PACK_PATH SLIME_IMAGE_ENV SLIME_IMAGE_PYTHON
+)
 
 usage() {
   cat <<'EOF'
 Usage:
   launch_agentic_training.sh <run-profile.env> [--dry-run]
-
-Internal roles:
   launch_agentic_training.sh --internal-role head --resolved RUN_ROOT/logs/resolved_launch.env
   launch_agentic_training.sh --internal-role worker --resolved RUN_ROOT/logs/resolved_launch.env --head-address HOST
 
-The public entrypoint loads run/topology/model/train/aux profiles once, writes
-resolved env files under RUN_ROOT/logs, starts aux if configured, resets/stops
-train-node runtime, then submits one head tmux. The head/worker roles consume
-only the resolved launch env and do not re-parse profiles.
+The public entrypoint resolves profiles once; internal roles consume resolved_launch.env.
 EOF
 }
 
@@ -133,17 +155,27 @@ resolve_path() {
   fi
 }
 
-bool_true() {
-  case "${1:-0}" in
-    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-    *) return 1 ;;
-  esac
+quote_assign() {
+  local key=$1 value=${2-}
+  printf '%s=%q\n' "${key}" "${value}"
 }
 
-quote_exports() {
+quote_assign_vars() {
   local key
   for key in "$@"; do
-    printf '%s=%q\n' "${key}" "${!key-}"
+    quote_assign "${key}" "${!key-}"
+  done
+}
+
+quote_export() {
+  local key=$1 value=${2-}
+  printf 'export %s=%q\n' "${key}" "${value}"
+}
+
+quote_export_vars() {
+  local key
+  for key in "$@"; do
+    quote_export "${key}" "${!key-}"
   done
 }
 
@@ -168,11 +200,61 @@ profile_keys() {
   done
 }
 
+skip_resolved_train_key() {
+  case "$1" in
+    RUN_PROFILE|MODEL_PROFILE|TRAIN_PROFILE|TOPOLOGY_PROFILE|AUX_PROFILE|RESOLVED_*|RESOLVED_CONFIG)
+      return 0 ;;
+    NODES_FILE|NODE_INDICES|AUX_NODES_FILE|AUX_NODE_INDICES|ENV_PORT|ROUTER_PORT|RAY_PORT|RAY_*|NUM_GPUS_PER_NODE_FOR_RAY)
+      return 0 ;;
+    SSH_*|OPS_SCRIPTS_DIR|BENCH_*|RESET_TRAIN_RUNTIME_ON_START|DRY_RUN|INTERNAL_ROLE|HEAD_ADDRESS)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+resolved_train_env_keys() {
+  local path key
+  for path in "$@"; do
+    [ -n "${path}" ] || continue
+    path=$(resolve_path "${path}")
+    [ -f "${path}" ] || continue
+    while read -r key; do
+      [ -n "${key}" ] || continue
+      skip_resolved_train_key "${key}" && continue
+      printf '%s\n' "${key}"
+    done < <(profile_keys "${path}")
+  done
+}
+
+write_resolved_train_env() {
+  local target=$1
+  shift
+  local profile_paths=("$@")
+  local key value seen_keys=" "
+  mkdir -p "$(dirname "${target}")"
+  {
+    printf '# Generated by %s\n' "$(basename "$0")"
+    while read -r key; do
+      printf '%s=%q\n' "${key}" "${!key-}"
+      seen_keys="${seen_keys}${key} "
+    done < <(resolved_train_env_keys "${profile_paths[@]}" | awk 'NF && !seen[$0]++')
+    while read -r key; do
+      case "${seen_keys}" in
+        *" ${key} "*) continue ;;
+      esac
+      [[ -v ${key} ]] || continue
+      value=${!key}
+      [ -n "${value}" ] || continue
+      printf '%s=%q\n' "${key}" "${value}"
+    done < <(printf '%s\n' "${RESOLVED_TRAIN_EXTRA_KEYS[@]}")
+  } > "${target}"
+}
+
 write_resolved_profile() {
   local target=$1
   shift
   local profile_paths=("$@")
-  shift $#
   mkdir -p "$(dirname "${target}")"
   {
     printf '# Generated by %s\n' "$(basename "$0")"
@@ -188,7 +270,7 @@ write_named_env() {
   mkdir -p "$(dirname "${target}")"
   {
     printf '# Generated by %s\n' "$(basename "$0")"
-    quote_exports "$@"
+    quote_assign_vars "$@"
   } > "${target}"
 }
 
@@ -374,7 +456,7 @@ run_bench_nodes() {
   [ -n "${nodes_file}" ] || return 0
   local cmd
   cmd=$(printf 'ROOT_DIR=%q LOCAL_ENVS_DIR=%q BENCH_PYTHON=%q SSH_KEY=%q SSH_IPV6=%q bash %q %q --nodes %q' \
-    "${ROOT_DIR}" "${LOCAL_ENVS_DIR}" "${BENCH_PYTHON:-${SLIME_PYTHON}}" "${SSH_KEY}" "${SSH_IPV6}" "${OPS_SCRIPTS_DIR}/run_bench.sh" "${action}" "${nodes_file}")
+    "${ROOT_DIR}" "${LOCAL_ENVS_DIR}" "${BENCH_PYTHON:-${SLIME_PYTHON:-${SLIME_IMAGE_PYTHON:-/usr/bin/python}}}" "${SSH_KEY}" "${SSH_IPV6}" "${OPS_SCRIPTS_DIR}/run_bench.sh" "${action}" "${nodes_file}")
   [ -z "${selector}" ] || cmd+=$(printf ' --node %q' "${selector}")
   if [ "${DRY_RUN}" = "1" ]; then
     echo "+ ${cmd}"
@@ -384,22 +466,19 @@ run_bench_nodes() {
 }
 
 reset_runtime_cmd() {
-  local suppress_until
-  suppress_until=$(( $(date +%s) + 180 ))
+  local ray_stop_python
+  ray_stop_python=${SLIME_PYTHON:-${SLIME_IMAGE_PYTHON:-/usr/bin/python}}
   cat <<EOF
 set +e
-if [ -n "${BENCH_ON_EXIT_SUPPRESS_FILE}" ]; then
-  mkdir -p "$(dirname "${BENCH_ON_EXIT_SUPPRESS_FILE}")" 2>/dev/null || true
-  printf '%s\n' "${suppress_until}" > "${BENCH_ON_EXIT_SUPPRESS_FILE}" 2>/dev/null || true
-fi
 for session in agent_env_ray_head agent_env_ray_worker agent_env_${ENV_NAME}_env agent_env_${ENV_NAME}_router agent_env_${ENV_NAME}_train agent_env_multi_head agent_env_multi_worker; do
   tmux kill-session -t "\${session}" 2>/dev/null || true
 done
-if [ -x "${SLIME_PYTHON}" ]; then
-  "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force >/tmp/server_ops_ray_stop.log 2>&1 || true
+if [ -x "${ray_stop_python}" ]; then
+  "${ray_stop_python}" -m ray.scripts.scripts stop --force >/tmp/server_ops_ray_stop.log 2>&1 || true
 elif command -v ray >/dev/null 2>&1; then
   ray stop --force >/tmp/server_ops_ray_stop.log 2>&1 || true
 fi
+if [ "${RESET_TRAIN_RUNTIME_ON_START}" = "force" ]; then
 pkill -f '[s]glang.launch_server' 2>/dev/null || true
 pkill -f '[s]lime/ray/train' 2>/dev/null || true
 pkill -f '[t]rain_async.py' 2>/dev/null || true
@@ -408,15 +487,23 @@ pkill -f '[r]un_agent_env_train.sh' 2>/dev/null || true
 pkill -f '[e]xamples/agent_env/.*/server.py' 2>/dev/null || true
 pkill -f '[e]xamples/agent_env/router.py' 2>/dev/null || true
 pkill -f '[r]aylet|[g]cs_server|[p]lasma_store|[d]ashboard_agent|[d]ashboard.py' 2>/dev/null || true
+fi
 EOF
 }
 
 reset_runtime_on_nodes() {
-  [ "${RESET_TRAIN_RUNTIME_ON_START}" = "1" ] || return 0
+  case "${RESET_TRAIN_RUNTIME_ON_START}" in
+    1|true|TRUE|yes|YES|on|ON|force) ;;
+    *) return 0 ;;
+  esac
   local node cmd
   cmd=$(reset_runtime_cmd)
   for node in $(read_nodes); do
-    echo "Resetting training runtime on ${node}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      echo "Dry-run: would reset training runtime on ${node}"
+    else
+      echo "Resetting training runtime on ${node}"
+    fi
     if is_current_node "${node}"; then
       [ "${DRY_RUN}" = "1" ] && echo "+ local reset" || bash -lc "${cmd}" || true
     else
@@ -425,14 +512,31 @@ reset_runtime_on_nodes() {
   done
 }
 
+task_env_path() {
+  case "${ENV_NAME}" in
+    mcp_server) printf '%s\n' "${MCP_SERVER_ENV:-${LOCAL_ENVS_DIR}/mcp_server}" ;;
+    alfworld|webshop|tau2|appworld) printf '%s/%s\n' "${LOCAL_ENVS_DIR}" "${ENV_NAME}" ;;
+    *) return 1 ;;
+  esac
+}
+
+task_env_python() {
+  case "${ENV_NAME}" in
+    mcp_server) printf '%s\n' "${MCP_SERVER_PYTHON:-$(task_env_path)/bin/python}" ;;
+    alfworld|webshop|tau2|appworld) printf '%s/bin/python\n' "$(task_env_path)" ;;
+    *) return 1 ;;
+  esac
+}
+
 require_runtime() {
   [ "${DRY_RUN}" = "1" ] && return 0
+  local env_python
   [ -x "${SLIME_PYTHON}" ] || { echo "Missing slime python: ${SLIME_PYTHON}" >&2; exit 1; }
   case "${ENV_NAME}" in
-    webshop) [ -x "${LOCAL_ENVS_DIR}/webshop/bin/python" ] || { echo "Missing WebShop env" >&2; exit 1; } ;;
-    alfworld) [ -x "${LOCAL_ENVS_DIR}/alfworld/bin/python" ] || { echo "Missing ALFWorld env" >&2; exit 1; } ;;
-    tau2) [ -x "${LOCAL_ENVS_DIR}/tau2/bin/python" ] || { echo "Missing tau2 env" >&2; exit 1; } ;;
-    appworld) [ -x "${LOCAL_ENVS_DIR}/appworld/bin/python" ] || { echo "Missing AppWorld env" >&2; exit 1; } ;;
+    webshop|alfworld|tau2|appworld|mcp_server)
+      env_python=$(task_env_python)
+      [ -x "${env_python}" ] || { echo "Missing ${ENV_NAME} env python: ${env_python}" >&2; exit 1; }
+      ;;
     *) echo "Unsupported env: ${ENV_NAME}" >&2; exit 1 ;;
   esac
 }
@@ -446,61 +550,96 @@ load_aux_endpoint_env() {
 }
 
 server_runtime_exports() {
-  printf 'export ROOT_DIR=%q\n' "${ROOT_DIR}"
-  printf 'export LOCAL_RUNTIME_DIR=%q\n' "${LOCAL_RUNTIME_DIR}"
-  printf 'export LOCAL_ENVS_DIR=%q\n' "${LOCAL_ENVS_DIR}"
-  printf 'export REPO_DIR=%q\n' "${REPO_DIR}"
-  printf 'export WEBSHOP_DATA=%q\n' "${LOCAL_RUNTIME_DIR}/data/webshop"
-  printf 'export ALFWORLD_DATA=%q\n' "${LOCAL_RUNTIME_DIR}/data/alfworld"
-  printf 'export ALFWORLD_LIB=%q\n' "${ROOT_DIR}/code/alfworld"
-  printf 'export APPWORLD_ROOT=%q\n' "${LOCAL_RUNTIME_DIR}/data/appworld"
-  printf 'export TAU2_DATA_DIR=%q\n' "${LOCAL_RUNTIME_DIR}/data/tau2/data"
-  printf 'export AUX_ENDPOINT_PROVIDER=%q\n' "${AUX_ENDPOINT_PROVIDER:-}"
-  printf 'export AUX_ENDPOINT_MODEL=%q\n' "${AUX_ENDPOINT_MODEL:-}"
-  printf 'export AUX_ENDPOINT_BASE_URL=%q\n' "${AUX_ENDPOINT_BASE_URL:-}"
-  printf 'export AUX_ENDPOINT_API_KEY_PATH=%q\n' "${AUX_ENDPOINT_API_KEY_PATH:-}"
-  printf 'export AUX_ENDPOINT_TIMEOUT_S=%q\n' "${AUX_ENDPOINT_TIMEOUT_S:-}"
-  printf 'export AUX_ENDPOINT_MAX_TOKENS=%q\n' "${AUX_ENDPOINT_MAX_TOKENS:-}"
-  printf 'export AUX_ENDPOINT_TEMPERATURE=%q\n' "${AUX_ENDPOINT_TEMPERATURE:-}"
-  printf 'export AUX_ENDPOINT_TOP_P=%q\n' "${AUX_ENDPOINT_TOP_P:-}"
-  printf 'export AUX_ENDPOINT_ENABLE_THINKING=%q\n' "${AUX_ENDPOINT_ENABLE_THINKING:-}"
-  printf 'export AUX_ENDPOINT_SEPARATE_REASONING=%q\n' "${AUX_ENDPOINT_SEPARATE_REASONING:-}"
-  printf 'export AUX_ENDPOINT_REASONING_EFFORT=%q\n' "${AUX_ENDPOINT_REASONING_EFFORT:-}"
+  quote_export_vars ROOT_DIR LOCAL_RUNTIME_DIR LOCAL_ENVS_DIR REPO_DIR
+  case "${ENV_NAME}" in
+    webshop)
+      quote_export WEBSHOP_LIB "${WEBSHOP_LIB:-${LOCAL_RUNTIME_DIR}/code/WebShop}"
+      quote_export WEBSHOP_DATA "${LOCAL_RUNTIME_DIR}/data/webshop"
+      ;;
+    alfworld)
+      quote_export ALFWORLD_DATA "${LOCAL_RUNTIME_DIR}/data/alfworld"
+      quote_export ALFWORLD_LIB "${ALFWORLD_LIB:-${LOCAL_RUNTIME_DIR}/data/alfworld/pythonlibs/alfworld_text}"
+      ;;
+    appworld)
+      quote_export APPWORLD_ROOT "${LOCAL_RUNTIME_DIR}/data/appworld"
+      ;;
+    tau2)
+      quote_export TAU2_DATA_DIR "${LOCAL_RUNTIME_DIR}/data/tau2/data"
+      ;;
+    mcp_server)
+      local mcp_env=${MCP_SERVER_ENV:-${LOCAL_ENVS_DIR}/mcp_server}
+      quote_export MCP_SERVER_ENV "${mcp_env}"
+      quote_export MCP_SERVER_PYTHON "${MCP_SERVER_PYTHON:-${mcp_env}/bin/python}"
+      ;;
+  esac
+  quote_export_vars \
+    AUX_ENDPOINT_PROVIDER AUX_ENDPOINT_MODEL AUX_ENDPOINT_BASE_URL AUX_ENDPOINT_API_KEY_PATH \
+    AUX_ENDPOINT_TIMEOUT_S AUX_ENDPOINT_MAX_TOKENS AUX_ENDPOINT_TEMPERATURE AUX_ENDPOINT_TOP_P \
+    AUX_ENDPOINT_ENABLE_THINKING AUX_ENDPOINT_SEPARATE_REASONING AUX_ENDPOINT_REASONING_EFFORT
 }
 
 start_env_server() {
   require_runtime
   local config="${ENV_CONFIG:?Set ENV_CONFIG}"
   [ -f "${config}" ] || { echo "Missing env config: ${config}" >&2; exit 1; }
-  local script runtime_env
+  local script runtime_env env_python pythonpath extra_exports webshop_lib java_home jvm_path
   runtime_env=$(server_runtime_exports)
+  env_python=$(task_env_python)
+  pythonpath=${REPO_DIR}
+  extra_exports=
   case "${ENV_NAME}" in
     webshop)
-      script=$(printf 'cd %q\n%s\nexport PYTHONNOUSERSITE=1 WEBSHOP_LIB=%q JAVA_HOME=%q JVM_PATH=%q PYTHONPATH=%q\n%q examples/agent_env/webshop/server.py --host 0.0.0.0 --port %q --config %q\n' \
-        "${REPO_DIR}" "${runtime_env}" "${LOCAL_RUNTIME_DIR}/code/WebShop" "${LOCAL_ENVS_DIR}/webshop/lib/jvm" "${LOCAL_ENVS_DIR}/webshop/lib/jvm/lib/server/libjvm.so" "${REPO_DIR}:${LOCAL_RUNTIME_DIR}/code/WebShop" "${LOCAL_ENVS_DIR}/webshop/bin/python" "${ENV_PORT}" "${config}")
+      webshop_lib=${WEBSHOP_LIB:-${LOCAL_RUNTIME_DIR}/code/WebShop}
+      java_home=${WEBSHOP_JAVA_HOME:-$(task_env_path)/lib/jvm}
+      jvm_path=${WEBSHOP_JVM_PATH:-${java_home}/lib/server/libjvm.so}
+      pythonpath="${REPO_DIR}:${webshop_lib}"
+      extra_exports=$(printf '%s\n%s\n%s\n' \
+        "$(quote_export WEBSHOP_LIB "${webshop_lib}")" \
+        "$(quote_export JAVA_HOME "${java_home}")" \
+        "$(quote_export JVM_PATH "${jvm_path}")")
       ;;
-    alfworld)
-      script=$(printf 'cd %q\n%s\nexport PYTHONNOUSERSITE=1 PYTHONPATH=%q\n%q examples/agent_env/alfworld/server.py --host 0.0.0.0 --port %q --config %q\n' \
-        "${REPO_DIR}" "${runtime_env}" "${REPO_DIR}" "${LOCAL_ENVS_DIR}/alfworld/bin/python" "${ENV_PORT}" "${config}")
-      ;;
-    tau2)
-      script=$(printf 'cd %q\n%s\nexport PYTHONNOUSERSITE=1 LITELLM_LOCAL_MODEL_COST_MAP=True PYTHONPATH=%q\n%q examples/agent_env/tau2/server.py --host 0.0.0.0 --port %q --config %q\n' \
-        "${REPO_DIR}" "${runtime_env}" "${REPO_DIR}" "${LOCAL_ENVS_DIR}/tau2/bin/python" "${ENV_PORT}" "${config}")
-      ;;
+    alfworld|mcp_server) ;;
+    tau2) extra_exports=$(quote_export LITELLM_LOCAL_MODEL_COST_MAP True) ;;
     appworld)
-      script=$(printf 'cd %q\n%s\nexport PYTHONNOUSERSITE=1 HOME=%q PYTHONPATH=%q\n%q examples/agent_env/appworld/server.py --host 0.0.0.0 --port %q --config %q\n' \
-        "${REPO_DIR}" "${runtime_env}" "${LOCAL_RUNTIME_DIR}/data/appworld" "${REPO_DIR}" "${LOCAL_ENVS_DIR}/appworld/bin/python" "${ENV_PORT}" "${config}")
+      extra_exports=$(quote_export HOME "${LOCAL_RUNTIME_DIR}/data/appworld")
       ;;
+    *) echo "Unsupported env: ${ENV_NAME}" >&2; exit 1 ;;
   esac
+  script=$(printf 'cd %q\n%s\n%s\nexport PYTHONNOUSERSITE=1 PYTHONPATH=%q\n%q %q --host 0.0.0.0 --port %q --config %q\n' \
+    "${REPO_DIR}" "${runtime_env}" "${extra_exports}" "${pythonpath}" "${env_python}" "examples/agent_env/${ENV_NAME}/server.py" "${ENV_PORT}" "${config}")
   tmux_start_local "agent_env_${ENV_NAME}_env" "${script}" "$(role_log_path "${ENV_NAME}_env_server.log")"
+}
+
+ray_start_script() {
+  local role=$1 node_ip=$2 head_addr=${3:-}
+  local cmd=("${SLIME_PYTHON}" -m ray.scripts.scripts start)
+  case "${role}" in
+    head)
+      cmd+=(--head --node-ip-address "${node_ip}" --port "${RAY_PORT}")
+      cmd+=(--dashboard-host=0.0.0.0 --dashboard-port=8265)
+      ;;
+    worker)
+      cmd+=(--address "${head_addr}:${RAY_PORT}" --node-ip-address "${node_ip}")
+      ;;
+    *) echo "Unsupported Ray role: ${role}" >&2; return 1 ;;
+  esac
+  cmd+=(--num-gpus "${NUM_GPUS_PER_NODE_FOR_RAY}" --min-worker-port "${RAY_MIN_WORKER_PORT}" --max-worker-port "${RAY_MAX_WORKER_PORT}")
+  cmd+=(--disable-usage-stats --block)
+  {
+    printf 'export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1\n'
+    printf '[ ! -f %q ] || { set -a; source %q; set +a; }\n' "${WANDB_SECRET_FILE}" "${WANDB_SECRET_FILE}"
+    quote_export CUDA_VISIBLE_DEVICES "${RAY_CUDA_VISIBLE_DEVICES}"
+    printf 'mkdir -p %q\n' "${LOG_DIR}"
+    printf '%q ' "${cmd[@]}"
+    printf '\n'
+  }
 }
 
 start_ray_head() {
   local node_ip=${HEAD_ADDRESS:-}
   [ -n "${node_ip}" ] || node_ip=$(hostname -I | tr ' ' '\n' | grep -m1 .)
   local script attempt
-  script=$(printf 'export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1\n[ ! -f %q ] || { set -a; source %q; set +a; }\nexport CUDA_VISIBLE_DEVICES=%q\nmkdir -p %q\n%q -m ray.scripts.scripts start --head --node-ip-address %q --port %q --num-gpus %q --min-worker-port %q --max-worker-port %q --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265 --block\n' \
-    "${WANDB_SECRET_FILE}" "${WANDB_SECRET_FILE}" "${RAY_CUDA_VISIBLE_DEVICES}" "${LOG_DIR}" "${SLIME_PYTHON}" "${node_ip}" "${RAY_PORT}" "${NUM_GPUS_PER_NODE_FOR_RAY}" "${RAY_MIN_WORKER_PORT}" "${RAY_MAX_WORKER_PORT}")
+  script=$(ray_start_script head "${node_ip}")
   for attempt in $(seq 1 "${RAY_START_MAX_ATTEMPTS}"); do
     echo "Starting Ray head attempt ${attempt}/${RAY_START_MAX_ATTEMPTS}"
     [ "${DRY_RUN}" = "1" ] || "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force || true
@@ -521,41 +660,15 @@ start_ray_worker() {
   node_ip=$(hostname -I | tr ' ' '\n' | grep -m1 .)
   [ "${DRY_RUN}" = "1" ] || "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force || true
   local script
-  script=$(printf 'export PYTHONNOUSERSITE=1 RAY_DISABLE_DOCKER_CPU_WARNING=1\n[ ! -f %q ] || { set -a; source %q; set +a; }\nexport CUDA_VISIBLE_DEVICES=%q\nmkdir -p %q\n%q -m ray.scripts.scripts start --address %q --node-ip-address %q --num-gpus %q --min-worker-port %q --max-worker-port %q --disable-usage-stats --block\n' \
-    "${WANDB_SECRET_FILE}" "${WANDB_SECRET_FILE}" "${RAY_CUDA_VISIBLE_DEVICES}" "${LOG_DIR}" "${SLIME_PYTHON}" "${head_addr}:${RAY_PORT}" "${node_ip}" "${NUM_GPUS_PER_NODE_FOR_RAY}" "${RAY_MIN_WORKER_PORT}" "${RAY_MAX_WORKER_PORT}")
+  script=$(ray_start_script worker "${node_ip}" "${head_addr}")
   tmux_start_local agent_env_ray_worker "${script}" "$(role_log_path "ray_worker.log")"
 }
 
-wait_http() {
+http_wait_command() {
   local url=$1
-  local py=${SLIME_PYTHON}
-  if [ "${DRY_RUN}" = "1" ]; then
-    echo "+ wait_http ${url}"
-    return 0
-  fi
-  for _ in $(seq 1 300); do
-    if "${py}" - <<PY 2>/dev/null
-import json, urllib.request
-data = json.loads(urllib.request.urlopen("${url}", timeout=2).read().decode())
-raise SystemExit(0 if data.get("ok") else 1)
-PY
-    then
-      echo "ready: ${url}"
-      return 0
-    fi
-    sleep 2
-  done
-  echo "Timed out waiting for ${url}" >&2
-  return 1
-}
-
-remote_wait_http() {
-  local host=$1
-  local url=$2
-  local cmd
-  cmd=$(cat <<EOF
+  cat <<EOF
 ${SLIME_PYTHON@Q} - <<'PY'
-import json, urllib.request, time, sys
+import json, sys, time, urllib.request
 url = ${url@Q}
 for _ in range(300):
     try:
@@ -566,12 +679,26 @@ for _ in range(300):
     except Exception:
         pass
     time.sleep(2)
+print("Timed out waiting for", url, file=sys.stderr)
 sys.exit(1)
 PY
 EOF
-)
+}
+
+wait_http() {
+  local url=$1 cmd
+  cmd=$(http_wait_command "${url}")
+  if [ "${DRY_RUN}" = "1" ]; then
+    echo "+ wait_http ${url}"
+    return 0
+  fi
+  bash -lc "${cmd}"
+}
+
+remote_wait_http() {
+  local host=$1 url=$2
   echo "Waiting ${host} ${url}"
-  remote_query "${host}" "${cmd}"
+  remote_query "${host}" "$(http_wait_command "${url}")"
 }
 
 ray_alive_nodes() {
@@ -643,23 +770,18 @@ write_train_driver() {
   local driver="${LOG_DIR}/${ENV_NAME}_train_driver.sh"
   {
     printf '#!/usr/bin/env bash\nset -euo pipefail\n'
-    printf 'export ROOT_DIR=%q\n' "${ROOT_DIR}"
-    printf 'export LOCAL_RUNTIME_DIR=%q\n' "${LOCAL_RUNTIME_DIR}"
-    printf 'export LOCAL_ENVS_DIR=%q\n' "${LOCAL_ENVS_DIR}"
-    printf 'export REPO_DIR=%q\n' "${REPO_DIR}"
-    printf 'export ENV_CONFIG=%q\n' "${ENV_CONFIG}"
-    printf 'export TRAIN_PROFILE=%q\n' "${RESOLVED_TRAIN_PROFILE}"
-    printf 'export CUSTOM_CONFIG_PATH=%q\n' "${ENV_CONFIG}"
-    printf 'export SLIME_ENV=%q\n' "${SLIME_ENV}"
-    printf 'export CUDA_VISIBLE_DEVICES=%q\n' "${RAY_CUDA_VISIBLE_DEVICES}"
-    printf 'export RAY_CUDA_VISIBLE_DEVICES=%q\n' "${RAY_CUDA_VISIBLE_DEVICES}"
-    printf 'export RAY_PORT=%q\n' "${RAY_PORT}"
-    printf 'export RAY_ADDRESS=%q\n' "127.0.0.1:${RAY_PORT}"
-    printf 'export RUN_ROOT=%q\n' "${RUN_ROOT}"
-    printf 'export LOG_DIR=%q\n' "${LOG_DIR}"
-    printf 'export WANDB_DIR=%q\n' "${WANDB_DIR}"
-    printf 'export SAVE_DIR=%q\n' "${SAVE_DIR}"
-    printf 'export AUX_ENV_FILE=%q\n' "${AUX_ENV_FILE:-}"
+    quote_export_vars ROOT_DIR LOCAL_RUNTIME_DIR LOCAL_ENVS_DIR REPO_DIR ENV_CONFIG
+    # The adapter sources this final train env contract through its existing
+    # TRAIN_PROFILE entrypoint; it is not a reusable source profile.
+    quote_export TRAIN_PROFILE "${RESOLVED_TRAIN_ENV}"
+    quote_export CUSTOM_CONFIG_PATH "${ENV_CONFIG}"
+    quote_export_vars \
+      SLIME_RUNTIME SLIME_ENV SLIME_PYTHON SLIME_PACK_NAME SLIME_PACK_PATH SLIME_IMAGE_ENV SLIME_IMAGE_PYTHON \
+      MEGATRON_PATH MEGATRON_IMAGE_PATH RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR AUX_ENV_FILE
+    quote_export CUDA_VISIBLE_DEVICES "${RAY_CUDA_VISIBLE_DEVICES}"
+    quote_export RAY_CUDA_VISIBLE_DEVICES "${RAY_CUDA_VISIBLE_DEVICES}"
+    quote_export_vars RAY_PORT
+    quote_export RAY_ADDRESS "127.0.0.1:${RAY_PORT}"
     printf 'if [ -n "${AUX_ENV_FILE:-}" ] && [ -f "${AUX_ENV_FILE}" ]; then\n'
     printf '  set -a\n'
     printf '  source "${AUX_ENV_FILE}"\n'
@@ -682,38 +804,20 @@ start_train_driver() {
   bench_log="${LOG_DIR}/bench_on_train_exit.log"
   {
     printf '#!/usr/bin/env bash\nset +e\n'
-    printf 'DRIVER=%q\n' "${driver}"
-    printf 'TRAIN_LOG=%q\n' "${train_log}"
-    printf 'STATUS_FILE=%q\n' "${status_file}"
-    printf 'BENCH_LOG=%q\n' "${bench_log}"
-    printf 'BENCH_ON_TRAIN_EXIT=%q\n' "${BENCH_ON_TRAIN_EXIT}"
-    printf 'ROOT_DIR=%q\n' "${ROOT_DIR}"
-    printf 'LOCAL_ENVS_DIR=%q\n' "${LOCAL_ENVS_DIR}"
-    printf 'BENCH_PYTHON=%q\n' "${BENCH_PYTHON:-${SLIME_PYTHON}}"
-    printf 'RUN_BENCH=%q\n' "${OPS_SCRIPTS_DIR}/run_bench.sh"
-    printf 'NODES_FILE=%q\n' "${NODES_FILE}"
-    printf 'NODE_INDICES=%q\n' "${NODE_INDICES}"
-    printf 'SSH_USER=%q\n' "${SSH_USER}"
-    printf 'SSH_PORT=%q\n' "${SSH_PORT}"
-    printf 'SSH_KEY=%q\n' "${SSH_KEY}"
-    printf 'SSH_IPV6=%q\n' "${SSH_IPV6}"
-    printf 'SSH_JUMP=%q\n' "${SSH_JUMP}"
-    printf 'BENCH_ON_EXIT_SUPPRESS_FILE=%q\n' "${BENCH_ON_EXIT_SUPPRESS_FILE}"
+    quote_assign DRIVER "${driver}"
+    quote_assign TRAIN_LOG "${train_log}"
+    quote_assign STATUS_FILE "${status_file}"
+    quote_assign BENCH_LOG "${bench_log}"
+    quote_assign BENCH_PYTHON "${BENCH_PYTHON:-${SLIME_PYTHON}}"
+    quote_assign RUN_BENCH "${OPS_SCRIPTS_DIR}/run_bench.sh"
+    quote_assign_vars \
+      BENCH_ON_TRAIN_EXIT ROOT_DIR LOCAL_ENVS_DIR NODES_FILE NODE_INDICES \
+      SSH_USER SSH_PORT SSH_KEY SSH_IPV6 SSH_JUMP
     cat <<'EOF'
 finish() {
   local code=$?
-  local now suppress_until skip_bench=0
   printf "exit_code=%s\nend_time=%s\n" "${code}" "$(date -Is)" > "${STATUS_FILE}"
-  if [ -n "${BENCH_ON_EXIT_SUPPRESS_FILE}" ] && [ -f "${BENCH_ON_EXIT_SUPPRESS_FILE}" ]; then
-    now=$(date +%s)
-    suppress_until=$(cat "${BENCH_ON_EXIT_SUPPRESS_FILE}" 2>/dev/null || echo 0)
-    if [ "${suppress_until:-0}" -gt "${now}" ] 2>/dev/null; then
-      skip_bench=1
-      printf "[%s] train exited code=%s; skip run_bench because reset suppression is active until %s\n" \
-        "$(date -Is)" "${code}" "${suppress_until}" >> "${BENCH_LOG}" 2>&1 || true
-    fi
-  fi
-  if [ "${BENCH_ON_TRAIN_EXIT}" = "1" ] && [ "${skip_bench}" != "1" ] && [ -n "${NODES_FILE}" ] && [ -f "${RUN_BENCH}" ]; then
+  if [ "${BENCH_ON_TRAIN_EXIT}" = "1" ] && [ -n "${NODES_FILE}" ] && [ -f "${RUN_BENCH}" ]; then
     {
       echo "[$(date -Is)] train exited code=${code}; running run_bench start --nodes ${NODES_FILE} --node ${NODE_INDICES}"
       bench_args=(start --nodes "${NODES_FILE}")
@@ -745,6 +849,7 @@ EOF
 
 run_worker() {
   source_env_file "${RESOLVED_CONFIG}" resolved
+  resolve_slime_runtime
   start_env_server
   wait_http "http://127.0.0.1:${ENV_PORT}/health"
   start_ray_worker "${HEAD_ADDRESS:?worker needs --head-address}"
@@ -752,6 +857,7 @@ run_worker() {
 
 run_head() {
   source_env_file "${RESOLVED_CONFIG}" resolved
+  resolve_slime_runtime
   mkdir -p "${LOG_DIR}"
   HEAD_ORCHESTRATION_COMPLETE=0
   head_failure_guard() {
@@ -781,8 +887,8 @@ run_head() {
       node_addr=$(remote_first_ip "${node}")
     fi
     env_urls+=("http://$(http_host "${node_addr}"):${ENV_PORT}")
-    worker_script=$(printf 'cd %q\nROOT_DIR=%q OPS_SCRIPTS_DIR=%q LOCAL_ENVS_DIR=%q LOCAL_RUNTIME_DIR=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q bash scripts/utils/launch_agentic_training.sh --internal-role worker --resolved %q --head-address %q\n' \
-      "${REPO_DIR}" "${ROOT_DIR}" "${OPS_SCRIPTS_DIR}" "${LOCAL_ENVS_DIR}" "${LOCAL_RUNTIME_DIR}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_CONFIG}" "${head_addr}")
+    worker_script=$(printf 'cd %q\nROOT_DIR=%q OPS_SCRIPTS_DIR=%q LOCAL_ENVS_DIR=%q LOCAL_RUNTIME_DIR=%q SSH_KEY=%q SSH_IPV6=%q bash scripts/utils/launch_agentic_training.sh --internal-role worker --resolved %q --head-address %q\n' \
+      "${REPO_DIR}" "${ROOT_DIR}" "${OPS_SCRIPTS_DIR}" "${LOCAL_ENVS_DIR}" "${LOCAL_RUNTIME_DIR}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_CONFIG}" "${head_addr}")
     tmux_start_remote "${node}" agent_env_multi_worker "${worker_script}" "${LOG_DIR}/multi_worker_$(safe_label "${node}").log"
   done
   for node in $(read_nodes | tail -n +2); do
@@ -801,39 +907,33 @@ run_head() {
 
 write_resolved_launch_config() {
   load_aux_endpoint_env
-  write_named_env "${RESOLVED_LAUNCH_CONFIG}" \
-    ROOT_DIR REPO_DIR OPS_SCRIPTS_DIR LOCAL_ENVS_DIR LOCAL_RUNTIME_DIR WANDB_SECRET_FILE SLIME_ENV SLIME_PYTHON \
-    ENV_NAME ENV_CONFIG MODEL_PROFILE TRAIN_PROFILE TRAIN_ADAPTER RESOLVED_TRAIN_PROFILE \
-    NODES_FILE NODE_INDICES AUX_NODES_FILE AUX_NODE_INDICES AUX_ENV_FILE ENV_PORT ROUTER_PORT RAY_PORT \
-    RAY_CUDA_VISIBLE_DEVICES NUM_GPUS_PER_NODE_FOR_RAY RAY_MIN_WORKER_PORT RAY_MAX_WORKER_PORT \
-    RAY_START_MAX_ATTEMPTS RAY_HEAD_START_TIMEOUT_S \
-    RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR EXP_PROJECT EXP_NAME \
-    RESET_TRAIN_RUNTIME_ON_START BENCH_ON_TRAIN_EXIT BENCH_ON_LAUNCH_FAILURE BENCH_ON_EXIT_SUPPRESS_FILE \
-    SSH_USER SSH_PORT SSH_KEY SSH_IPV6 SSH_JUMP \
-    AUX_ENDPOINT_PROVIDER AUX_ENDPOINT_MODEL AUX_ENDPOINT_BASE_URL AUX_ENDPOINT_API_KEY_PATH \
-    AUX_ENDPOINT_TIMEOUT_S AUX_ENDPOINT_MAX_TOKENS AUX_ENDPOINT_TEMPERATURE AUX_ENDPOINT_TOP_P \
-    AUX_ENDPOINT_ENABLE_THINKING AUX_ENDPOINT_SEPARATE_REASONING AUX_ENDPOINT_REASONING_EFFORT \
-    AUX_ENDPOINT_STARTED_LOCAL AUX_ENDPOINT_NODES_FILE AUX_ENDPOINT_SESSION
+  write_named_env "${RESOLVED_LAUNCH_CONFIG}" "${RESOLVED_LAUNCH_KEYS[@]}"
   # RESOLVED_CONFIG is used by internal roles; keep it self-referential.
   printf 'RESOLVED_CONFIG=%q\n' "${RESOLVED_LAUNCH_CONFIG}" >> "${RESOLVED_LAUNCH_CONFIG}"
 }
 
-prepare_run() {
+load_run_profiles() {
   [ -n "${RUN_PROFILE}" ] || { echo "Missing run profile" >&2; usage >&2; exit 1; }
-  local run_profile_path topology_path model_path train_path aux_path
-  run_profile_path=$(resolve_path "${RUN_PROFILE}")
-  source_env_file "${run_profile_path}" run
-  topology_path=$(resolve_path "${TOPOLOGY_PROFILE:?Set TOPOLOGY_PROFILE in run profile}")
-  source_env_file "${topology_path}" topology
-  model_path=$(resolve_path "${MODEL_PROFILE:?Set MODEL_PROFILE in run profile}")
-  source_env_file "${model_path}" model
-  train_path=$(resolve_path "${TRAIN_PROFILE:?Set TRAIN_PROFILE in run profile}")
-  source_env_file "${train_path}" train
+  RUN_PROFILE_PATH=$(resolve_path "${RUN_PROFILE}")
+  source_env_file "${RUN_PROFILE_PATH}" run
+  TOPOLOGY_PROFILE_PATH=$(resolve_path "${TOPOLOGY_PROFILE:?Set TOPOLOGY_PROFILE in run profile}")
+  source_env_file "${TOPOLOGY_PROFILE_PATH}" topology
+  MODEL_PROFILE_PATH=$(resolve_path "${MODEL_PROFILE:?Set MODEL_PROFILE in run profile}")
+  source_env_file "${MODEL_PROFILE_PATH}" model
+  TRAIN_PROFILE_PATH=$(resolve_path "${TRAIN_PROFILE:?Set TRAIN_PROFILE in run profile}")
+  source_env_file "${TRAIN_PROFILE_PATH}" train
+}
 
+resolve_run_defaults() {
   ENV_NAME=${ENV_NAME:?Set ENV_NAME in run profile}
+  set_slime_runtime_defaults
+  set_megatron_defaults
   ENV_CONFIG=$(resolve_path "${ENV_CONFIG:-examples/agent_env/${ENV_NAME}/env_config.yaml}")
   TRAIN_ADAPTER=$(resolve_path "${TRAIN_ADAPTER}")
   NODES_FILE=$(resolve_path "${NODES_FILE}")
+  if [ -n "${AUX_PROFILE:-}" ]; then
+    AUX_NODES_FILE=${AUX_NODES_FILE:-${NODES_FILE}}
+  fi
   [ -z "${AUX_NODES_FILE}" ] || AUX_NODES_FILE=$(resolve_path "${AUX_NODES_FILE}")
   [ -z "${NODES_FILE}" ] || [ -f "${NODES_FILE}" ] || { echo "Missing nodes file: ${NODES_FILE}" >&2; exit 1; }
   if [ "$(node_count)" -eq 0 ]; then
@@ -853,29 +953,32 @@ prepare_run() {
   WANDB_DIR=${WANDB_DIR:-${RUN_ROOT}/wandb}
   SAVE_DIR=${SAVE_DIR:-${RUN_ROOT}/checkpoints}
   AUX_ENV_FILE=${AUX_ENV_FILE:-${LOG_DIR}/aux_endpoint.env}
-  RESOLVED_TRAIN_PROFILE=${LOG_DIR}/resolved_train_profile.env
+  RESOLVED_TRAIN_ENV=${LOG_DIR}/resolved_train.env
   RESOLVED_LAUNCH_CONFIG=${LOG_DIR}/resolved_launch.env
   mkdir -p "${LOG_DIR}" "${WANDB_DIR}" "${SAVE_DIR}"
+}
 
-  write_resolved_profile "${RESOLVED_TRAIN_PROFILE}" "${run_profile_path}" "${topology_path}" "${model_path}" "${train_path}"
-  {
-    printf '\n'
-    quote_exports ROOT_DIR LOCAL_RUNTIME_DIR LOCAL_ENVS_DIR REPO_DIR TRAIN_ADAPTER \
-      RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR
-  } >> "${RESOLVED_TRAIN_PROFILE}"
-
+write_resolved_aux_profile() {
   if [ -n "${AUX_PROFILE:-}" ]; then
+    local aux_path
     aux_path=$(resolve_path "${AUX_PROFILE}")
     source_env_file "${aux_path}" aux
     RESOLVED_AUX_PROFILE=${LOG_DIR}/resolved_aux_profile.env
     write_resolved_profile "${RESOLVED_AUX_PROFILE}" "${aux_path}"
     {
       printf '\n'
-      quote_exports ROOT_DIR OPS_SCRIPTS_DIR LOCAL_ENVS_DIR REPO_DIR LOG_DIR AUX_ENV_FILE AUX_NODES_FILE AUX_NODE_INDICES
+      quote_assign_vars "${AUX_PROFILE_APPEND_KEYS[@]}"
     } >> "${RESOLVED_AUX_PROFILE}"
   else
     RESOLVED_AUX_PROFILE=
   fi
+}
+
+prepare_run() {
+  load_run_profiles
+  resolve_run_defaults
+  write_resolved_train_env "${RESOLVED_TRAIN_ENV}" "${RUN_PROFILE_PATH}" "${MODEL_PROFILE_PATH}" "${TRAIN_PROFILE_PATH}"
+  write_resolved_aux_profile
 }
 
 start_aux_endpoint() {
@@ -903,11 +1006,16 @@ submit_head() {
   else
     head_addr=$(remote_first_ip "${head}")
   fi
-  script=$(printf 'cd %q\nROOT_DIR=%q OPS_SCRIPTS_DIR=%q LOCAL_ENVS_DIR=%q LOCAL_RUNTIME_DIR=%q SLIME_ENV=%q SSH_KEY=%q SSH_IPV6=%q SSH_JUMP= bash scripts/utils/launch_agentic_training.sh --internal-role head --resolved %q --head-address %q\n' \
-    "${REPO_DIR}" "${ROOT_DIR}" "${OPS_SCRIPTS_DIR}" "${LOCAL_ENVS_DIR}" "${LOCAL_RUNTIME_DIR}" "${SLIME_ENV}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_LAUNCH_CONFIG}" "${head_addr}")
+  script=$(printf 'cd %q\nROOT_DIR=%q OPS_SCRIPTS_DIR=%q LOCAL_ENVS_DIR=%q LOCAL_RUNTIME_DIR=%q SSH_KEY=%q SSH_IPV6=%q SSH_JUMP= bash scripts/utils/launch_agentic_training.sh --internal-role head --resolved %q --head-address %q\n' \
+    "${REPO_DIR}" "${ROOT_DIR}" "${OPS_SCRIPTS_DIR}" "${LOCAL_ENVS_DIR}" "${LOCAL_RUNTIME_DIR}" "${SSH_KEY}" "${SSH_IPV6}" "${RESOLVED_LAUNCH_CONFIG}" "${head_addr}")
   if is_current_node "${head}"; then
     RESOLVED_CONFIG="${RESOLVED_LAUNCH_CONFIG}" HEAD_ADDRESS="${head_addr}" run_head
   else
+    if [ "${DRY_RUN}" = "1" ]; then
+      echo "Dry-run: would submit head orchestration on ${head}"
+      printf '%s\n' "${script}"
+      return 0
+    fi
     tmux_start_remote "${head}" agent_env_multi_head "${script}" "${LOG_DIR}/multi_head.log"
     echo "Head orchestration submitted."
     echo "Head log: ${head}:${LOG_DIR}/multi_head.log"

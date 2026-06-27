@@ -1,0 +1,10 @@
+# Agent-env cluster nodes. Order is the topology index contract.
+# Copy this file to agent_env_all.txt on each cluster and fill real node IPs.
+# The real agent_env_all.txt is intentionally git-ignored.
+#
+# 0: default head / train node 0
+# 1: train node 1
+# 2: optional train node 2
+# 3: optional train node 3
+NODE0_IPV6_OR_HOST
+NODE1_IPV6_OR_HOST

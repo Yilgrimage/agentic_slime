@@ -40,6 +40,10 @@ bash scripts/utils/launch_agentic_training.sh \
   configs/agent_env/runs/alfworld_qwen3_4b_grpo_fullasync_3x8.env
 ```
 
+Create `configs/nodes/agent_env_all.txt` locally from
+`configs/nodes/agent_env_all.txt.example`. The real node file is intentionally
+git-ignored because it contains cluster-specific IPs or hostnames.
+
 ## Keepalive
 
 GPU keepalive is intentionally outside this repo and should be called through

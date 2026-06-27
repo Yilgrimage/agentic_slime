@@ -1,0 +1,60 @@
+task:
+  split: train
+max_turns: 20
+timeouts:
+  policy_s: 300
+  env_request_s: 660
+interaction:
+  mode: tool_call
+  enable_thinking: true
+  reasoning:
+    parser: qwen3-thinking
+    fallback_to_raw: false
+observation:
+  include_actions: true
+action:
+  restrict_to_available: false
+  invalid_fallback: assistant_message
+reward:
+  impl: valleydance
+  judge_mode: aux
+  source: score
+  outcome: 10.0
+  truncated: -1.0
+  valleydance:
+    use_llm_judge: true
+  skill_usage:
+    weight: 1.0
+  tool_usage:
+    weight: 0.0
+  format:
+    valid: 0.0
+    invalid: -0.1
+env_server:
+  pool_size: 8
+  acquire_timeout_s: 600
+  prewarm_splits:
+  - train
+  shared_pool: true
+  worker_start_timeout_s: 180
+  worker_request_timeout_s: 300
+mcp_server:
+  name: ipr_mcp_server
+  task_file: ${ROOT_DIR}/data/valleydance/ipr_product_check/standardized_data_fix_shuf_tail1800.jsonl
+  policy_file: examples/agent_env/mcp_server/system_prompt_ipr_product_check.md
+  server:
+    transport: psm
+    psm: bytedance.mcp.machine_ipr
+    mcp_gateway_region: i18n
+    secret_key_path: ${ROOT_DIR}/secrets/mcp/ipr_service_account_secret_key
+    env:
+      PSM_SERVICE_URL_I18N: mcp.mcp.byteintl.net
+      MCP_SERVER_URL_I18N: mcp.byteintl.net
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+  connect_timeout_s: 120
+  request_timeout_s: 120
+  terminal_tools: []
+  allow_assistant_final: true
+  assistant_final_success_without_target: false

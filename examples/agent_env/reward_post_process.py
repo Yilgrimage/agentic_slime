@@ -4,15 +4,8 @@ import math
 from typing import Any
 
 from slime.utils.types import Sample
-from slime.rollout.filter_hub.base_types import DynamicFilterOutput
 
-from examples.agent_env.rollout import (
-    arg,
-    format_reward_adjustment,
-    metadata,
-    _runtime_env,
-    truncated_reward_adjustment,
-)
+from examples.agent_env.rollout import arg, metadata
 
 
 def _float_value(value: Any, default: float = 0.0) -> float:
@@ -22,53 +15,43 @@ def _float_value(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _env_reward(args: Any, sample: Sample) -> float:
+def _reward_value(args: Any, sample: Sample) -> float:
+    reward = sample.reward
+    if isinstance(reward, dict):
+        reward_key = arg(args, "reward_key", None)
+        if reward_key and reward_key in reward:
+            return _float_value(reward.get(reward_key))
+        for key in ("score", "reward", "judge_score", "rm_score"):
+            if key in reward:
+                return _float_value(reward.get(key))
+        return 0.0
+    if reward is not None:
+        return _float_value(reward)
+
     sample_metadata = metadata(sample)
-    if "env_reward" in sample_metadata:
-        return _float_value(sample_metadata.get("env_reward"))
+    rm_reward = sample_metadata.get("rm_reward")
+    if isinstance(rm_reward, dict) and "score" in rm_reward:
+        return _float_value(rm_reward.get("score"))
+    for key in ("rm_score", "judge_score"):
+        if key in sample_metadata:
+            return _float_value(sample_metadata.get(key))
     return 0.0
 
 
-def _judge_score(args: Any, sample: Sample) -> float:
-    if sample.reward is None:
-        return 0.0
-    if isinstance(sample.reward, dict):
-        reward_key = arg(args, "reward_key", None)
-        if reward_key and reward_key in sample.reward:
-            return _float_value(sample.reward.get(reward_key))
-        for key in ("judge_score", "score", "reward"):
-            if key in sample.reward:
-                return _float_value(sample.reward.get(key))
-        return 0.0
-    return _float_value(sample.reward)
-
-
 def post_process_rewards(args: Any, samples: list[Sample]) -> tuple[list[float], list[float]]:
-    """Agent-env reward combiner.
+    """Adapt RM-produced rewards to Slime's reward post-process contract.
 
-    Rollout owns environment interaction and stores env score/reward metadata.
-    Group RM, when enabled, returns a judge score through sample.reward. This
-    function is the only place that combines those sources into train rewards.
+    Environment scores, format rewards, truncation penalties, and judge rewards
+    are composed by the selected RM implementation. This hook only handles
+    removed samples and optional grouped reward normalization.
     """
+
     raw_rewards = []
     for sample in samples:
+        raw_reward = 0.0 if sample.remove_sample else _reward_value(args, sample)
         sample_metadata = metadata(sample)
-        if sample.remove_sample:
-            env_reward = 0.0
-            judge_score = 0.0
-            format_adjustment = 0.0
-            truncated_adjustment = 0.0
-        else:
-            env_reward = _env_reward(args, sample)
-            judge_score = _judge_score(args, sample)
-            format_adjustment = format_reward_adjustment(args, sample)
-            truncated_adjustment = truncated_reward_adjustment(args, sample)
-        raw_reward = env_reward + judge_score + format_adjustment + truncated_adjustment
-        sample_metadata["env_reward_for_train"] = env_reward
-        sample_metadata["judge_score_for_train"] = judge_score
-        sample_metadata["format_reward"] = format_adjustment
-        sample_metadata["truncated_reward"] = truncated_adjustment
         sample_metadata["raw_reward"] = raw_reward
+        sample_metadata["rm_reward_for_train"] = raw_reward
         raw_rewards.append(raw_reward)
 
     if not (
@@ -104,32 +87,3 @@ def post_process_rewards(args: Any, samples: list[Sample]) -> tuple[list[float],
         for idx, value in zip(active, centered, strict=True):
             rewards[idx] = value
     return raw_rewards, rewards
-
-
-def raw_reward_for_filter(args: Any, sample: Sample) -> float:
-    if sample.remove_sample:
-        return 0.0
-    return (
-        _env_reward(args, sample)
-        + _judge_score(args, sample)
-        + format_reward_adjustment(args, sample)
-        + truncated_reward_adjustment(args, sample)
-    )
-
-
-def check_reward_nonzero_std(args: Any, samples: list[Sample], **_: Any) -> DynamicFilterOutput:
-    active = [sample for sample in samples if not sample.remove_sample]
-    if not active:
-        return DynamicFilterOutput(keep=False, reason="no_active_samples")
-    group_size = int(arg(args, "n_samples_per_prompt", len(samples)) or len(samples))
-    min_valid_fraction = float(_runtime_env(args, "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "0.5"))
-    if len(active) <= group_size * min_valid_fraction:
-        return DynamicFilterOutput(keep=False, reason=f"too_few_valid_{len(active)}_of_{group_size}")
-    rewards = [raw_reward_for_filter(args, sample) for sample in active]
-    mean = sum(rewards) / len(rewards)
-    variance = sum((reward - mean) ** 2 for reward in rewards) / max(1, len(rewards) - 1)
-    keep = math.sqrt(variance) > 1e-6
-    return DynamicFilterOutput(
-        keep=keep,
-        reason=None if keep else f"zero_std_{round(rewards[0], 1)}",
-    )

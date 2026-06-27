@@ -1,9 +1,0 @@
-# Agent-env cluster nodes. Order is the topology index contract.
-# 0: default head / train node 0
-# 1: train node 1
-# 2: train node 2
-# 3: train node 3
-fdbd:dc03:9:641::36
-fdbd:dc03:9:647::146
-fdbd:dc03:9:648::198
-fdbd:dc03:9:654::70

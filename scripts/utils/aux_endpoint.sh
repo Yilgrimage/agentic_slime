@@ -12,8 +12,8 @@ ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
 OPS_SCRIPTS_DIR=${OPS_SCRIPTS_DIR:-${ROOT_DIR}/scripts}
 LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
 LOG_DIR=${LOG_DIR:-/tmp/server-ops-runtime/logs}
-SLIME_ENV=${SLIME_ENV:-${LOCAL_ENVS_DIR}/slime}
-SLIME_PYTHON=${SLIME_PYTHON:-${SLIME_ENV}/bin/python}
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/slime_runtime.sh"
 AUX_PYTHON=${AUX_PYTHON:-}
 AUX_SERVE_PYTHON=${AUX_SERVE_PYTHON:-}
 AUX_HELPER_PYTHON=${AUX_HELPER_PYTHON:-}
@@ -123,6 +123,7 @@ for ((i = 1; i <= $#; i++)); do
   fi
 done
 load_config_if_present "${AUX_CONFIG}"
+resolve_slime_runtime
 
 while [ $# -gt 0 ]; do
   case "$1" in

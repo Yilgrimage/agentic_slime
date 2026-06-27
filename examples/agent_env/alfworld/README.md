@@ -22,18 +22,18 @@ Directory layout:
 
 The example config points at this workspace data directory:
 
-`/mnt/bn/jixf-nas-lq/mlf/data/alfworld`
+`${ROOT_DIR}/data/alfworld`
 
 Install ALFWorld in the runtime environment used for rollout workers. For the
 current server smoke tests it was installed into an isolated target directory:
 
 ```bash
-python3 -m pip install --target /tmp/mlf-runtime/alfworld/pythonlibs/alfworld_text alfworld
+python3 -m pip install --target ${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}/data/alfworld/pythonlibs/alfworld_text alfworld
 ```
 
 Full ALFWorld TextWorld reset requires `game.tw-pddl` files under:
 
-`/mnt/bn/jixf-nas-lq/mlf/data/alfworld/json_2.1.1/{train,valid_seen,valid_unseen}`
+`${ROOT_DIR}/data/alfworld/json_2.1.1/{train,valid_seen,valid_unseen}`
 
 The JSON trajectories and tw-pddl files are present on this server. Direct
 GitHub release downloads were unstable during setup; `gh-proxy.com` worked for
@@ -41,11 +41,11 @@ the tw-pddl package:
 
 ```bash
 wget -c --tries=5 --timeout=30 \
-  -O /mnt/bn/jixf-nas-lq/mlf/data/alfworld/json_2.1.2_tw-pddl.zip \
+  -O ${ROOT_DIR}/data/alfworld/json_2.1.2_tw-pddl.zip \
   https://gh-proxy.com/https://github.com/alfworld/alfworld/releases/download/0.4.0/json_2.1.2_tw-pddl.zip
 python -m zipfile -e \
-  /mnt/bn/jixf-nas-lq/mlf/data/alfworld/json_2.1.2_tw-pddl.zip \
-  /mnt/bn/jixf-nas-lq/mlf/data/alfworld
+  ${ROOT_DIR}/data/alfworld/json_2.1.2_tw-pddl.zip \
+  ${ROOT_DIR}/data/alfworld
 ```
 
 Create prompt data. Each row is one ALFWorld task id; slime duplicates each row
@@ -53,12 +53,12 @@ Create prompt data. Each row is one ALFWorld task id; slime duplicates each row
 
 ```bash
 python examples/agent_env/alfworld/prompt_data.py \
-  --output /mnt/bn/jixf-nas-lq/mlf/data/alfworld/train.jsonl \
+  --output ${ROOT_DIR}/data/alfworld/train.jsonl \
   --num-tasks 100 \
   --split train
 
 python examples/agent_env/alfworld/prompt_data.py \
-  --output-dir /mnt/bn/jixf-nas-lq/mlf/data/alfworld \
+  --output-dir ${ROOT_DIR}/data/alfworld \
   --num-tasks 100 \
   --splits train valid_seen valid_unseen
 ```
@@ -136,7 +136,7 @@ worker.
 Add these rollout arguments to a normal slime GRPO script:
 
 ```bash
---prompt-data /mnt/bn/jixf-nas-lq/mlf/data/alfworld/train.jsonl \
+--prompt-data ${ROOT_DIR}/data/alfworld/train.jsonl \
 --input-key prompt \
 --metadata-key metadata \
 --custom-generate-function-path examples.agent_env.alfworld.rollout.generate \
@@ -170,7 +170,7 @@ python -m py_compile \
   examples/agent_env/alfworld/smoke_test.py \
   examples/agent_env/alfworld/real_env_smoke_test.py
 PYTHONPATH=. python examples/agent_env/alfworld/smoke_test.py
-PYTHONPATH=/tmp/mlf-runtime/alfworld/pythonlibs/alfworld_text:. \
+PYTHONPATH=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}/data/alfworld/pythonlibs/alfworld_text:. \
   python examples/agent_env/alfworld/real_env_smoke_test.py
 ```
 

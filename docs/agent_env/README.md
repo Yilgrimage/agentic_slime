@@ -100,9 +100,10 @@ Train profile names should stay model-agnostic:
 - GLM-style padding is for infra-discard recovery: keep enough valid samples
   after removing bad samples, then pad from valid samples. Do not let discarded
   samples enter actor training as real data.
-- Reward source must stay clear. Env score, format reward, truncation penalty,
-  and optional judge reward are combined in reward post-process; group RM should
-  only judge when explicitly enabled.
+- Reward source must stay clear. The selected RM implementation composes env
+  score, format reward, truncation penalty, process reward, and optional judge
+  reward. Reward post-process only adapts the RM output to Slime's reward tensor
+  path.
 - Watchdog and bench are cluster keepalive mechanisms. They should not inspect
   training process state; they protect idle GPUs by utilization only.
 - Checkpointing is intentionally sparse and capped during debugging to avoid
@@ -110,10 +111,12 @@ Train profile names should stay model-agnostic:
 
 ## Operational State
 
-- Current node IPs live in `configs/nodes/agent_env_all.txt`.
+- Current node IPs live in a local ignored node file such as
+  `configs/nodes/agent_env_all.txt`.
 - Topology profiles select node indexes from that file; do not hard-code IPs
   into run/train profiles.
-- Runtime packs and data live on NAS and are materialized to `/tmp/mlf-envs`
-  and `/tmp/mlf-runtime`.
+- Runtime packs and data live on NAS and are materialized to
+  `${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}` and
+  `${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}`.
 - The development branch is `agentic-env-backend`; push local agent-env work to
   `origin`, and keep `upstream` read-only for fetching Slime updates.

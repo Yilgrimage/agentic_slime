@@ -31,6 +31,8 @@ REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../../.." && pwd -P)}
 ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
 LOCAL_RUNTIME_DIR=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
 LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
+# shellcheck disable=SC1091
+source "${REPO_DIR}/scripts/utils/slime_runtime.sh"
 
 resolve_repo_path() {
   local path=$1
@@ -54,21 +56,10 @@ if [ -n "${RESUME_FROM:-}" ] && [ -z "${LOAD_DIR:-}" ]; then
   export LOAD_DIR="${RESUME_FROM}"
 fi
 
-ENV_NAME=${ENV_NAME:?Set ENV_NAME to alfworld, webshop, tau2, or appworld}
+ENV_NAME=${ENV_NAME:?Set ENV_NAME to alfworld, webshop, tau2, appworld, or mcp_server}
 WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${ROOT_DIR}/secrets/wandb.env}
-MEGATRON_PATH=${MEGATRON_PATH:-${ROOT_DIR}/code/Megatron-LM}
-if [ -z "${SLIME_ENV:-}" ]; then
-  if [ -x "${LOCAL_ENVS_DIR}/slime-official/bin/python" ]; then
-    SLIME_ENV="${LOCAL_ENVS_DIR}/slime-official"
-  elif [ -x "${LOCAL_ENVS_DIR}/slime/bin/python" ]; then
-    SLIME_ENV="${LOCAL_ENVS_DIR}/slime"
-  elif [ -x "${ROOT_DIR}/envs/slime-official/bin/python" ]; then
-    SLIME_ENV="${ROOT_DIR}/envs/slime-official"
-  else
-    SLIME_ENV="${ROOT_DIR}/envs/slime"
-  fi
-fi
-SLIME_PYTHON=${SLIME_PYTHON:-${SLIME_ENV}/bin/python}
+resolve_megatron_path
+resolve_slime_runtime
 TRAIN_ENTRYPOINT=${TRAIN_ENTRYPOINT:-examples/agent_env/train_entrypoint.py}
 AGENT_ENV_TRAIN_LOOP=${AGENT_ENV_TRAIN_LOOP:-async}
 
@@ -99,6 +90,12 @@ configure_env_defaults() {
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/appworld/env_config.yaml}}
       export APPWORLD_ROOT=${APPWORLD_ROOT:-${LOCAL_RUNTIME_DIR}/data/appworld}
       export HOME=${APPWORLD_ROOT}
+      ;;
+    mcp_server)
+      export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.mcp_server.rollout.generate}
+      export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/mcp_server/env_config.yaml}}
+      export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/mcp_server/prompt_data.py}
+      export PROMPT_DATA_CONFIG=${PROMPT_DATA_CONFIG:-${CUSTOM_CONFIG_PATH}}
       ;;
     *)
       echo "Unsupported ENV_NAME: ${ENV_NAME}" >&2
@@ -230,7 +227,6 @@ export AGENT_ENV_ROLLOUT_DUMP_DISCARD_N=${AGENT_ENV_ROLLOUT_DUMP_DISCARD_N:-${RO
 export AGENT_ENV_ROLLOUT_DUMP_TRACE=${AGENT_ENV_ROLLOUT_DUMP_TRACE:-${ROLLOUT_CASE_DUMP_TRACE:-both}}
 export CUSTOM_RM_PATH=${CUSTOM_RM_PATH:-examples.agent_env.group_rm.group_reward}
 export GROUP_RM=${GROUP_RM:-1}
-export AGENT_ENV_JUDGE_MODE=${AGENT_ENV_JUDGE_MODE:-none}
 export RM_TYPE=${RM_TYPE:-}
 export RM_URL=${RM_URL:-}
 export REWARD_KEY=${REWARD_KEY:-}
@@ -298,6 +294,10 @@ PROMPT_NUM_TASKS=${PROMPT_NUM_TASKS:-all}
 DATA_PATH=${DATA_PATH:-${DATA_DIR}/train_${PROMPT_NUM_TASKS}.jsonl}
 if [ "${FORCE_PROMPT_DATA:-0}" = "1" ] || [ ! -f "${DATA_PATH}" ]; then
   read -r -a PROMPT_DATA_EXTRA_ARGS_ARRAY <<< "${PROMPT_DATA_EXTRA_ARGS:-}"
+  PROMPT_DATA_CONFIG_ARGS=()
+  if [ -n "${PROMPT_DATA_CONFIG:-}" ]; then
+    PROMPT_DATA_CONFIG_ARGS=(--config "${PROMPT_DATA_CONFIG}")
+  fi
   PROMPT_NUM_TASK_ARGS=()
   if [ "${PROMPT_NUM_TASKS}" != "all" ]; then
     PROMPT_NUM_TASK_ARGS=(--num-tasks "${PROMPT_NUM_TASKS}")
@@ -305,11 +305,20 @@ if [ "${FORCE_PROMPT_DATA:-0}" = "1" ] || [ ! -f "${DATA_PATH}" ]; then
   "${PROMPT_DATA_PYTHON}" "${PROMPT_DATA_SCRIPT}" \
     --output "${DATA_PATH}" \
     --split train \
+    "${PROMPT_DATA_CONFIG_ARGS[@]}" \
     "${PROMPT_NUM_TASK_ARGS[@]}" \
     "${PROMPT_DATA_EXTRA_ARGS_ARRAY[@]}"
 fi
 
-SLIME_CUDA_HOME=${SLIME_CUDA_HOME:-${SLIME_ENV}}
+if [ -z "${SLIME_CUDA_HOME:-}" ]; then
+  if [ -n "${CUDA_HOME:-}" ]; then
+    SLIME_CUDA_HOME="${CUDA_HOME}"
+  elif [ -d /usr/local/cuda ]; then
+    SLIME_CUDA_HOME=/usr/local/cuda
+  else
+    SLIME_CUDA_HOME="${SLIME_ENV}"
+  fi
+fi
 unset PYTHONPATH
 unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER CONDA_SHLVL CONDA_EXE CONDA_PYTHON_EXE _CONDA_EXE _CONDA_ROOT _CE_CONDA _CE_M
 export PYTHONNOUSERSITE=1
@@ -396,6 +405,14 @@ ROLLOUT_ARGS=(
    --loss-mask-type "${LOSS_MASK_TYPE:-qwen3_5}"
    --balance-data
 )
+case "${APPLY_CHAT_TEMPLATE:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    ROLLOUT_ARGS+=(--apply-chat-template)
+    ;;
+esac
+if [ -n "${APPLY_CHAT_TEMPLATE_KWARGS:-}" ]; then
+  ROLLOUT_ARGS+=(--apply-chat-template-kwargs "${APPLY_CHAT_TEMPLATE_KWARGS}")
+fi
 if [ -n "${DYNAMIC_SAMPLING_FILTER_PATH:-}" ]; then
   ROLLOUT_ARGS+=(--dynamic-sampling-filter-path "${DYNAMIC_SAMPLING_FILTER_PATH}")
 fi
@@ -516,6 +533,11 @@ SGLANG_ARGS=(
    --sglang-server-concurrency "${SGLANG_SERVER_CONCURRENCY:-8}"
 )
 
+START_ARGS=()
+if [ -n "${START_ROLLOUT_ID:-}" ]; then
+  START_ARGS+=(--start-rollout-id "${START_ROLLOUT_ID}")
+fi
+
 MISC_ARGS=(
    --agent-env-train-loop "${AGENT_ENV_TRAIN_LOOP}"
    --num-steps "${NUM_STEPS:-100}"
@@ -555,6 +577,7 @@ if [ -z "${TRAIN_ENV_VARS_JSON:-}" ]; then
   TRAIN_ENV_VARS_JSON=$("${SLIME_PYTHON}" - <<PYH
 import json, os
 keys = [
+    "ROOT_DIR", "LOCAL_RUNTIME_DIR", "LOCAL_ENVS_DIR",
     "PYTHONPATH", "PYTHONNOUSERSITE", "CUDA_DEVICE_MAX_CONNECTIONS", "CUDA_HOME",
     "PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH",
     "LD_LIBRARY_PATH", "RAY_ADDRESS",
@@ -564,7 +587,13 @@ keys = [
     "AGENT_ENV_MAX_CHECKPOINTS",
     "AGENT_ENV_ASYNC_MAX_INFLIGHT_GROUPS",
     "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "AGENT_ENV_GLM_PADDING_MAX_SEEN_GROUPS",
-    "AGENT_ENV_JUDGE_MODE",
+    "AGENT_ENV_JUDGE_MODE", "AGENT_ENV_RM_IMPL", "AGENT_ENV_REWARD_IMPL",
+    "VALLEYDANCE_USE_LLM_JUDGE", "VALLEYDANCE_SKILL_WEIGHT", "VALLEYDANCE_TOOL_WEIGHT",
+    "VALLEYDANCE_FORMAT_WEIGHT", "VALLEYDANCE_ERROR_PATTERN_PENALTY",
+    "VALLEYDANCE_ERROR_PATTERNS", "VALLEYDANCE_ERROR_PATTERNS_JSON",
+    "VALLEYDANCE_TURN_EXCESS_PENALTY", "VALLEYDANCE_MAX_TURNS",
+    "AGENT_ENV_ROPD_RUBRIC_CACHE_PATH", "AGENT_ENV_ROPD_ALLOW_ONLINE_RUBRIC",
+    "AGENT_ENV_ROPD_TASK_SUCCESS_WEIGHT",
     "AUX_ENDPOINT_PROVIDER", "AUX_ENDPOINT_MODEL", "AUX_ENDPOINT_BASE_URL", "AUX_ENDPOINT_API_KEY_PATH",
     "AUX_ENDPOINT_TIMEOUT_S", "AUX_ENDPOINT_MAX_TOKENS", "AUX_ENDPOINT_TEMPERATURE", "AUX_ENDPOINT_TOP_P",
     "AUX_ENDPOINT_ENABLE_THINKING", "AUX_ENDPOINT_SEPARATE_REASONING", "AUX_ENDPOINT_REASONING_EFFORT",
@@ -589,5 +618,6 @@ echo "Checkpoint options: save_interval=${SAVE_INTERVAL:-${NUM_STEPS}} no_save_o
    "${DEBUG_ARGS[@]}" \
    "${OPTIMIZER_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
+   "${START_ARGS[@]}" \
    "${WANDB_ARGS[@]}" \
    "${MISC_ARGS[@]}"

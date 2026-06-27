@@ -10,8 +10,10 @@ fi
 REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
 ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
 LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
-MEGATRON_PATH=${MEGATRON_PATH:-${ROOT_DIR}/code/Megatron-LM}
-SLIME_ENV=${SLIME_ENV:-${LOCAL_ENVS_DIR}/slime}
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/slime_runtime.sh"
+resolve_megatron_path
+resolve_slime_runtime
 
 MODEL_BASENAME=${MODEL_BASENAME:-Qwen3.5-9B}
 MODEL_ARGS_SCRIPT=${MODEL_ARGS_SCRIPT:-scripts/models/qwen3.5-9B.sh}

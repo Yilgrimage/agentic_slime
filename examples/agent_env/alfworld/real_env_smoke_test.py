@@ -70,7 +70,8 @@ def _wait_health(base_url: str, proc: subprocess.Popen, timeout_s: float = 120.0
 
 
 def _start_alfworld_server(data_dir: str) -> tuple[subprocess.Popen, str, str]:
-    env_bin = os.environ.get("ALFWORLD_ENV_BIN", "/tmp/mlf-envs/alfworld/bin/python")
+    local_envs_dir = os.environ.get("LOCAL_ENVS_DIR", "/tmp/server-ops-envs")
+    env_bin = os.environ.get("ALFWORLD_ENV_BIN", f"{local_envs_dir}/alfworld/bin/python")
     port = _free_port()
     config = f"""
 alfworld:
@@ -172,7 +173,8 @@ async def run(data_dir: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default="/mnt/bn/jixf-nas-lq/mlf/data/alfworld")
+    root_dir = os.environ.get("ROOT_DIR", os.getcwd())
+    parser.add_argument("--data-dir", default=f"{root_dir}/data/alfworld")
     args = parser.parse_args()
     asyncio.run(run(args.data_dir))
 

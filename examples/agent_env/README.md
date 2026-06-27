@@ -12,9 +12,10 @@ environment folder.
   calls, sample dumping, and common shape handling.
 - `fully_async_rollout.py`: external full-async rollout wrapper with dynamic
   filtering and GLM-style padding support.
-- `reward_post_process.py`: final reward combination and dynamic sampling
-  filter.
-- `group_rm.py`: optional single/group judge hook.
+- `group_rm.py`: single/group RM hook that dispatches to reward
+  implementations.
+- `reward_post_process.py`: adapter from RM-produced rewards to Slime's reward
+  tensor path, including optional grouped normalization.
 - `metrics.py`: generic rollout/eval metric aggregation.
 - `train_entrypoint.py`: registers agent-env CLI args and dispatches to Slime
   sync/full-async train loops.
@@ -35,7 +36,7 @@ semantics. Keep those in `<env>/env_config.yaml` and `<env>/rollout.py`.
 - Runtime env/router URL is passed as the explicit `--env-server-url` argument.
   Do not rely on hidden environment variables for this.
 - Env score, format reward, truncation penalty, and optional judge reward are
-  combined in `reward_post_process.py`.
+  composed by the selected RM implementation, not by rollout post-processing.
 - Infra-discard and padding exist to keep bad samples out of actor training,
   not to make invalid samples real training data.
 
