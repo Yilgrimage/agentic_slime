@@ -58,7 +58,6 @@ fi
 
 ENV_NAME=${ENV_NAME:?Set ENV_NAME to alfworld, webshop, tau2, appworld, or mcp_server}
 WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${ROOT_DIR}/secrets/wandb.env}
-resolve_megatron_path
 resolve_slime_runtime
 TRAIN_ENTRYPOINT=${TRAIN_ENTRYPOINT:-examples/agent_env/train_entrypoint.py}
 AGENT_ENV_TRAIN_LOOP=${AGENT_ENV_TRAIN_LOOP:-async}
@@ -310,15 +309,7 @@ if [ "${FORCE_PROMPT_DATA:-0}" = "1" ] || [ ! -f "${DATA_PATH}" ]; then
     "${PROMPT_DATA_EXTRA_ARGS_ARRAY[@]}"
 fi
 
-if [ -z "${SLIME_CUDA_HOME:-}" ]; then
-  if [ -n "${CUDA_HOME:-}" ]; then
-    SLIME_CUDA_HOME="${CUDA_HOME}"
-  elif [ -d /usr/local/cuda ]; then
-    SLIME_CUDA_HOME=/usr/local/cuda
-  else
-    SLIME_CUDA_HOME="${SLIME_ENV}"
-  fi
-fi
+resolve_slime_cuda_home
 unset PYTHONPATH
 unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER CONDA_SHLVL CONDA_EXE CONDA_PYTHON_EXE _CONDA_EXE _CONDA_ROOT _CE_CONDA _CE_M
 export PYTHONNOUSERSITE=1
@@ -330,8 +321,8 @@ export PATH="${CUDA_HOME}/bin:${SLIME_ENV}/nvvm/bin:${SLIME_ENV}/bin:/usr/local/
 export CPATH="${CUDA_HOME}/include:${SLIME_ENV}/include:${CPATH:-}"
 export C_INCLUDE_PATH="${CUDA_HOME}/include:${SLIME_ENV}/include:${C_INCLUDE_PATH:-}"
 export CPLUS_INCLUDE_PATH="${CUDA_HOME}/include:${SLIME_ENV}/include:${CPLUS_INCLUDE_PATH:-}"
-export LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${SLIME_ENV}/lib:${LIBRARY_PATH:-}"
-export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${SLIME_ENV}/lib:${SLIME_ENV}/lib64:${LD_LIBRARY_PATH:-}"
+export LIBRARY_PATH="$(build_slime_library_path "${LIBRARY_PATH:-}")"
+export LD_LIBRARY_PATH="$(build_slime_library_path "${LD_LIBRARY_PATH:-}")"
 
 cd "${REPO_DIR}"
 source "${MODEL_ARGS_SCRIPT}"
@@ -354,6 +345,21 @@ CKPT_ARGS=(
 case "${NO_SAVE_OPTIM:-0}" in
   1|true|TRUE|yes|YES|on|ON)
     CKPT_ARGS+=(--no-save-optim)
+    ;;
+esac
+case "${NO_LOAD_OPTIM:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    CKPT_ARGS+=(--no-load-optim)
+    ;;
+esac
+case "${NO_LOAD_RNG:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    CKPT_ARGS+=(--no-load-rng)
+    ;;
+esac
+case "${FINETUNE:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    CKPT_ARGS+=(--finetune)
     ;;
 esac
 case "${ASYNC_SAVE:-0}" in
@@ -606,7 +612,7 @@ PYH
 fi
 
 echo "Launching ${ENV_NAME} GRPO with ${TRAIN_ENTRYPOINT}"
-echo "Checkpoint options: save_interval=${SAVE_INTERVAL:-${NUM_STEPS}} no_save_optim=${NO_SAVE_OPTIM:-0} async_save=${ASYNC_SAVE:-0}"
+echo "Checkpoint options: save_interval=${SAVE_INTERVAL:-${NUM_STEPS}} no_save_optim=${NO_SAVE_OPTIM:-0} no_load_optim=${NO_LOAD_OPTIM:-0} async_save=${ASYNC_SAVE:-0}"
 "${SLIME_PYTHON}" "${REPO_DIR}/${TRAIN_ENTRYPOINT}" \
    "${CKPT_ARGS[@]}" \
    "${MODEL_ARGS[@]}" \

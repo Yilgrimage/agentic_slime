@@ -12,7 +12,6 @@ ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
 LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/slime_runtime.sh"
-resolve_megatron_path
 resolve_slime_runtime
 
 MODEL_BASENAME=${MODEL_BASENAME:-Qwen3.5-9B}
@@ -65,8 +64,9 @@ unset PYTHONPATH
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="${MEGATRON_PATH}:${REPO_DIR}:${SLIME_ENV}/lib/python3.12/site-packages"
 export PATH="${SLIME_ENV}/bin:${PATH}"
-export CUDA_HOME="${CUDA_HOME:-${SLIME_ENV}}"
-export LD_LIBRARY_PATH="${CUDA_HOME}/lib:${CUDA_HOME}/lib64:${SLIME_ENV}/lib:${SLIME_ENV}/lib64:${LD_LIBRARY_PATH:-}"
+resolve_slime_cuda_home
+export CUDA_HOME="${SLIME_CUDA_HOME}"
+export LD_LIBRARY_PATH="$(build_slime_library_path "${LD_LIBRARY_PATH:-}")"
 export no_proxy="localhost,127.0.0.1,0.0.0.0,::1,${no_proxy:-}"
 export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,${NO_PROXY:-}"
 
