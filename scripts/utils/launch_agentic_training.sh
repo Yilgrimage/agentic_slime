@@ -479,19 +479,22 @@ set +e
 for session in agent_env_ray_head agent_env_ray_worker agent_env_${ENV_NAME}_env agent_env_${ENV_NAME}_router agent_env_${ENV_NAME}_train agent_env_multi_head agent_env_multi_worker; do
   tmux kill-session -t "\${session}" 2>/dev/null || true
 done
+tmux ls 2>/dev/null | awk -F: '/^agent_env_.*_(env|router|train):/ {print \$1}' | while read -r session; do
+  tmux kill-session -t "\${session}" 2>/dev/null || true
+done
 if [ -x "${ray_stop_python}" ]; then
   "${ray_stop_python}" -m ray.scripts.scripts stop --force >/tmp/server_ops_ray_stop.log 2>&1 || true
 elif command -v ray >/dev/null 2>&1; then
   ray stop --force >/tmp/server_ops_ray_stop.log 2>&1 || true
 fi
+pkill -f '[e]xamples/agent_env/.*/server.py' 2>/dev/null || true
+pkill -f '[e]xamples/agent_env/router.py' 2>/dev/null || true
 if [ "${RESET_TRAIN_RUNTIME_ON_START}" = "force" ]; then
 pkill -f '[s]glang.launch_server' 2>/dev/null || true
 pkill -f '[s]lime/ray/train' 2>/dev/null || true
 pkill -f '[t]rain_async.py' 2>/dev/null || true
 pkill -f '[t]rain_async_compat.py' 2>/dev/null || true
 pkill -f '[r]un_agent_env_train.sh' 2>/dev/null || true
-pkill -f '[e]xamples/agent_env/.*/server.py' 2>/dev/null || true
-pkill -f '[e]xamples/agent_env/router.py' 2>/dev/null || true
 pkill -f '[r]aylet|[g]cs_server|[p]lasma_store|[d]ashboard_agent|[d]ashboard.py' 2>/dev/null || true
 fi
 EOF
