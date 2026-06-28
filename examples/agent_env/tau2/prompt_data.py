@@ -211,6 +211,7 @@ def build_areal_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
         raise ValueError("--areal-root is required when --source areal_synthetic")
     rng = random.Random(args.seed)
     areal_root = Path(args.areal_root).expanduser().resolve()
+    task_ref_root = str(args.task_ref_root or areal_root)
     input_path = Path(args.areal_input).expanduser()
     if not input_path.is_absolute():
         input_path = areal_root / input_path
@@ -234,7 +235,7 @@ def build_areal_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
         if normalized_db_path:
             task_payload["db_path"] = normalized_db_path
         task_payload["_data_source"] = "areal_synthetic"
-        task_payload["_data_root"] = str(areal_root)
+        task_payload["_data_root"] = task_ref_root
         task_path.write_text(json.dumps(task_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         rel_task_path = task_path.relative_to(areal_root)
@@ -252,7 +253,7 @@ def build_areal_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
                 "task_ref": {
                     "type": "file",
                     "source": "areal_synthetic",
-                    "root": str(areal_root),
+                    "root": task_ref_root,
                     "path": str(rel_task_path),
                 },
             },
@@ -280,14 +281,29 @@ def build_areal_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
     return rows
 
 
+def _default_tau2_data_dir() -> str:
+    agent_data_dir = os.environ.get("AGENT_ENV_DATA_DIR")
+    if agent_data_dir:
+        return str(Path(agent_data_dir).expanduser() / "data")
+    return os.environ.get("TAU2_DATA_DIR", "")
+
+
+def _default_areal_root() -> str:
+    agent_data_dir = os.environ.get("AGENT_ENV_DATA_DIR")
+    if agent_data_dir:
+        return str(Path(agent_data_dir).expanduser() / "areal_synthetic")
+    return os.environ.get("TAU2_AREAL_ROOT", "")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create tau2 prompt-data JSONL with deterministic domain mixing.")
     parser.add_argument("--source", choices=("official", "areal_synthetic"), default=os.environ.get("TAU2_DATA_SOURCE", "official"))
     parser.add_argument("--output", required=True, help="Output JSONL path.")
-    parser.add_argument("--data-dir", default=os.environ.get("TAU2_DATA_DIR", ""), help="tau2 data root.")
-    parser.add_argument("--areal-root", default=os.environ.get("TAU2_AREAL_ROOT", ""), help="AReaL tau2 data root for --source areal_synthetic.")
+    parser.add_argument("--data-dir", default=_default_tau2_data_dir(), help="tau2 official data root.")
+    parser.add_argument("--areal-root", default=_default_areal_root(), help="AReaL tau2 data root for --source areal_synthetic.")
     parser.add_argument("--areal-input", default=os.environ.get("TAU2_AREAL_INPUT", "tau2_rl_train.jsonl"), help="AReaL RL JSONL relative to --areal-root.")
     parser.add_argument("--task-file-dir", default=os.environ.get("TAU2_TASK_FILE_DIR", ""), help="Directory for normalized AReaL task files.")
+    parser.add_argument("--task-ref-root", default="", help="Portable root written into AReaL task_ref metadata and normalized task files.")
     parser.add_argument("--domains", default=os.environ.get("TAU2_DOMAINS", "retail"), help="Comma-separated domains, e.g. retail,airline.")
     parser.add_argument("--task-sets", default=os.environ.get("TAU2_TASK_SETS", ""), help="Optional mapping: domain=task_set,domain=task_set.")
     parser.add_argument("--domain-weights", default=os.environ.get("TAU2_DOMAIN_WEIGHTS", ""), help="Optional sampling weights: retail=2,airline=1.")

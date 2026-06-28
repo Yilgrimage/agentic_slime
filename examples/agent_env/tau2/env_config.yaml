@@ -32,8 +32,8 @@ env_server:
   worker_request_timeout_s: 300
 agent_prompt_data:
   source: areal_synthetic
-  data_dir: ${TAU2_DATA_DIR}
-  areal_root: ${TAU2_AREAL_ROOT}
+  data_dir: ${AGENT_ENV_DATA_DIR}/data
+  areal_root: ${AGENT_ENV_DATA_DIR}/areal_synthetic
   areal_input: tau2_rl_train.jsonl
   task_file_dir: ''
   domains:
@@ -45,9 +45,9 @@ agent_prompt_data:
   split: train
   num_tasks: all
   seed: 42
-  output_dir: ${TAU2_PROMPT_OUTPUT_DIR}
+  output_dir: ${AGENT_ENV_DATA_DIR}/areal_synthetic_prompt
 tau2:
-  data_dir: ${TAU2_DATA_DIR}
+  data_dir: ${AGENT_ENV_DATA_DIR}/data
   domain: retail
   task_set: retail
   split: null

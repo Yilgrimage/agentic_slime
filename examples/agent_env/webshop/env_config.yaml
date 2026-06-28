@@ -28,9 +28,9 @@ reward:
 webshop:
   env_id: WebAgentTextEnv-v0
   observation_mode: text
-  data_dir: ${WEBSHOP_DATA}
-  product_file: ${WEBSHOP_DATA}/data/items_shuffle.json
-  attr_file: ${WEBSHOP_DATA}/data/items_ins_v2.json
+  data_dir: ${AGENT_ENV_DATA_DIR}
+  product_file: ${AGENT_ENV_DATA_DIR}/data/items_shuffle.json
+  attr_file: ${AGENT_ENV_DATA_DIR}/data/items_ins_v2.json
   num_products: 100000
   human_goals: true
 

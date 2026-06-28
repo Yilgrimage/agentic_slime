@@ -72,6 +72,13 @@ def _env_value(value: Any, *envvars: str, default: str = "") -> str:
     return default
 
 
+def _default_tau2_data_dir() -> str:
+    agent_data_dir = os.environ.get("AGENT_ENV_DATA_DIR")
+    if agent_data_dir:
+        return str(Path(agent_data_dir).expanduser() / "data")
+    return os.environ.get("TAU2_DATA_DIR", "")
+
+
 def _csv_values(value: Any) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
@@ -88,7 +95,7 @@ def _worker_route_seed(worker_id: str) -> int:
 
 
 def _environment_config(raw: dict) -> dict:
-    data_dir = _env_path(_deep_get(raw, "tau2", "data_dir", os.environ.get("TAU2_DATA_DIR", "")), "TAU2_DATA_DIR")
+    data_dir = _env_path(_deep_get(raw, "tau2", "data_dir", _default_tau2_data_dir()), "TAU2_DATA_DIR")
     return {
         "data_dir": data_dir,
         "domain": str(_deep_get(raw, "tau2", "domain", "retail")),
@@ -437,9 +444,9 @@ class Tau2Backend:
         return build_environment(domain, solo_mode=bool(self.config.get("solo_mode", False)))
 
     def _resolve_task_ref_path(self, task_ref: dict[str, Any]) -> Path:
-        path = Path(str(task_ref.get("path") or "")).expanduser()
+        path = Path(os.path.expandvars(str(task_ref.get("path") or ""))).expanduser()
         if not path.is_absolute():
-            root = Path(str(task_ref.get("root") or self.config.get("data_dir") or ".")).expanduser()
+            root = Path(os.path.expandvars(str(task_ref.get("root") or self.config.get("data_dir") or "."))).expanduser()
             path = root / path
         return path
 
@@ -461,9 +468,9 @@ class Tau2Backend:
     def _load_db(self, domain: str, db_path: str | None, base_dir: str | None = None) -> Any | None:
         if not db_path:
             return None
-        path = Path(db_path).expanduser()
+        path = Path(os.path.expandvars(str(db_path))).expanduser()
         if not path.is_absolute():
-            path = Path(str(base_dir or self.config.get("data_dir") or ".")).expanduser() / path
+            path = Path(os.path.expandvars(str(base_dir or self.config.get("data_dir") or "."))).expanduser() / path
         if domain == "retail":
             from tau2.domains.retail.data_model import RetailDB
 

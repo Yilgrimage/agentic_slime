@@ -117,7 +117,9 @@ def _server_config(raw: dict) -> dict:
 
 def _default_alfworld_config(raw: dict) -> dict:
     alfworld = raw.get("alfworld") if isinstance(raw.get("alfworld"), dict) else {}
-    data_dir = os.path.expandvars(str(alfworld.get("data_dir") or "$ALFWORLD_DATA")).rstrip("/")
+    data_dir = os.path.expandvars(
+        str(alfworld.get("data_dir") or os.environ.get("AGENT_ENV_DATA_DIR") or os.environ.get("ALFWORLD_DATA", ""))
+    ).rstrip("/")
     max_steps = int(raw.get("max_turns", alfworld.get("max_turns", 50)))
     return {
         "dataset": {

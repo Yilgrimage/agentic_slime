@@ -29,7 +29,7 @@ reward:
 
 alfworld:
   config_path: null
-  data_dir: ${ALFWORLD_DATA}
+  data_dir: ${AGENT_ENV_DATA_DIR}
   training_method: dqn
   num_train_games: -1
   num_eval_games: -1

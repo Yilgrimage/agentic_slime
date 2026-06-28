@@ -119,7 +119,8 @@ def _server_config(raw: dict) -> dict:
 
 
 def _environment_config(raw: dict) -> dict:
-    data_dir = os.path.expandvars(str(_deep_get(raw, "webshop", "data_dir", os.environ.get("WEBSHOP_DATA", ""))))
+    default_data_dir = os.environ.get("AGENT_ENV_DATA_DIR") or os.environ.get("WEBSHOP_DATA", "")
+    data_dir = os.path.expandvars(str(_deep_get(raw, "webshop", "data_dir", default_data_dir)))
     product_file = _deep_get(raw, "webshop", "product_file", None)
     attr_file = _deep_get(raw, "webshop", "attr_file", None)
     num_products = _deep_get(raw, "webshop", "num_products", None)

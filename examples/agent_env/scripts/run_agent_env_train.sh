@@ -66,6 +66,7 @@ TRAIN_ENTRYPOINT=${TRAIN_ENTRYPOINT:-examples/agent_env/train_entrypoint.py}
 AGENT_ENV_TRAIN_LOOP=${AGENT_ENV_TRAIN_LOOP:-async}
 
 configure_env_defaults() {
+  export AGENT_ENV_DATA_DIR=${AGENT_ENV_DATA_DIR:-${LOCAL_RUNTIME_DIR}/data/${ENV_NAME}}
   case "${ENV_NAME}" in
     alfworld)
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.alfworld.rollout.generate}
@@ -83,9 +84,6 @@ configure_env_defaults() {
       export LITELLM_LOCAL_MODEL_COST_MAP=${LITELLM_LOCAL_MODEL_COST_MAP:-True}
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.tau2.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/tau2/env_config.yaml}}
-      export TAU2_DATA_DIR=${TAU2_DATA_DIR:-${LOCAL_RUNTIME_DIR}/data/tau2/data}
-      export TAU2_AREAL_ROOT=${TAU2_AREAL_ROOT:-${LOCAL_RUNTIME_DIR}/data/tau2/areal_synthetic}
-      export TAU2_PROMPT_OUTPUT_DIR=${TAU2_PROMPT_OUTPUT_DIR:-${LOCAL_RUNTIME_DIR}/data/tau2/areal_synthetic_prompt}
       export PROMPT_DATA_PYTHON=${PROMPT_DATA_PYTHON:-${TAU2_ENV:-${LOCAL_ENVS_DIR}/tau2}/bin/python}
       export PROMPT_USE_SERVER_NUM_TASKS=${PROMPT_USE_SERVER_NUM_TASKS:-0}
       configure_tau2_prompt_data
@@ -121,6 +119,7 @@ config_path = Path(os.environ["CUSTOM_CONFIG_PATH"])
 cfg = yaml.safe_load(config_path.read_text()) if config_path.exists() else {}
 prompt = (cfg or {}).get("agent_prompt_data") or {}
 local_root = os.environ.get("LOCAL_RUNTIME_DIR", "/tmp/server-ops-runtime")
+agent_env_data_dir = os.environ.get("AGENT_ENV_DATA_DIR") or f"{local_root}/data/{os.environ.get('ENV_NAME', 'tau2')}"
 repo_dir = os.environ["REPO_DIR"]
 
 def expand(value):
@@ -140,7 +139,7 @@ def emit(name, value):
     print(f"export {name}={shlex.quote(value)}")
 
 source = prompt.get("source") or "official"
-data_dir = expand(prompt.get("data_dir") or f"{local_root}/data/tau2/data")
+data_dir = expand(prompt.get("data_dir") or f"{agent_env_data_dir}/data")
 domains = prompt.get("domains") or ["retail"]
 if isinstance(domains, str):
     domains_csv = domains
@@ -150,7 +149,7 @@ num_tasks = prompt.get("num_tasks", "all")
 if num_tasks is None:
     num_tasks = "all"
 seed = prompt.get("seed", os.environ.get("SEED", "42"))
-output_dir = expand(prompt.get("output_dir") or f"{local_root}/data/tau2/{source}_prompt")
+output_dir = expand(prompt.get("output_dir") or f"{agent_env_data_dir}/{source}_prompt")
 
 args = [
     "--source", source,
@@ -160,7 +159,7 @@ args = [
     "--seed", str(seed),
 ]
 if source == "areal_synthetic":
-    args.extend(["--areal-root", expand(prompt.get("areal_root") or f"{local_root}/data/tau2/areal_synthetic")])
+    args.extend(["--areal-root", expand(prompt.get("areal_root") or f"{agent_env_data_dir}/areal_synthetic")])
     if prompt.get("areal_input"):
         args.extend(["--areal-input", expand(prompt["areal_input"])])
     if prompt.get("task_file_dir"):
@@ -171,7 +170,6 @@ if prompt.get("task_sets"):
     args.extend(["--task-sets", str(prompt["task_sets"])])
 
 emit("TAU2_DATA_SOURCE", source)
-emit("TAU2_DATA_DIR", data_dir)
 emit("PROMPT_DATA_SCRIPT", expand(prompt.get("script") or f"{repo_dir}/examples/agent_env/tau2/prompt_data.py"))
 emit("PROMPT_DATA_PYTHON", expand(prompt.get("python") or os.environ.get("PROMPT_DATA_PYTHON")))
 emit("PROMPT_NUM_TASKS", num_tasks)
@@ -599,7 +597,7 @@ keys = [
     "PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "LIBRARY_PATH",
     "LD_LIBRARY_PATH", "RAY_ADDRESS",
     "SOCKET_IFNAME", "NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME", "TP_SOCKET_IFNAME",
-    "TAU2_DATA_DIR", "TAU2_AREAL_ROOT", "TAU2_PROMPT_OUTPUT_DIR", "APPWORLD_ROOT", "RUN_ROOT", "LOG_DIR", "WANDB_DIR",
+    "AGENT_ENV_DATA_DIR", "APPWORLD_ROOT", "RUN_ROOT", "LOG_DIR", "WANDB_DIR",
     "WANDB_RUNTIME", "WANDB_RUNTIME_RESOLVED", "WANDB_ENV", "WANDB_PYTHON", "WANDB_PYTHONPATH",
     "AGENT_ENV_ROLLOUT_DUMP_N", "AGENT_ENV_ROLLOUT_DUMP_DISCARD_N",
     "AGENT_ENV_ROLLOUT_DUMP_TRACE",

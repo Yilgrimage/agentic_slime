@@ -6,11 +6,15 @@ from examples.agent_env.tau2.server import Tau2Backend
 
 
 def main() -> None:
+    agent_data_dir = os.environ.get("AGENT_ENV_DATA_DIR")
+    data_dir = os.environ.get("TAU2_DATA_DIR", "")
+    if agent_data_dir and not data_dir:
+        data_dir = os.path.join(agent_data_dir, "data")
     backend = Tau2Backend(
         "smoke",
         "train",
         {
-            "data_dir": os.environ.get("TAU2_DATA_DIR", ""),
+            "data_dir": data_dir,
             "domain": os.environ.get("TAU2_DOMAIN", "mock"),
             "task_set": os.environ.get("TAU2_TASK_SET", "mock"),
             "split": None,
