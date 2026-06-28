@@ -187,6 +187,25 @@ def _iter_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _normalize_areal_db_path(db_path: Any, areal_root: Path) -> str | None:
+    text = str(db_path or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        return str(path)
+
+    parts = path.parts
+    if "tau2_rl_database" in parts:
+        idx = parts.index("tau2_rl_database")
+        return str(Path(*parts[idx:]))
+
+    try:
+        return str(path.relative_to(areal_root))
+    except ValueError:
+        return str(path)
+
+
 def build_areal_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
     if not args.areal_root:
         raise ValueError("--areal-root is required when --source areal_synthetic")
@@ -211,6 +230,9 @@ def build_areal_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
         task_path = task_dir / domain / f"{_safe_name(task_id)}.json"
         task_path.parent.mkdir(parents=True, exist_ok=True)
         task_payload = dict(raw)
+        normalized_db_path = _normalize_areal_db_path(task_payload.get("db_path"), areal_root)
+        if normalized_db_path:
+            task_payload["db_path"] = normalized_db_path
         task_payload["_data_source"] = "areal_synthetic"
         task_payload["_data_root"] = str(areal_root)
         task_path.write_text(json.dumps(task_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
