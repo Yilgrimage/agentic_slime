@@ -24,7 +24,7 @@ reward:
   ropd:
     allow_online_rubric: true
     rubric_cache_path: ${RUN_ROOT}/reward_cache/ropd_rubrics.json
-    teacher_file: ${ROOT_DIR}/data/agent_env/ropd_smoke/ipr_norm_brand_teacher.jsonl
+    teacher_file: ${AGENT_ENV_DATA_DIR}/ropd_smoke/ipr_norm_brand_teacher.jsonl
     join_key: task_id
     teacher_answer_keys:
     - teacher_response

@@ -6,6 +6,55 @@ from pathlib import Path
 import yaml
 
 
+def _agent_env_data_dir() -> Path | None:
+    value = os.environ.get("AGENT_ENV_DATA_DIR", "").strip()
+    if value:
+        return Path(os.path.expandvars(value)).expanduser()
+    local_root = os.environ.get("LOCAL_RUNTIME_DIR", "").strip()
+    if local_root:
+        return Path(os.path.expandvars(local_root)).expanduser() / "data" / "mcp_server"
+    return None
+
+
+def _resolve_path(value: str, *, config_dir: Path | None = None) -> Path:
+    path = Path(os.path.expandvars(value)).expanduser()
+    if path.is_absolute():
+        return path
+
+    candidates: list[Path] = []
+    data_dir = _agent_env_data_dir()
+    if data_dir is not None:
+        candidates.append(data_dir / path)
+    if config_dir is not None:
+        candidates.append(config_dir / path)
+    candidates.append(Path.cwd() / path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _load_json_or_jsonl(path: Path) -> list[dict]:
+    if path.suffix.lower() == ".jsonl":
+        rows = []
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    value = json.loads(line, strict=False)
+                    if isinstance(value, dict):
+                        rows.append(value)
+        return rows
+
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict) and isinstance(value.get("tasks"), list):
+        return [item for item in value["tasks"] if isinstance(item, dict)]
+    return []
+
+
 def load_tasks(config_path: Path) -> list[dict]:
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     mcp_cfg = cfg.get("mcp_server") or {}
@@ -14,21 +63,7 @@ def load_tasks(config_path: Path) -> list[dict]:
         raise ValueError("mcp_server.tasks must be a list")
     task_file = str(mcp_cfg.get("task_file") or cfg.get("task_file") or "").strip()
     if task_file:
-        path = Path(os.path.expandvars(task_file)).expanduser()
-        if path.suffix == ".jsonl":
-            with path.open(encoding="utf-8") as f:
-                lines = list(f)
-            for line in lines:
-                if line.strip():
-                    value = json.loads(line, strict=False)
-                    if isinstance(value, dict):
-                        tasks.append(value)
-        else:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(value, list):
-                tasks.extend(item for item in value if isinstance(item, dict))
-            elif isinstance(value, dict) and isinstance(value.get("tasks"), list):
-                tasks.extend(item for item in value["tasks"] if isinstance(item, dict))
+        tasks.extend(_load_json_or_jsonl(_resolve_path(task_file, config_dir=config_path.parent)))
     if not tasks:
         tasks = [{"id": "default", "prompt": "Use MCP tools to solve the task."}]
     return tasks
@@ -91,7 +126,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Create MCP-server prompt data for slime rollouts/eval.")
     parser.add_argument("--output", help="Write one jsonl file for --split.")
     parser.add_argument("--output-dir", help="Write one <split>_<num_tasks>.jsonl file per split.")
-    parser.add_argument("--num-tasks", type=int, required=True)
+    parser.add_argument("--num-tasks", default="all")
     parser.add_argument("--start-task", type=int, default=0)
     parser.add_argument("--split", default="train", help="Split used with --output.")
     parser.add_argument("--splits", nargs="+", default=("train", "eval"), help="Splits used with --output-dir.")
@@ -102,14 +137,19 @@ def main() -> None:
     if bool(args.output) == bool(args.output_dir):
         parser.error("Specify exactly one of --output or --output-dir.")
 
-    tasks = load_tasks(Path(args.config))
+    config_path = _resolve_path(args.config)
+    tasks = load_tasks(config_path)
+    num_tasks = len(tasks) if str(args.num_tasks).strip().lower() == "all" else int(args.num_tasks)
+    if num_tasks <= 0:
+        parser.error("--num-tasks must be a positive integer or all")
+
     if args.output:
-        write_split(Path(args.output), args.split, args.num_tasks, args.prompt, args.start_task, tasks)
+        write_split(Path(args.output), args.split, num_tasks, args.prompt, args.start_task, tasks)
         return
 
     output_dir = Path(args.output_dir)
     for split in args.splits:
-        write_split(output_dir / f"{split}_{args.num_tasks}.jsonl", split, args.num_tasks, args.prompt, args.start_task, tasks)
+        write_split(output_dir / f"{split}_{num_tasks}.jsonl", split, num_tasks, args.prompt, args.start_task, tasks)
 
 
 if __name__ == "__main__":

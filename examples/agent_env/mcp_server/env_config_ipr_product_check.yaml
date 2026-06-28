@@ -40,8 +40,8 @@ env_server:
   worker_request_timeout_s: 300
 mcp_server:
   name: ipr_mcp_server
-  task_file: ${ROOT_DIR}/data/valleydance/ipr_product_check/standardized_data_fix_shuf_tail1800.jsonl
-  policy_file: examples/agent_env/mcp_server/system_prompt_ipr_product_check.md
+  task_file: ${AGENT_ENV_DATA_DIR}/ipr_product_check/standardized_data_fix_shuf_tail1800.jsonl
+  policy_file: system_prompt_ipr_product_check.md
   server:
     transport: psm
     psm: bytedance.mcp.machine_ipr

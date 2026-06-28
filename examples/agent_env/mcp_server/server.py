@@ -64,6 +64,35 @@ def _expand_text(value: Any) -> str:
     return os.path.expandvars(str(value or "")).strip()
 
 
+def _agent_env_data_dir() -> Path | None:
+    value = os.environ.get("AGENT_ENV_DATA_DIR", "").strip()
+    if value:
+        return Path(os.path.expandvars(value)).expanduser()
+    local_root = os.environ.get("LOCAL_RUNTIME_DIR", "").strip()
+    if local_root:
+        return Path(os.path.expandvars(local_root)).expanduser() / "data" / "mcp_server"
+    return None
+
+
+def _resolve_runtime_path(value: Any, config_dir: Path | None = None) -> Path:
+    path = Path(_expand_text(value)).expanduser()
+    if path.is_absolute():
+        return path
+
+    candidates: list[Path] = []
+    data_dir = _agent_env_data_dir()
+    if data_dir is not None:
+        candidates.append(data_dir / path)
+    if config_dir is not None:
+        candidates.append(config_dir / path)
+    candidates.append(Path.cwd() / path)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 def _load_json_or_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(path)
@@ -101,24 +130,27 @@ def _load_mcp_server_config(path: Path, server_name: str = "") -> dict[str, Any]
     return loaded
 
 
-def _resolve_server_config(cfg: dict[str, Any]) -> dict[str, Any]:
+def _resolve_server_config(cfg: dict[str, Any], config_dir: Path | None = None) -> dict[str, Any]:
     server = dict(cfg.get("server") or {})
     config_path = _expand_text(server.pop("config_path", "") or cfg.get("mcp_servers_config_path", ""))
     if config_path:
-        loaded = _load_mcp_server_config(Path(config_path).expanduser(), str(server.pop("server_name", "") or cfg.get("server_name", "")))
+        loaded = _load_mcp_server_config(
+            _resolve_runtime_path(config_path, config_dir),
+            str(server.pop("server_name", "") or cfg.get("server_name", "")),
+        )
         loaded.update({key: value for key, value in server.items() if value is not None})
         server = loaded
     return server
 
 
-def _environment_config(raw: dict) -> dict:
+def _environment_config(raw: dict, config_dir: Path | None = None) -> dict:
     cfg = dict(raw.get("mcp_server") or {})
     tasks = cfg.get("tasks") or raw.get("tasks") or []
     if not isinstance(tasks, list):
         raise ValueError("mcp_server.tasks must be a list")
     task_file = _expand_text(cfg.get("task_file") or raw.get("task_file"))
     if task_file:
-        loaded = _load_json_or_jsonl(Path(task_file).expanduser())
+        loaded = _load_json_or_jsonl(_resolve_runtime_path(task_file, config_dir))
         tasks = [*tasks, *loaded]
     if not tasks:
         tasks = [
@@ -127,13 +159,13 @@ def _environment_config(raw: dict) -> dict:
                 "prompt": "Use available MCP tools to solve the task, then call finish.",
             }
         ]
-    server = _resolve_server_config(cfg)
+    server = _resolve_server_config(cfg, config_dir)
     if not server:
         raise ValueError("mcp_server.server is required")
     policy = str(cfg.get("policy") or "")
     policy_file = _expand_text(cfg.get("policy_file") or "")
     if policy_file:
-        policy = Path(policy_file).expanduser().read_text(encoding="utf-8")
+        policy = _resolve_runtime_path(policy_file, config_dir).read_text(encoding="utf-8")
     terminal_tools = cfg["terminal_tools"] if "terminal_tools" in cfg else ["finish", "submit", "final_answer"]
     return {
         "name": str(cfg.get("name") or "mcp_server"),
@@ -151,9 +183,10 @@ def _environment_config(raw: dict) -> dict:
 
 
 def _load_config(path: str) -> tuple[dict, dict]:
-    with Path(path).expanduser().open(encoding="utf-8") as f:
+    config_path = Path(path).expanduser()
+    with config_path.open(encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
-    return _environment_config(raw), _server_config(raw)
+    return _environment_config(raw, config_path.parent), _server_config(raw)
 
 
 def _json_text(value: Any) -> str:

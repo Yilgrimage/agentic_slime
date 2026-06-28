@@ -20,6 +20,9 @@ For `mcp_server`, each task family should use its own env config, for example
 `examples/agent_env/mcp_server/env_config_ipr_product_check.yaml`. The run
 profile selects that file through `ENV_CONFIG`; train and launch profiles must
 not hard-code IPR, search, or other task-family semantics.
+Task files, teacher files, and other portable MCP data should live under
+`${AGENT_ENV_DATA_DIR}` so materialized nodes do not read task data from shared
+storage during training.
 Reward implementation and task-specific reward data also belong under the
 selected env config's `reward:` section. Use `reward.impl` and
 `reward.judge_mode` for the active RM path, and keep ROPD teacher/rubric files
