@@ -575,7 +575,6 @@ server_runtime_exports() {
     tau2)
       quote_export TAU2_DATA_DIR "${TAU2_DATA_DIR:-${LOCAL_RUNTIME_DIR}/data/tau2/data}"
       quote_export TAU2_AREAL_ROOT "${TAU2_AREAL_ROOT:-${LOCAL_RUNTIME_DIR}/data/tau2/areal_synthetic}"
-      quote_export TAU2_PROMPT_OUTPUT_DIR "${TAU2_PROMPT_OUTPUT_DIR:-${LOCAL_RUNTIME_DIR}/data/tau2/areal_synthetic_prompt}"
       ;;
     mcp_server)
       local mcp_env=${MCP_SERVER_ENV:-${LOCAL_ENVS_DIR}/mcp_server}
