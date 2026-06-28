@@ -44,6 +44,19 @@ Create `configs/nodes/agent_env_all.txt` locally from
 `configs/nodes/agent_env_all.txt.example`. The real node file is intentionally
 git-ignored because it contains cluster-specific IPs or hostnames.
 
+Task data is not bundled into env packs. `prepare_node_runtime.sh --data ...`
+materializes data from `${ROOT_DIR}/data/<name>` or
+`${ROOT_DIR}/packs/<name>-data.tar.gz`; supported datasets can be fetched with
+`--auto-download-data`, and new clusters should use `--validate-data-load` once
+to run heavier env load smoke checks.
+
+Multi-node distributed training must use a routable socket interface. The
+launcher resolves `SOCKET_IFNAME=${MLP_SOCKET_IFNAME:-eth0}` unless overridden,
+then propagates `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, and
+`TP_SOCKET_IFNAME` through the run-local resolved env and Ray actor runtime env.
+Override `SOCKET_IFNAME` or the specific backend variables for clusters whose
+business network is not `eth0`.
+
 ## Keepalive
 
 GPU keepalive is intentionally outside this repo and should be called through

@@ -118,5 +118,14 @@ Train profile names should stay model-agnostic:
 - Runtime packs and data live on NAS and are materialized to
   `${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}` and
   `${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}`.
+- Task data is validated during materialization. For new clusters, use
+  `${ROOT_DIR}/scripts/prepare_node_runtime.sh --data ... --auto-download-data
+  --validate-data-load` when supported, then keep subsequent launches on the
+  validated local/NAS data source.
+- Multi-node NCCL/Gloo/TP traffic uses the launch-resolved socket interface.
+  Set `SOCKET_IFNAME` or backend-specific `NCCL_SOCKET_IFNAME`,
+  `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME` when the routable interface is not
+  `${MLP_SOCKET_IFNAME:-eth0}`; the launcher propagates these into Ray training
+  actors through `TRAIN_ENV_VARS_JSON`.
 - The development branch is `agentic-env-backend`; push local agent-env work to
   `origin`, and keep `upstream` read-only for fetching Slime updates.
