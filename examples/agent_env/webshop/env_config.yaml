@@ -1,6 +1,6 @@
 task:
   split: train
-max_turns: 15
+max_turns: 20
 
 timeouts:
   policy_s: 120
@@ -35,7 +35,7 @@ webshop:
   human_goals: true
 
 env_server:
-  pool_size: 32
+  pool_size: 48
   acquire_timeout_s: 600
   lease_ttl_s: 1800
   idempotency_ttl_s: 300
