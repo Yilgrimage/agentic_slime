@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
+from slime.rollout.filter_hub.base_types import DynamicFilterOutput
 from slime.utils.types import Sample
 
 from examples.agent_env.rollout import arg, metadata
@@ -13,6 +15,18 @@ def _float_value(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _runtime_env(args: Any, name: str, default: str = "") -> str:
+    value = os.environ.get(name)
+    if value:
+        return value
+    train_env_vars = getattr(args, "train_env_vars", None) or {}
+    if isinstance(train_env_vars, dict):
+        value = train_env_vars.get(name)
+        if value:
+            return str(value)
+    return default
 
 
 def _reward_value(args: Any, sample: Sample) -> float:
@@ -36,6 +50,39 @@ def _reward_value(args: Any, sample: Sample) -> float:
         if key in sample_metadata:
             return _float_value(sample_metadata.get(key))
     return 0.0
+
+
+def _is_hard_discard_sample(sample: Sample) -> bool:
+    sample_metadata = metadata(sample)
+    if sample.status == Sample.Status.ABORTED:
+        return True
+    if bool(getattr(sample, "remove_sample", False)) or bool(sample_metadata.get("discard_sample", False)):
+        return True
+    if sample.loss_mask is not None and sum(int(value) for value in sample.loss_mask) <= 0:
+        return True
+    return False
+
+
+def check_reward_nonzero_std(args: Any, samples: list[Sample], **_: Any) -> DynamicFilterOutput:
+    """Drop groups that cannot produce useful GRPO signal or safe GLM padding."""
+
+    active = [sample for sample in samples if not _is_hard_discard_sample(sample)]
+    if not active:
+        return DynamicFilterOutput(keep=False, reason="no_active_samples")
+
+    group_size = int(arg(args, "n_samples_per_prompt", len(samples)) or len(samples))
+    min_valid_fraction = _float_value(_runtime_env(args, "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "0.5"), 0.5)
+    if len(active) <= group_size * min_valid_fraction:
+        return DynamicFilterOutput(keep=False, reason=f"too_few_active_samples_{len(active)}")
+
+    rewards = [_reward_value(args, sample) for sample in active]
+    mean = sum(rewards) / len(rewards)
+    variance = sum((reward - mean) ** 2 for reward in rewards) / max(1, len(rewards) - 1)
+    keep = math.sqrt(variance) > 1e-6
+    return DynamicFilterOutput(
+        keep=keep,
+        reason=None if keep else f"zero_std_{round(rewards[0], 1)}",
+    )
 
 
 def post_process_rewards(args: Any, samples: list[Sample]) -> tuple[list[float], list[float]]:

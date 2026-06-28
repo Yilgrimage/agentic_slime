@@ -1595,6 +1595,7 @@ async def _generate_rollout_fully_async_glm_padding(args: Any, rollout_id: int, 
     )
 
     collected: dict[int, list[Sample]] = {}
+    all_groups: list[list[Sample]] = []
     metrics: dict[str, float] = {}
     padding_offset = 0
     max_seen_groups = int(
