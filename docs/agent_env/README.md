@@ -118,10 +118,14 @@ Train profile names should stay model-agnostic:
 - Runtime packs and data live on NAS and are materialized to
   `${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}` and
   `${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}`.
-- Task data is validated during materialization. For new clusters, use
-  `${ROOT_DIR}/scripts/prepare_node_runtime.sh --data ... --auto-download-data
-  --validate-data-load` when supported, then keep subsequent launches on the
-  validated local/NAS data source.
+- Task data is prepared on shared storage before node materialization:
+  `${ROOT_DIR}/scripts/prepare_data.sh --data ...` constructs
+  `${ROOT_DIR}/data/<env>`, `${ROOT_DIR}/scripts/pack_data.sh --data ...`
+  archives it, and `${ROOT_DIR}/scripts/prepare_node_runtime.sh --data ...
+  --validate-data-load` only unpacks or copies already prepared data.
+- W&B should be provided by a compatible `wandb` env pack when the base image's
+  SDK differs from Slime's expectations. The train adapter falls back to the
+  Slime runtime and then to a version-compatible local Python.
 - Multi-node NCCL/Gloo/TP traffic uses the launch-resolved socket interface.
   Set `SOCKET_IFNAME` or backend-specific `NCCL_SOCKET_IFNAME`,
   `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME` when the routable interface is not

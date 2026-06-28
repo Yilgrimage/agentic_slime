@@ -21,17 +21,24 @@ scripts, not in this repo.
   adapter.
 - `aux_endpoint.sh`: optional OpenAI-compatible aux inference server manager.
 - `build_*.sh`, `pack_*.sh`, `publish_*.sh`: build and publish reusable packs.
-- Runtime materialization: use `${ROOT_DIR}/scripts/prepare_node_runtime.sh`.
+- Data preparation: use `${ROOT_DIR}/scripts/prepare_data.sh`.
 - Data packing: use `${ROOT_DIR}/scripts/pack_data.sh`.
+- Runtime materialization: use `${ROOT_DIR}/scripts/prepare_node_runtime.sh`.
 
 Example:
 
 ```bash
+${ROOT_DIR}/scripts/prepare_data.sh \
+  --data alfworld,webshop,tau2
+
+${ROOT_DIR}/scripts/pack_data.sh \
+  --data alfworld,webshop,tau2
+
 ${ROOT_DIR}/scripts/prepare_node_runtime.sh \
   --all-nodes \
   --nodes configs/nodes/agent_env_all.txt \
   --node 0,1,2,3 \
-  --envs slime,alfworld,webshop,tau2 \
+  --envs slime,wandb,alfworld,webshop,tau2 \
   --data alfworld,webshop,tau2 \
   --models none \
   --sources webshop,tau2
@@ -46,9 +53,15 @@ git-ignored because it contains cluster-specific IPs or hostnames.
 
 Task data is not bundled into env packs. `prepare_node_runtime.sh --data ...`
 materializes data from `${ROOT_DIR}/data/<name>` or
-`${ROOT_DIR}/packs/<name>-data.tar.gz`; supported datasets can be fetched with
-`--auto-download-data`, and new clusters should use `--validate-data-load` once
-to run heavier env load smoke checks.
+`${ROOT_DIR}/packs/<name>-data.tar.gz`. It does not download data. Build shared
+data first with `prepare_data.sh`, optionally archive it with `pack_data.sh`,
+then use `--validate-data-load` once on new clusters to run heavier env load
+smoke checks.
+
+When the cluster image ships an incompatible W&B SDK, materialize a separate
+`wandb` env pack. The train adapter resolves W&B in this order:
+`${LOCAL_ENVS_DIR}/wandb`, the Slime runtime, then a version-compatible local
+Python.
 
 Multi-node distributed training must use a routable socket interface. The
 launcher resolves `SOCKET_IFNAME=${MLP_SOCKET_IFNAME:-eth0}` unless overridden,
