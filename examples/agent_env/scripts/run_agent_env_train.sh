@@ -330,9 +330,27 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export RAY_ADDRESS=${RAY_ADDRESS:-127.0.0.1:6379}
 export CUDA_HOME="${SLIME_CUDA_HOME}"
 export PATH="${CUDA_HOME}/bin:${SLIME_ENV}/nvvm/bin:${SLIME_ENV}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export CPATH="${CUDA_HOME}/include:${SLIME_ENV}/include:${CPATH:-}"
-export C_INCLUDE_PATH="${CUDA_HOME}/include:${SLIME_ENV}/include:${C_INCLUDE_PATH:-}"
-export CPLUS_INCLUDE_PATH="${CUDA_HOME}/include:${SLIME_ENV}/include:${CPLUS_INCLUDE_PATH:-}"
+join_colon_paths() {
+  local result=""
+  local path
+  for path in "$@"; do
+    [ -n "${path}" ] || continue
+    if [ -n "${result}" ]; then
+      result="${result}:${path}"
+    else
+      result="${path}"
+    fi
+  done
+  printf '%s\n' "${result}"
+}
+
+SLIME_INCLUDE_PATH="${SLIME_ENV}/include"
+if [ "$(readlink -f "${SLIME_INCLUDE_PATH}" 2>/dev/null || printf '%s\n' "${SLIME_INCLUDE_PATH}")" = "/usr/include" ]; then
+  SLIME_INCLUDE_PATH=""
+fi
+export CPATH="$(join_colon_paths "${CUDA_HOME}/include" "${SLIME_INCLUDE_PATH}" "${CPATH:-}")"
+export C_INCLUDE_PATH="$(join_colon_paths "${CUDA_HOME}/include" "${SLIME_INCLUDE_PATH}" "${C_INCLUDE_PATH:-}")"
+export CPLUS_INCLUDE_PATH="$(join_colon_paths "${CUDA_HOME}/include" "${SLIME_INCLUDE_PATH}" "${CPLUS_INCLUDE_PATH:-}")"
 export LIBRARY_PATH="$(build_slime_library_path "${LIBRARY_PATH:-}")"
 export LD_LIBRARY_PATH="$(build_slime_library_path "${LD_LIBRARY_PATH:-}")"
 
