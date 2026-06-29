@@ -4,6 +4,7 @@ from typing import Any
 
 from slime.utils.types import Sample
 
+from examples.agent_env.alfworld.task_ids import normalize_alfworld_task_id
 from examples.agent_env.metrics import log_eval_rollout_data_for_env, log_rollout_data_for_env
 from examples.agent_env.rollout import AgentEnvSpec, cfg_path, first, generate_agent_rollout, metadata
 
@@ -64,10 +65,12 @@ def _success(info: dict, score: float) -> bool:
 
 
 def _env_metadata(reset: dict, task_index: int, split: str, lease_id: str | None) -> dict:
+    game_file = reset.get("game_file")
     return {
         "task_index": task_index,
         "split": split,
-        "game_file": reset.get("game_file"),
+        "game_file": game_file,
+        "task_id": normalize_alfworld_task_id(game_file),
         "lease_id": lease_id,
     }
 

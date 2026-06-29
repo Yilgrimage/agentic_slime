@@ -21,11 +21,26 @@ action:
   invalid_fallback: model
 
 reward:
+  impl: legacy
+  judge_mode: none
   source: won
   outcome: 10.0
   format:
     valid: 0.0
     invalid: -0.1
+  ropd:
+    join_key: task_id
+    allow_online_rubric: true
+    rubric_cache_path: ${RUN_ROOT}/reward_cache/ropd_rubrics.json
+    teacher_file: ${ROOT_DIR}/data/teacher_traces/processed/alfworld_gpt_oss_120b_ropd_teacher.jsonl
+    teacher_answer_keys:
+      - teacher_response
+      - teacher_answer
+      - teacher_final_answer
+    rubric_keys:
+      - ropd_rubric
+      - reward_rubric
+      - rubric
 
 alfworld:
   config_path: null

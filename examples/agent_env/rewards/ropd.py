@@ -18,7 +18,7 @@ from .extractors import (
     task_prompt,
     truncate,
 )
-from .llm_client import call_json_judge, judge_mode, parse_single_score
+from .llm_client import call_json_judge_with_metadata, judge_mode, parse_single_score
 from .types import RewardResult
 
 RUBRIC_SYSTEM_PROMPT = (
@@ -63,6 +63,23 @@ def _cache_path(args: Any) -> Path | None:
     if not path:
         path = str(_cfg(args, "rubric_cache_path", "") or "").strip()
     return resolve_path(args, path) if path else None
+
+
+def _role_api_key_path(args: Any, role: str) -> str | None:
+    upper = role.upper()
+    path = runtime_env(args, f"AUX_{upper}_API_KEY_PATH", "").strip()
+    return str(resolve_path(args, path)) if path else None
+
+
+def _role_endpoint(args: Any, role: str) -> dict[str, str]:
+    upper = role.upper()
+    values: dict[str, str] = {}
+    for key in ("provider", "base_url", "model"):
+        key_upper = key.upper()
+        value = runtime_env(args, f"AUX_{upper}_{key_upper}", "").strip()
+        if value:
+            values[key] = value
+    return values
 
 
 def _cache_key(sample: Sample) -> str:
@@ -238,24 +255,30 @@ def _weight(args: Any) -> float:
     return float_value(raw, 10.0)
 
 
-async def _rubric_for_sample(args: Any, sample: Sample, cache: dict[str, Any]) -> Any:
+async def _rubric_for_sample(args: Any, sample: Sample, cache: dict[str, Any]) -> tuple[Any, str, dict[str, Any] | None]:
     teacher_data = _teacher_data(args, sample)
     existing = _existing_rubric(args, sample, teacher_data)
     if existing:
-        return existing
+        return existing, "teacher", None
     key = _cache_key(sample)
     if key in cache:
-        return cache[key]
+        return cache[key], "cache", None
     allow_online_raw = runtime_env(args, "AGENT_ENV_ROPD_ALLOW_ONLINE_RUBRIC", "")
     if allow_online_raw == "":
         allow_online_raw = _cfg(args, "allow_online_rubric", False)
     allow_online = str(allow_online_raw).strip().lower() in {"1", "true", "yes", "on"}
     if not allow_online or judge_mode(args) != "aux":
-        return None
-    payload = await call_json_judge(args, _rubric_prompt(args, sample, teacher_data), system_prompt=RUBRIC_SYSTEM_PROMPT)
+        return None, "missing", None
+    payload, call_metadata = await call_json_judge_with_metadata(
+        args,
+        _rubric_prompt(args, sample, teacher_data),
+        system_prompt=RUBRIC_SYSTEM_PROMPT,
+        api_key_path=_role_api_key_path(args, "rubric"),
+        **_role_endpoint(args, "rubric"),
+    )
     rubric = payload.get("rubric") if isinstance(payload, dict) else payload
     cache[key] = rubric
-    return rubric
+    return rubric, "online", call_metadata
 
 
 async def score(args: Any, samples: list[Sample], *, single: bool = False) -> list[RewardResult]:
@@ -270,14 +293,32 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
     changed = False
     results: list[RewardResult] = []
     for sample in samples:
-        rubric = await _rubric_for_sample(args, sample, cache)
+        rubric, rubric_source, rubric_call = await _rubric_for_sample(args, sample, cache)
         if rubric is None:
-            fallback = (await naive.score(args, [sample], single=True))[0]
-            fallback.reward_version = "ropd_v1_fallback_naive"
-            results.append(fallback)
+            results.append(
+                RewardResult(
+                    score=0.0,
+                    components={"rubric_task_success": 0.0},
+                    raw={
+                        "fallback": "missing_rubric",
+                        "rubric_source": rubric_source,
+                        "join_key": _join_key(args),
+                        "join_value": _join_value(args, sample),
+                    },
+                    reason="missing_rubric",
+                    returns_total=True,
+                    reward_version="ropd_v1_missing_rubric",
+                )
+            )
             continue
-        changed = True
-        payload = await call_json_judge(args, _judge_prompt(sample, rubric), system_prompt=JUDGE_SYSTEM_PROMPT)
+        changed = changed or rubric_source == "online"
+        payload, judge_call = await call_json_judge_with_metadata(
+            args,
+            _judge_prompt(sample, rubric),
+            system_prompt=JUDGE_SYSTEM_PROMPT,
+            api_key_path=_role_api_key_path(args, "judge"),
+            **_role_endpoint(args, "judge"),
+        )
         value, item = parse_single_score(payload)
         bounded = max(0.0, min(1.0, float(value)))
         weighted = bounded * _weight(args)
@@ -285,7 +326,13 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
             RewardResult(
                 score=weighted,
                 components={"rubric_task_success": weighted},
-                raw={"rubric": rubric, "judge": item},
+                raw={
+                    "rubric": rubric,
+                    "rubric_source": rubric_source,
+                    "rubric_call": rubric_call,
+                    "judge": item,
+                    "judge_call": judge_call,
+                },
                 reason=str(item.get("reason") or "") if isinstance(item, dict) else "",
                 returns_total=True,
                 reward_version="ropd_v1",

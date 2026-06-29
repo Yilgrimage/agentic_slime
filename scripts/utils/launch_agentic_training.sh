@@ -76,6 +76,7 @@ RESOLVED_TRAIN_EXTRA_KEYS=(
   SLIME_RUNTIME SLIME_ENV SLIME_PYTHON SLIME_PACK_NAME SLIME_PACK_PATH SLIME_IMAGE_ENV SLIME_IMAGE_PYTHON
   MEGATRON_PATH MEGATRON_IMAGE_PATH WANDB_SECRET_FILE
   WANDB_RUNTIME WANDB_RUNTIME_RESOLVED WANDB_PACK_NAME WANDB_PACK_PATH WANDB_ENV WANDB_PYTHON WANDB_PYTHONPATH WANDB_LOCAL_PYTHON
+  AGENT_ENV_ROPD_TEACHER_FILE AGENT_ENV_ROPD_ALLOW_ONLINE_RUBRIC
 )
 
 RESOLVED_LAUNCH_KEYS=(
@@ -268,6 +269,30 @@ write_resolved_profile() {
       printf '%s=%q\n' "${key}" "${!key-}"
     done
   } > "${target}"
+}
+
+valid_env_key() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+}
+
+append_aux_train_env_keys() {
+  local target=$1
+  local key
+  [ -n "${AUX_TRAIN_ENV_KEYS:-}" ] || return 0
+  {
+    printf '\n# Aux profile declared train-visible environment.\n'
+    quote_assign AUX_TRAIN_ENV_KEYS "${AUX_TRAIN_ENV_KEYS}"
+    for key in ${AUX_TRAIN_ENV_KEYS//,/ }; do
+      [ -n "${key}" ] || continue
+      if ! valid_env_key "${key}"; then
+        echo "Invalid AUX_TRAIN_ENV_KEYS entry: ${key}" >&2
+        exit 1
+      fi
+      [[ -v ${key} ]] || continue
+      [ -n "${!key}" ] || continue
+      quote_assign "${key}" "${!key}"
+    done
+  } >> "${target}"
 }
 
 write_named_env() {
@@ -991,11 +1016,27 @@ write_resolved_aux_profile() {
   fi
 }
 
+aux_profile_uses_local_gpu() {
+  local spec=${AUX_SPEC:-}
+  local provider
+  if [[ "${spec}" == */* ]]; then
+    provider=${spec%%/*}
+  else
+    provider=local
+  fi
+  provider=$(printf '%s' "${provider}" | tr '[:upper:]' '[:lower:]')
+  case "${provider}" in
+    local|sglang|vllm) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 prepare_run() {
   load_run_profiles
   resolve_run_defaults
-  write_resolved_train_env "${RESOLVED_TRAIN_ENV}" "${RUN_PROFILE_PATH}" "${MODEL_PROFILE_PATH}" "${TRAIN_PROFILE_PATH}"
   write_resolved_aux_profile
+  write_resolved_train_env "${RESOLVED_TRAIN_ENV}" "${RUN_PROFILE_PATH}" "${MODEL_PROFILE_PATH}" "${TRAIN_PROFILE_PATH}"
+  append_aux_train_env_keys "${RESOLVED_TRAIN_ENV}"
 }
 
 start_aux_endpoint() {
@@ -1004,7 +1045,9 @@ start_aux_endpoint() {
   local aux_index_arg=()
   [ -z "${AUX_NODES_FILE:-}" ] || aux_nodes_arg=(--nodes "${AUX_NODES_FILE}")
   [ -z "${AUX_NODE_INDICES:-}" ] || aux_index_arg=(--node-index "${AUX_NODE_INDICES}")
-  run_bench_nodes stop "${AUX_NODES_FILE:-}" "${AUX_NODE_INDICES:-}"
+  if aux_profile_uses_local_gpu; then
+    run_bench_nodes stop "${AUX_NODES_FILE:-}" "${AUX_NODE_INDICES:-}"
+  fi
   local dry=()
   [ "${DRY_RUN}" = "0" ] || dry=(--dry-run)
   bash "${REPO_DIR}/scripts/utils/aux_endpoint.sh" start \

@@ -9,7 +9,7 @@ from examples.agent_env.rollout import cfg_path
 
 from .config import reward_cfg_path
 from .extractors import float_value, reference_values, sample_payload
-from .llm_client import call_json_judge, judge_mode, parse_scores, parse_single_score
+from .llm_client import call_json_judge_with_metadata, judge_mode, parse_scores, parse_single_score
 from .types import RewardResult
 
 SYSTEM_PROMPT = (
@@ -55,13 +55,16 @@ def _prompt(args: Any, samples: list[Sample], *, single: bool) -> str:
     )
 
 
-def _result(args: Any, score: float, raw: Any) -> RewardResult:
+def _result(args: Any, score: float, raw: Any, call_metadata: dict[str, Any] | None = None) -> RewardResult:
     bounded = max(0.0, min(1.0, float(score)))
     weighted = bounded * task_success_weight(args)
+    payload: Any = raw
+    if call_metadata is not None:
+        payload = {"judge": raw, "judge_call": call_metadata}
     return RewardResult(
         score=weighted,
         components={"judge_task_success": weighted},
-        raw=raw,
+        raw=payload,
         reason=str(raw.get("reason") or "") if isinstance(raw, dict) else "",
         returns_total=True,
         reward_version="naive_v1",
@@ -80,12 +83,16 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
         return [item for item in results if item is not None]
 
     judged_samples = [samples[idx] for idx in judged_indices]
-    payload = await call_json_judge(args, _prompt(args, judged_samples, single=single and len(judged_samples) == 1), system_prompt=SYSTEM_PROMPT)
+    payload, call_metadata = await call_json_judge_with_metadata(
+        args,
+        _prompt(args, judged_samples, single=single and len(judged_samples) == 1),
+        system_prompt=SYSTEM_PROMPT,
+    )
     if single and len(judged_samples) == 1:
         value, item = parse_single_score(payload)
-        results[judged_indices[0]] = _result(args, value, item)
+        results[judged_indices[0]] = _result(args, value, item, call_metadata)
     else:
         values, items = parse_scores(payload, len(judged_samples))
         for idx, value, item in zip(judged_indices, values, items, strict=True):
-            results[idx] = _result(args, value, item)
+            results[idx] = _result(args, value, item, call_metadata)
     return [item if item is not None else _fallback_result(args, sample, "missing_result") for item, sample in zip(results, samples, strict=True)]

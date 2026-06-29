@@ -406,6 +406,14 @@ def task_key(sample: Sample, spec: AgentEnvSpec) -> str:
     return "|".join(parts)
 
 
+def record_env_metadata(sample_metadata: dict[str, Any], spec: AgentEnvSpec, env_meta: dict[str, Any]) -> None:
+    sample_metadata[spec.name] = env_meta
+    for key in ("task_id", "task_ref", "domain", "data_source", "task_set"):
+        value = env_meta.get(key)
+        if value not in (None, "", []):
+            sample_metadata.setdefault(key, value)
+
+
 def tokenizer(args: Any):
     from slime.rollout.sglang_rollout import GenerateState
 
@@ -1731,7 +1739,7 @@ async def generate_agent_rollout(
             sample_metadata["env_reward"] = 0.0
             env_meta = spec.env_metadata(reset, index, split, lease_id)
             env_meta.setdefault("server_url", env_server_url(args, spec))
-            sample_metadata[spec.name] = env_meta
+            record_env_metadata(sample_metadata, spec, env_meta)
             sample.reward = 0.0
             ensure_rollout_shapes(args, sample, spec)
             dump_completed_sample_case(args, spec, sample, tok)
@@ -1912,8 +1920,9 @@ async def generate_agent_rollout(
                 sample_metadata["env_score"] = final_score
                 sample_metadata["env_success"] = success
                 sample_metadata["env_reward"] = 0.0
-                sample_metadata[spec.name] = spec.env_metadata(reset, index, split, lease_id)
-                sample_metadata[spec.name].setdefault("server_url", env_server_url(args, spec))
+                env_meta = spec.env_metadata(reset, index, split, lease_id)
+                env_meta.setdefault("server_url", env_server_url(args, spec))
+                record_env_metadata(sample_metadata, spec, env_meta)
                 if turn_trace is not None:
                     turn_trace["discard_sample"] = True
                     turn_trace["discard_reason"] = discard_reason
@@ -1984,9 +1993,9 @@ async def generate_agent_rollout(
                 "env_success": success,
                 "env_reward": env_reward,
                 "interaction_mode": sample_metadata["interaction_mode"],
-                spec.name: env_meta,
             }
         )
+        record_env_metadata(sample_metadata, spec, env_meta)
 
         if sample.status == Sample.Status.ABORTED:
             sample.reward = 0.0

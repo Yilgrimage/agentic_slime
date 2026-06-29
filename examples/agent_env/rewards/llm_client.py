@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any
 
 from .config import reward_cfg_path
@@ -93,22 +94,56 @@ def parse_single_score(payload: Any) -> tuple[float, Any]:
     return float(payload), payload
 
 
-async def call_json_judge(args: Any, user_prompt: str, *, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> Any:
+async def call_json_judge(
+    args: Any,
+    user_prompt: str,
+    *,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    api_key: str | None = None,
+    api_key_path: str | None = None,
+    provider: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> Any:
+    payload, _metadata = await call_json_judge_with_metadata(
+        args,
+        user_prompt,
+        system_prompt=system_prompt,
+        api_key=api_key,
+        api_key_path=api_key_path,
+        provider=provider,
+        base_url=base_url,
+        model=model,
+    )
+    return payload
+
+
+async def call_json_judge_with_metadata(
+    args: Any,
+    user_prompt: str,
+    *,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    api_key: str | None = None,
+    api_key_path: str | None = None,
+    provider: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> tuple[Any, dict[str, Any]]:
     import aiohttp
 
-    base_url = runtime_env(args, "AUX_ENDPOINT_BASE_URL", "").strip()
-    model = runtime_env(args, "AUX_ENDPOINT_MODEL", "").strip()
+    base_url = (base_url or runtime_env(args, "AUX_ENDPOINT_BASE_URL", "")).strip()
+    model = (model or runtime_env(args, "AUX_ENDPOINT_MODEL", "")).strip()
     if not base_url or not model:
         raise RuntimeError("AGENT_ENV_JUDGE_MODE=aux requires AUX_ENDPOINT_BASE_URL and AUX_ENDPOINT_MODEL")
 
-    api_key = runtime_env(args, "AUX_ENDPOINT_API_KEY", "").strip()
-    api_key_path = runtime_env(args, "AUX_ENDPOINT_API_KEY_PATH", "").strip()
+    api_key = (api_key or runtime_env(args, "AUX_ENDPOINT_API_KEY", "")).strip()
+    api_key_path = (api_key_path or runtime_env(args, "AUX_ENDPOINT_API_KEY_PATH", "")).strip()
     api_key = api_key or read_secret(api_key_path)
     timeout_s = float(runtime_env(args, "AUX_ENDPOINT_TIMEOUT_S", "120") or 120)
     max_tokens = int(runtime_env(args, "AUX_ENDPOINT_MAX_TOKENS", "1024") or 1024)
     temperature = float(runtime_env(args, "AUX_ENDPOINT_TEMPERATURE", "0.0") or 0.0)
     top_p = float(runtime_env(args, "AUX_ENDPOINT_TOP_P", "1.0") or 1.0)
-    provider = runtime_env(args, "AUX_ENDPOINT_PROVIDER", "").strip().lower()
+    provider = (provider or runtime_env(args, "AUX_ENDPOINT_PROVIDER", "")).strip().lower()
     enable_thinking = bool_value(runtime_env(args, "AUX_ENDPOINT_ENABLE_THINKING", ""), False)
     separate_reasoning = bool_value(runtime_env(args, "AUX_ENDPOINT_SEPARATE_REASONING", ""), True)
     reasoning_effort = runtime_env(args, "AUX_ENDPOINT_REASONING_EFFORT", "").strip()
@@ -136,6 +171,7 @@ async def call_json_judge(args: Any, user_prompt: str, *, system_prompt: str = D
 
     last_error: Exception | None = None
     for attempt in range(3):
+        started = time.monotonic()
         try:
             timeout = aiohttp.ClientTimeout(total=timeout_s)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -149,9 +185,26 @@ async def call_json_judge(args: Any, user_prompt: str, *, system_prompt: str = D
                     data = await response.json()
             content = data["choices"][0]["message"]["content"]
             try:
-                return extract_json_payload(content)
+                payload = extract_json_payload(content)
             except Exception as exc:
                 raise ValueError(f"judge returned non-JSON content: {truncate(content, 800)}") from exc
+            usage = data.get("usage") if isinstance(data, dict) else None
+            usage = usage if isinstance(usage, dict) else {}
+            metadata: dict[str, Any] = {
+                "provider": provider or "openai_compatible",
+                "model": model,
+                "attempt": attempt + 1,
+                "latency_s": time.monotonic() - started,
+                "prompt_chars": len(user_prompt),
+            }
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                value = usage.get(key)
+                if value is not None:
+                    try:
+                        metadata[key] = float(value)
+                    except (TypeError, ValueError):
+                        metadata[key] = value
+            return payload, metadata
         except Exception as exc:
             last_error = exc
             if attempt == 2:

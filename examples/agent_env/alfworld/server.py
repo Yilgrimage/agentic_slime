@@ -12,6 +12,7 @@ try:
 except ModuleNotFoundError:
     yaml = None
 
+from examples.agent_env.alfworld.task_ids import normalize_alfworld_task_id
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,14 @@ def _select_game_file(game_files: list[str], task_index: int) -> str:
     return game_files[int(task_index) % len(game_files)]
 
 
+def _select_game_file_by_task_id(game_files: list[str], task_id: str) -> tuple[int, str]:
+    normalized = str(task_id).strip()
+    for idx, game_file in enumerate(game_files):
+        if normalize_alfworld_task_id(game_file) == normalized:
+            return idx, game_file
+    raise KeyError(f"ALFWorld task_id not found in split game files: {task_id}")
+
+
 def _alfworld_backend_split(split: str) -> str:
     return {
         "valid_seen": "eval_in_distribution",
@@ -258,9 +267,13 @@ class ALFWorldBackend:
         direct_game_file = bool(payload.get("direct_game_file", self.default_direct_game_file))
         skip_to_task = bool(payload.get("skip_to_task", False))
         num_tasks = payload.get("num_tasks")
+        task_id = payload.get("task_id")
 
         if direct_game_file and self.honor_direct_game_file:
-            self.game_file = _select_game_file(self.base_game_files, self.task_index)
+            if task_id not in (None, "", []):
+                self.task_index, self.game_file = _select_game_file_by_task_id(self.base_game_files, str(task_id))
+            else:
+                self.game_file = _select_game_file(self.base_game_files, self.task_index)
             self._ensure_env_for(self.game_file)
         else:
             self.game_file = None

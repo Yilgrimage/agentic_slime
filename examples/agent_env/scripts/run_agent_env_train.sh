@@ -610,6 +610,7 @@ keys = [
     "VALLEYDANCE_ERROR_PATTERNS", "VALLEYDANCE_ERROR_PATTERNS_JSON",
     "VALLEYDANCE_TURN_EXCESS_PENALTY", "VALLEYDANCE_MAX_TURNS",
     "AGENT_ENV_ROPD_RUBRIC_CACHE_PATH", "AGENT_ENV_ROPD_ALLOW_ONLINE_RUBRIC",
+    "AGENT_ENV_ROPD_TEACHER_FILE",
     "AGENT_ENV_ROPD_TASK_SUCCESS_WEIGHT",
     "AUX_ENDPOINT_PROVIDER", "AUX_ENDPOINT_MODEL", "AUX_ENDPOINT_BASE_URL", "AUX_ENDPOINT_API_KEY_PATH",
     "AUX_ENDPOINT_TIMEOUT_S", "AUX_ENDPOINT_MAX_TOKENS", "AUX_ENDPOINT_TEMPERATURE", "AUX_ENDPOINT_TOP_P",
@@ -617,6 +618,9 @@ keys = [
     "LITELLM_LOCAL_MODEL_COST_MAP",
     "WANDB_BASE_URL", "WANDB_ENTITY", "WANDB_HTTP_TIMEOUT", "WANDB_INIT_TIMEOUT",
 ]
+for key in os.environ.get("AUX_TRAIN_ENV_KEYS", "").replace(",", " ").split():
+    if key and key not in keys:
+        keys.append(key)
 print(json.dumps({key: os.environ[key] for key in keys if key in os.environ and os.environ[key] != ""}))
 PYH
 )
