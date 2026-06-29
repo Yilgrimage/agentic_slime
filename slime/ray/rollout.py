@@ -458,7 +458,7 @@ class RolloutManager:
         self.rollout_engine_lock = Lock.options(
             num_cpus=1,
             num_gpus=0,
-            runtime_env={"env_vars": add_default_ray_env_vars()},
+            runtime_env={"env_vars": add_default_ray_env_vars(getattr(self.args, "train_env_vars", {}) or {})},
         ).remote()
         self.rollout_id = -1
 

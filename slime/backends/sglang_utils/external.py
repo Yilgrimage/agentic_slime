@@ -196,7 +196,7 @@ def start_external_rollout_servers(args, *, start_router) -> tuple[dict[str, Ext
         rollout_engine = RolloutRayActor.options(
             num_cpus=0.2,
             num_gpus=0,
-            runtime_env={"env_vars": add_default_ray_env_vars()},
+            runtime_env={"env_vars": add_default_ray_env_vars(getattr(args, "train_env_vars", {}) or {})},
         ).remote(
             args=args,
             rank=rank,
