@@ -14,7 +14,7 @@ set_slime_runtime_defaults() {
 
 set_wandb_runtime_defaults() {
   LOCAL_ENVS_DIR=${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
-  WANDB_RUNTIME=${WANDB_RUNTIME:-auto}
+  WANDB_RUNTIME=${WANDB_RUNTIME:-pack}
   WANDB_PACK_NAME=${WANDB_PACK_NAME:-wandb}
   WANDB_PACK_PATH=${WANDB_PACK_PATH:-${LOCAL_ENVS_DIR}/${WANDB_PACK_NAME}}
   WANDB_LOCAL_PYTHON=${WANDB_LOCAL_PYTHON:-python}

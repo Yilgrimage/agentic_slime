@@ -64,9 +64,31 @@ then use `--validate-data-load` once on new clusters to run heavier env load
 smoke checks.
 
 When the cluster image ships an incompatible W&B SDK, materialize a separate
-`wandb` env pack. The train adapter resolves W&B in this order:
-`${LOCAL_ENVS_DIR}/wandb`, the Slime runtime, then a version-compatible local
-Python.
+`wandb` env pack. By default W&B uses only that pack so launches do not
+silently import the image-provided SDK:
+
+```bash
+WANDB_SPEC='wandb' bash scripts/utils/build_wandb_env.sh
+
+${ROOT_DIR}/scripts/prepare_node_runtime.sh \
+  --all-nodes \
+  --nodes configs/nodes/agent_env_all.txt \
+  --node 0,1,2,3 \
+  --envs wandb \
+  --data none \
+  --models none \
+  --sources none
+
+WANDB_RUNTIME=pack ENABLE_WANDB=1 \
+  bash scripts/utils/launch_agentic_training.sh \
+  configs/agent_env/runs/alfworld_qwen3_4b_grpo_fullasync_3x8.env
+```
+
+The builder publishes `${ROOT_DIR}/packs/wandb.tar.gz` plus `.sha256` and
+`.revision`; these generated pack artifacts stay out of git. Set
+`WANDB_SPEC='wandb==<version>'` to pin the official SDK. Explicitly set
+`WANDB_RUNTIME=auto`, `slime`, or `local` only when fallback to another runtime
+is intended.
 
 Multi-node distributed training must use a routable socket interface. The
 launcher resolves `SOCKET_IFNAME=${MLP_SOCKET_IFNAME:-eth0}` unless overridden,
