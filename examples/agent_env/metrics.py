@@ -63,6 +63,13 @@ def reward_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     rubric_sources: dict[str, int] = {}
     judge_calls: list[dict[str, Any]] = []
     rubric_calls: list[dict[str, Any]] = []
+    ropd_student_scores: list[float] = []
+    ropd_teacher_scores: list[float] = []
+    ropd_reward_scores: list[float] = []
+    ropd_maximum_scores: list[float] = []
+    ropd_rubric_sizes: list[float] = []
+    ropd_teacher_below_student = 0
+    ropd_teacher_below_student_seen = False
 
     for sample in real_samples:
         sample_metadata = getattr(sample, "metadata", None) or {}
@@ -93,6 +100,28 @@ def reward_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         rubric_call = _as_dict(raw.get("rubric_call"))
         if rubric_call:
             rubric_calls.append(rubric_call)
+        student_score = _float_or_none(raw.get("student_score"))
+        if student_score is not None:
+            ropd_student_scores.append(student_score)
+        reward_score = _float_or_none(raw.get("reward_score"))
+        if reward_score is not None:
+            ropd_reward_scores.append(reward_score)
+        maximum_score = _float_or_none(raw.get("maximum_score"))
+        if maximum_score is not None:
+            ropd_maximum_scores.append(maximum_score)
+        teacher_scores = raw.get("teacher_scores")
+        if isinstance(teacher_scores, list):
+            ropd_teacher_scores.extend(
+                value for item in teacher_scores if (value := _float_or_none(item)) is not None
+            )
+        if "teacher_below_student" in raw:
+            ropd_teacher_below_student_seen = True
+        if raw.get("teacher_below_student"):
+            ropd_teacher_below_student += 1
+        rubric = _as_dict(raw.get("rubric"))
+        rubric_items = rubric.get("rubrics")
+        if isinstance(rubric_items, list):
+            ropd_rubric_sizes.append(float(len(rubric_items)))
 
     total = len(real_samples)
     metrics: dict[str, float] = {}
@@ -111,6 +140,18 @@ def reward_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         metrics[f"{prefix}/reward/ropd/rubric_source_{source}_rate"] = count / total
     if rubric_sources:
         metrics[f"{prefix}/reward/ropd/rubric_count"] = float(sum(rubric_sources.values()))
+    if ropd_student_scores:
+        metrics[f"{prefix}/reward/ropd/student_score_mean"] = _mean(ropd_student_scores)
+    if ropd_teacher_scores:
+        metrics[f"{prefix}/reward/ropd/teacher_score_mean"] = _mean(ropd_teacher_scores)
+    if ropd_reward_scores:
+        metrics[f"{prefix}/reward/ropd/reward_score_mean"] = _mean(ropd_reward_scores)
+    if ropd_maximum_scores:
+        metrics[f"{prefix}/reward/ropd/maximum_score_mean"] = _mean(ropd_maximum_scores)
+    if ropd_rubric_sizes:
+        metrics[f"{prefix}/reward/ropd/rubric_size_mean"] = _mean(ropd_rubric_sizes)
+    if ropd_teacher_below_student_seen:
+        metrics[f"{prefix}/reward/ropd/teacher_below_student_rate"] = ropd_teacher_below_student / total
     _reward_call_metrics(metrics, prefix=prefix, role="judge", calls=judge_calls, sample_count=total)
     _reward_call_metrics(metrics, prefix=prefix, role="rubric", calls=rubric_calls, sample_count=total)
     return metrics
