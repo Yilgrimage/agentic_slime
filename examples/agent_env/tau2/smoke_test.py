@@ -10,13 +10,16 @@ def main() -> None:
     data_dir = os.environ.get("TAU2_DATA_DIR", "")
     if agent_data_dir and not data_dir:
         data_dir = os.path.join(agent_data_dir, "data")
+    domain = os.environ.get("TAU2_DOMAIN", "mock")
+    task_set = os.environ.get("TAU2_TASK_SET", "mock")
+    split = os.environ.get("TAU2_SPLIT", "base" if task_set == "mock" else "train")
     backend = Tau2Backend(
         "smoke",
-        "train",
+        split,
         {
             "data_dir": data_dir,
-            "domain": os.environ.get("TAU2_DOMAIN", "mock"),
-            "task_set": os.environ.get("TAU2_TASK_SET", "mock"),
+            "domain": domain,
+            "task_set": task_set,
             "split": None,
             "num_tasks": 1,
             "solo_mode": False,
@@ -27,7 +30,7 @@ def main() -> None:
         },
     )
     print("start", backend.start())
-    reset = backend.reset({"task_index": 0, "split": "train"})
+    reset = backend.reset({"task_index": 0, "split": split})
     print("reset task", reset["info"].get("task_id"), "tools", reset["info"].get("tools")[:5])
     step = backend.step(
         {

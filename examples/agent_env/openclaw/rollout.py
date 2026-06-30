@@ -4,11 +4,12 @@ from typing import Any
 
 from slime.utils.types import Sample
 
+from examples.agent_env.episode import generate_server_episode_rollout
 from examples.agent_env.metrics import log_eval_rollout_data_for_env, log_rollout_data_for_env
 from examples.agent_env.rollout import AgentEnvSpec, cfg_path
 
-DEFAULT_PROMPT = """You are an agent using MCP tools.
-Use tool calls to inspect information or perform actions. When the task is complete, call the finish tool if it is available.
+DEFAULT_PROMPT = """You are an OpenClaw agent.
+Use available tools to inspect state, take actions, and complete the task. When the task is complete, call the finish tool if it is available.
 Do not send a natural-language message and make a tool call in the same turn."""
 
 
@@ -28,7 +29,7 @@ def _available_actions(info: dict) -> list[str]:
 def _format_tools(actions: list[str]) -> str:
     if not actions:
         return ""
-    return "\nAvailable MCP tool names:\n" + "\n".join(f"- {action}" for action in actions) + "\n"
+    return "\nAvailable OpenClaw tool names:\n" + "\n".join(f"- {action}" for action in actions) + "\n"
 
 
 def _observation_text(args: Any, observation: str, info: dict) -> str:
@@ -51,9 +52,8 @@ def _choose_action(args: Any, action: Any, actions: list[str], sample: Sample) -
         name = str(action.get("name") or "")
         if not cfg_path(args, "action.restrict_to_available", False) or name in actions or not actions:
             return action
-        return {"type": "assistant_message", "content": f"Unable to use unavailable MCP tool: {name}"}
-    text = str(action)
-    return {"type": "assistant_message", "content": text}
+        return {"type": "assistant_message", "content": f"Unable to use unavailable OpenClaw tool: {name}"}
+    return {"type": "assistant_message", "content": str(action)}
 
 
 def _success(info: dict, score: float) -> bool:
@@ -67,14 +67,15 @@ def _env_metadata(reset: dict, task_index: int, split: str, lease_id: str | None
     return {
         "task_index": task_index,
         "task_id": info.get("task_id"),
-        "mcp_server": info.get("mcp_server"),
+        "openclaw": info.get("openclaw"),
+        "openclaw_session_id": info.get("session_id"),
         "split": split,
         "lease_id": lease_id,
     }
 
 
-MCP_SERVER_SPEC = AgentEnvSpec(
-    name="mcp_server",
+OPENCLAW_SPEC = AgentEnvSpec(
+    name="openclaw",
     env_url_arg="env_server_url",
     default_split="train",
     info_actions=_available_actions,
@@ -92,14 +93,12 @@ MCP_SERVER_SPEC = AgentEnvSpec(
 
 
 async def generate(args: Any, sample: Sample, sampling_params: dict, evaluation: bool = False) -> Sample:
-    raise NotImplementedError(
-        "MCP server tasks must provide a server-owned /run_episode backend before they can be used for training."
-    )
+    return await generate_server_episode_rollout(args, sample, sampling_params, spec=OPENCLAW_SPEC)
 
 
 def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:
-    return log_rollout_data_for_env("mcp_server", rollout_id, args, samples, rollout_extra_metrics, rollout_time)
+    return log_rollout_data_for_env("openclaw", rollout_id, args, samples, rollout_extra_metrics, rollout_time)
 
 
 def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool:
-    return log_eval_rollout_data_for_env("mcp_server", rollout_id, args, data, extra_metrics)
+    return log_eval_rollout_data_for_env("openclaw", rollout_id, args, data, extra_metrics)

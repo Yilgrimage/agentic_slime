@@ -23,11 +23,7 @@ class AgentThreadingHTTPServer(ThreadingHTTPServer):
 class EnvBackend(Protocol):
     def start(self) -> dict[str, Any]: ...
 
-    def reset(self, payload: dict[str, Any]) -> dict[str, Any]: ...
-
-    def step(self, payload: dict[str, Any]) -> dict[str, Any]: ...
-
-    def evaluate(self, payload: dict[str, Any]) -> dict[str, Any]: ...
+    def run_episode(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
     def release(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
@@ -48,6 +44,7 @@ class Worker:
     reset_count: int = 0
     step_count: int = 0
     ready: dict[str, Any] = field(default_factory=dict)
+    dead: bool = False
 
 
 @dataclass
@@ -102,12 +99,11 @@ def _backend_worker_loop(
             cmd = request.get("cmd")
             payload = request.get("payload") or {}
             try:
-                if cmd == "reset":
-                    result = backend.reset(payload)
-                elif cmd == "step":
-                    result = backend.step(payload)
-                elif cmd == "evaluate":
-                    result = backend.evaluate(payload)
+                if cmd == "run_episode":
+                    run_episode = getattr(backend, "run_episode", None)
+                    if not callable(run_episode):
+                        raise ValueError(f"{type(backend).__name__} does not support run_episode")
+                    result = run_episode(payload)
                 elif cmd == "release":
                     result = backend.release(payload)
                 elif cmd == "close":
@@ -205,6 +201,11 @@ class ProcessPoolEnvServer:
         self._wait_ready(worker)
         return worker
 
+    def _start_replacement_worker(self, split: str) -> Worker:
+        worker = self._start_worker(split, f"repl-{uuid.uuid4().hex[:8]}")
+        self.created.setdefault(self._pool_key(split), []).append(worker)
+        return worker
+
     def _ensure_pool(self, split: str) -> None:
         pool_key = self._pool_key(split)
         if pool_key in self.available:
@@ -227,10 +228,12 @@ class ProcessPoolEnvServer:
 
     def _worker_request(self, worker: Worker, cmd: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         with worker.lock:
-            if not worker.process.is_alive():
+            if worker.dead or not worker.process.is_alive():
+                worker.dead = True
                 raise RuntimeError(f"{self.env_name} worker {worker.worker_id} pid={worker.process.pid} is not alive")
             worker.conn.send({"cmd": cmd, "payload": payload or {}})
             if not worker.conn.poll(self.worker_request_timeout_s):
+                self._discard_worker(worker)
                 raise TimeoutError(f"{self.env_name} worker {worker.worker_id} timed out on {cmd}")
             result = worker.conn.recv()
             if not result.get("ok"):
@@ -238,6 +241,19 @@ class ProcessPoolEnvServer:
             worker.reset_count = int(result.get("reset_count", worker.reset_count) or worker.reset_count)
             worker.step_count = int(result.get("step_count", worker.step_count) or worker.step_count)
             return result
+
+    def _discard_worker(self, worker: Worker) -> None:
+        worker.dead = True
+        try:
+            worker.conn.close()
+        except Exception:
+            pass
+        if worker.process.is_alive():
+            worker.process.terminate()
+            worker.process.join(timeout=5)
+            if worker.process.is_alive():
+                worker.process.kill()
+                worker.process.join(timeout=5)
 
     def _reap_locked(self) -> list[Lease]:
         now = time.time()
@@ -251,6 +267,11 @@ class ProcessPoolEnvServer:
         return expired
 
     def _release_worker(self, lease: Lease) -> None:
+        if lease.worker.dead or not lease.worker.process.is_alive():
+            self._discard_worker(lease.worker)
+            if lease.pooled:
+                self.available[self._pool_key(lease.worker.split)].put(self._start_replacement_worker(lease.worker.split))
+            return
         if self.reset_on_release:
             self._worker_request(lease.worker, "release", {"reset_on_release": True})
         if lease.pooled:
@@ -317,49 +338,35 @@ class ProcessPoolEnvServer:
             raise KeyError(f"Unknown lease_id: {lease_id}")
         return lease
 
-    def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def run_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
         lease_id = str(payload.get("lease_id") or payload.get("session_id") or "")
         if not lease_id:
             alloc = self.allocate(payload)
             lease_id = str(alloc["lease_id"])
         lease = self._get_lease(lease_id)
-        result = self._worker_request(lease.worker, "reset", payload)
-        lease.split = str(result.get("split", lease.split))
-        lease.worker.split = lease.split
-        lease.reset_at = time.time()
-        lease.last_used_at = time.time()
-        lease.final_score = 0.0
-        lease.done = False
-        lease.success = False
-        lease.last_info = result.get("info") or {}
-        if result.get("task_index") is not None:
-            lease.task_index = int(result["task_index"])
-        return {"ok": True, "lease_id": lease.lease_id, "session_id": lease.lease_id, "worker_id": lease.worker.worker_id, **result}
-
-    def step(self, payload: dict[str, Any]) -> dict[str, Any]:
-        lease = self._get_lease(str(payload.get("lease_id") or payload.get("session_id")))
-        result = self._worker_request(lease.worker, "step", payload)
+        forwarded = dict(payload)
+        forwarded["lease_id"] = lease.lease_id
+        forwarded["session_id"] = lease.lease_id
+        try:
+            result = self._worker_request(lease.worker, "run_episode", forwarded)
+        except Exception:
+            lease.worker.dead = True
+            with self.lock:
+                self.leases.pop(lease.lease_id, None)
+            self._release_worker(lease)
+            raise
         lease.final_score = float(result.get("score", 0.0) or 0.0)
         lease.done = bool(result.get("done", False))
         lease.success = bool(result.get("success", False))
         lease.last_info = result.get("info") or {}
         if result.get("task_index") is not None:
             lease.task_index = int(result["task_index"])
-        return {"ok": True, "lease_id": lease.lease_id, "session_id": lease.lease_id, "worker_id": lease.worker.worker_id, **result}
-
-    def evaluate(self, payload: dict[str, Any]) -> dict[str, Any]:
-        lease = self._get_lease(str(payload.get("lease_id") or payload.get("session_id")))
-        result = self._worker_request(lease.worker, "evaluate", payload)
-        lease.final_score = float(result.get("score", lease.final_score) or 0.0)
-        lease.success = bool(result.get("success", lease.success))
-        lease.done = bool(result.get("done", lease.done))
-        lease.last_info = result.get("info") or lease.last_info
-        return {"ok": True, "lease_id": lease.lease_id, "session_id": lease.lease_id, "worker_id": lease.worker.worker_id, **result}
-
-    def heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
-        lease = self._get_lease(str(payload.get("lease_id") or payload.get("session_id")))
-        lease.last_used_at = time.time()
-        return {"ok": True, "lease_id": lease.lease_id, "session_id": lease.lease_id}
+        response = {"ok": True, "lease_id": lease.lease_id, "session_id": lease.lease_id, "worker_id": lease.worker.worker_id, **result}
+        if bool(payload.get("release_on_done", True)):
+            with self.lock:
+                self.leases.pop(lease.lease_id, None)
+            self._release_worker(lease)
+        return response
 
     def close(self, payload: dict[str, Any]) -> dict[str, Any]:
         lease_id = str(payload.get("lease_id") or payload.get("session_id") or "")
@@ -478,14 +485,8 @@ class EnvRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if self.path == "/allocate":
                 result = self.store.allocate(payload)
-            elif self.path == "/reset":
-                result = self.store.reset(payload)
-            elif self.path == "/step":
-                result = self.store.step(payload)
-            elif self.path == "/evaluate":
-                result = self.store.evaluate(payload)
-            elif self.path == "/heartbeat":
-                result = self.store.heartbeat(payload)
+            elif self.path == "/run_episode":
+                result = self.store.run_episode(payload)
             elif self.path == "/close":
                 result = self.store.close(payload)
             else:

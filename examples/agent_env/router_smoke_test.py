@@ -26,10 +26,14 @@ class FakeWorker:
         lease_id = payload.get("lease_id")
         if lease_id not in self.leases:
             return {"ok": False, "error": f"unknown lease {lease_id}"}, 404
-        if path == "/reset":
-            return {"ok": True, "lease_id": lease_id, "observation": f"reset:{self.name}"}, 200
-        if path == "/step":
-            return {"ok": True, "lease_id": lease_id, "observation": f"step:{self.name}", "score": 0.0}, 200
+        if path == "/run_episode":
+            return {
+                "ok": True,
+                "lease_id": lease_id,
+                "observation": f"episode:{self.name}",
+                "score": 1.0,
+                "success": True,
+            }, 200
         if path == "/close":
             self.leases.discard(str(lease_id))
             return {"ok": True}, 200
@@ -85,14 +89,11 @@ def main() -> None:
         assert allocation["routing_key"] == request_id
         assert allocation["worker_lease_id"].startswith("w1-lease")
 
-        reset, status = router.lease_proxy("/reset", {"lease_id": allocation["lease_id"]})
-        assert status == 200, reset
-        assert reset["observation"] == "reset:w1"
-        assert reset["lease_id"] == allocation["lease_id"]
-
-        step, status = router.lease_proxy("/step", {"lease_id": allocation["lease_id"], "action": "look"})
-        assert status == 200, step
-        assert step["observation"] == "step:w1"
+        episode, status = router.run_episode({"lease_id": allocation["lease_id"]})
+        assert status == 200, episode
+        assert episode["observation"] == "episode:w1"
+        assert episode["lease_id"] == allocation["lease_id"]
+        assert episode["success"] is True
         assert w0.requests and w0.requests[0][0] == "/allocate"
         assert all(path == "/allocate" for path, _ in w0.requests)
         print("agent env router smoke test passed")

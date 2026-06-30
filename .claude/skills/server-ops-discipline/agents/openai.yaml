@@ -1,0 +1,4 @@
+interface:
+  display_name: "Server Ops Discipline"
+  short_description: "Server ops discipline plus reusable bench/watchdog/materialize scripts."
+  default_prompt: "Use this skill when preparing servers, building or publishing runtime packs, installing root-level ops scripts, materializing node-local envs, launching distributed jobs, or preserving GPUs."

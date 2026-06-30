@@ -4,9 +4,10 @@ from typing import Any
 
 from slime.utils.types import Sample
 
+from examples.agent_env.episode import generate_server_episode_rollout
 from examples.agent_env.alfworld.task_ids import normalize_alfworld_task_id
 from examples.agent_env.metrics import log_eval_rollout_data_for_env, log_rollout_data_for_env
-from examples.agent_env.rollout import AgentEnvSpec, cfg_path, first, generate_agent_rollout, metadata
+from examples.agent_env.rollout import AgentEnvSpec, cfg_path, first, metadata
 
 DEFAULT_PROMPT = """You are an expert household task agent in ALFWorld.
 At each turn, read the current observation and valid actions, then choose one next action.
@@ -93,12 +94,18 @@ ALFWORLD_SPEC = AgentEnvSpec(
 
 
 async def generate(args: Any, sample: Sample, sampling_params: dict, evaluation: bool = False) -> Sample:
-    reset_payload = {
+    episode_payload = {
         "direct_game_file": cfg_path(args, "alfworld.direct_game_file", True),
         "skip_to_task": cfg_path(args, "alfworld.skip_to_task", False),
         "num_tasks": cfg_path(args, "alfworld.num_tasks", None),
     }
-    return await generate_agent_rollout(args, sample, sampling_params, spec=ALFWORLD_SPEC, reset_payload=reset_payload)
+    return await generate_server_episode_rollout(
+        args,
+        sample,
+        sampling_params,
+        spec=ALFWORLD_SPEC,
+        episode_payload=episode_payload,
+    )
 
 
 def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:

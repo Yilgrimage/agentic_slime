@@ -1,0 +1,60 @@
+task:
+  split: train
+max_turns: 20
+
+timeouts:
+  policy_s: 300
+  env_request_s: 660
+
+interaction:
+  mode: tool_call
+  enable_thinking: true
+  reasoning:
+    parser: qwen3-thinking
+    fallback_to_raw: false
+
+observation:
+  include_actions: true
+
+action:
+  restrict_to_available: false
+  invalid_fallback: assistant_message
+
+reward:
+  impl: legacy
+  judge_mode: none
+  source: score
+  outcome: 10.0
+  truncated: -1.0
+  format:
+    valid: 0.0
+    invalid: -0.1
+
+env_server:
+  pool_size: 2
+  acquire_timeout_s: 600
+  prewarm_splits:
+    - train
+  shared_pool: true
+  reset_on_release: true
+  worker_start_timeout_s: 120
+  worker_request_timeout_s: 300
+
+openclaw:
+  name: openclaw_harness
+  backend: http_harness
+  base_url: ${OPENCLAW_HARNESS_URL}
+  episode_path: /run_episode
+  close_path: ""
+  request_timeout_s: 120
+  headers: {}
+  api_key_env: OPENCLAW_HARNESS_API_KEY
+  policy: |-
+    You are an OpenClaw agent. Use tool calls to inspect state, take actions,
+    and complete the assigned task. Do not send a natural-language message and
+    make a tool call in the same turn.
+  tasks:
+    - id: default
+      prompt: |-
+        Solve the assigned OpenClaw task using the available tools, then call
+        the finish tool when the task is complete.

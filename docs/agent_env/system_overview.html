@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agentic Slime System Overview</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #5d6876;
+      --line: #c9d1dc;
+      --blue: #2563eb;
+      --green: #15803d;
+      --amber: #b45309;
+      --red: #b91c1c;
+      --violet: #6d28d9;
+      --teal: #0f766e;
+      --shadow: 0 8px 24px rgba(23, 32, 42, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.4;
+    }
+
+    main {
+      max-width: 1500px;
+      margin: 0 auto;
+      padding: 32px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 0 0 28px;
+      color: var(--muted);
+      max-width: 980px;
+      font-size: 15px;
+    }
+
+    .diagram {
+      display: grid;
+      grid-template-columns: 1.05fr 1.1fr 1.35fr 1.4fr 1fr;
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .lane {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .lane-title {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .box {
+      position: relative;
+      min-height: 80px;
+      padding: 14px 15px;
+      border: 1px solid var(--line);
+      border-left: 5px solid var(--blue);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .box h2 {
+      margin: 0 0 8px;
+      font-size: 16px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .box p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .box ul {
+      margin: 8px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      color: #111827;
+      background: #eef2f7;
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    .green { border-left-color: var(--green); }
+    .amber { border-left-color: var(--amber); }
+    .red { border-left-color: var(--red); }
+    .violet { border-left-color: var(--violet); }
+    .teal { border-left-color: var(--teal); }
+
+    .arrow-right::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -22px;
+      width: 22px;
+      border-top: 2px solid var(--line);
+      transform: translateY(-50%);
+      z-index: 2;
+    }
+
+    .arrow-right::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -24px;
+      width: 8px;
+      height: 8px;
+      border-top: 2px solid var(--line);
+      border-right: 2px solid var(--line);
+      transform: translateY(-50%) rotate(45deg);
+      z-index: 2;
+    }
+
+    .stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .node-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .node {
+      padding: 10px;
+      border: 1px solid #d8dee8;
+      border-radius: 6px;
+      background: #fbfcfe;
+      min-height: 92px;
+    }
+
+    .node strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+
+    .node span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 3px;
+    }
+
+    .wide {
+      grid-column: 1 / -1;
+      margin-top: 18px;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .step {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 12px;
+      box-shadow: var(--shadow);
+      min-height: 96px;
+    }
+
+    .step b {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+
+    .step span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--blue);
+    }
+
+    .dot.green { background: var(--green); }
+    .dot.amber { background: var(--amber); }
+    .dot.red { background: var(--red); }
+    .dot.violet { background: var(--violet); }
+    .dot.teal { background: var(--teal); }
+
+    @media (max-width: 1100px) {
+      main {
+        padding: 20px;
+      }
+
+      .diagram,
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      .arrow-right::before,
+      .arrow-right::after {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Agentic Slime System Overview</h1>
+  <p class="subtitle">
+    Non-invasive agent-env training stack: configuration is resolved once, server ops
+    materializes node-local runtimes and data, launch manages distributed services,
+    and Slime consumes a pure env-server rollout contract.
+  </p>
+
+  <section class="diagram" aria-label="system architecture diagram">
+    <div class="lane">
+      <div class="lane-title">Source of truth</div>
+      <article class="box arrow-right">
+        <h2>Run profile</h2>
+        <p><code>configs/agent_env/runs/*.env</code></p>
+        <ul>
+          <li>Select env, model, train, topology, optional aux.</li>
+          <li>Keep experiment wiring thin.</li>
+        </ul>
+      </article>
+      <article class="box green">
+        <h2>Owned configs</h2>
+        <p>
+          Model profile owns model identity. Train profile owns algorithm,
+          batch, token budget, sync mode, and checkpoint policy.
+        </p>
+      </article>
+      <article class="box teal">
+        <h2>Env config</h2>
+        <p>
+          <code>examples/agent_env/&lt;env&gt;/env_config.yaml</code> owns task
+          semantics, parser, data settings, env server settings, and reward implementation.
+        </p>
+      </article>
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Launch contract</div>
+      <article class="box violet arrow-right">
+        <h2>Launcher</h2>
+        <p><code>scripts/utils/launch_agentic_training.sh</code></p>
+        <ul>
+          <li>Loads profiles once.</li>
+          <li>Writes run-local <code>resolved_launch.env</code> and <code>resolved_train.env</code>.</li>
+          <li>Stops bench on selected train nodes.</li>
+        </ul>
+      </article>
+      <article class="box amber">
+        <h2>Server ops</h2>
+        <p>
+          <code>${ROOT_DIR}/scripts</code> owns node materialization, data packs,
+          watchdog, bench, and SSH fanout.
+        </p>
+      </article>
+      <article class="box red">
+        <h2>Keepalive boundary</h2>
+        <p>
+          Watchdog and bench are utilization-based and framework-agnostic.
+          Train exit calls <code>run_bench.sh</code>.
+        </p>
+      </article>
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Distributed runtime</div>
+      <article class="box arrow-right">
+        <h2>Ray + services</h2>
+        <p>
+          Node indexes come from <code>configs/nodes/*.txt</code>. Topology
+          profiles select nodes by index, not concrete IPs.
+        </p>
+        <div class="node-grid">
+          <div class="node">
+            <strong>Node 0</strong>
+            <span>Ray head</span>
+            <span>Router</span>
+            <span>Actor train</span>
+            <span>Env server</span>
+          </div>
+          <div class="node">
+            <strong>Nodes 1-2</strong>
+            <span>Ray workers</span>
+            <span>SGLang rollout engines</span>
+            <span>Env servers</span>
+          </div>
+          <div class="node">
+            <strong>Node 3</strong>
+            <span>Optional aux endpoint</span>
+            <span>Otherwise bench</span>
+          </div>
+          <div class="node">
+            <strong>Node-local cache</strong>
+            <span><code>/tmp/server-ops-envs</code></span>
+            <span><code>/tmp/server-ops-runtime</code></span>
+          </div>
+        </div>
+      </article>
+      <article class="box green">
+        <h2>Remote locality</h2>
+        <p>
+          Node-local runtimes are validated on the node that executes them.
+          Control hosts only resolve launch intent and remote paths.
+        </p>
+      </article>
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Training loop</div>
+      <article class="box teal arrow-right">
+        <h2>Slime async loop</h2>
+        <p>
+          Slime owns actor updates, rollout engines, weight sync, batching,
+          logprobs, KL, checkpointing, and W&amp;B reporting.
+        </p>
+      </article>
+      <article class="box">
+        <h2>Generic rollout</h2>
+        <p>
+          <code>examples.agent_env.fully_async_rollout</code> owns sample shape,
+          env HTTP leases, dumping, infra discard, and GLM-style padding.
+        </p>
+      </article>
+      <article class="box amber">
+        <h2>Reward path</h2>
+        <p>
+          Reward implementation is selected by env config. RM and post-process
+          produce final reward tensors before dynamic sampling filters groups.
+        </p>
+      </article>
+    </div>
+
+    <div class="lane">
+      <div class="lane-title">Artifacts</div>
+      <article class="box green">
+        <h2>Durable outputs</h2>
+        <p><code>${ROOT_DIR}/runs/&lt;project&gt;/&lt;name&gt;</code></p>
+        <ul>
+          <li>Logs and resolved configs.</li>
+          <li>Rollout cases and discard dumps.</li>
+          <li>Checkpoints capped by train profile.</li>
+        </ul>
+      </article>
+      <article class="box violet">
+        <h2>Observability</h2>
+        <p>
+          W&amp;B tracks rollout reward, truncation, format/action rates,
+          PPO KL, clipfrac, entropy, grad norm, wait time, and throughput.
+        </p>
+      </article>
+      <article class="box red">
+        <h2>Failure behavior</h2>
+        <p>
+          Launch failure or train exit should restore bench. Watchdog is the
+          fallback when GPUs stay idle.
+        </p>
+      </article>
+    </div>
+  </section>
+
+  <section class="wide" aria-label="sample data flow">
+    <div class="lane-title">End-to-end data flow</div>
+    <div class="flow">
+      <div class="step">
+        <b>1. Resolve profiles</b>
+        <span>Run, model, train, topology, aux, and env config resolve into run-local launch/train contracts.</span>
+      </div>
+      <div class="step">
+        <b>2. Start services</b>
+        <span>Ray head/workers, env servers, router, optional aux endpoint, and SGLang rollout engines come up.</span>
+      </div>
+      <div class="step">
+        <b>3. Rollout</b>
+        <span>Env server runs the episode and calls the Slime policy gateway; the gateway records tokens, logprobs, masks, and traces.</span>
+      </div>
+      <div class="step">
+        <b>4. Reward and filter</b>
+        <span>Reward implementation fills reward fields; dynamic sampling drops zero-variance groups.</span>
+      </div>
+      <div class="step">
+        <b>5. Train</b>
+        <span>Actor consumes batches, computes PPO/GRPO losses, updates weights, then syncs rollout engines.</span>
+      </div>
+      <div class="step">
+        <b>6. Persist</b>
+        <span>Metrics, dumps, resolved configs, and capped checkpoints are written under the run directory.</span>
+      </div>
+    </div>
+  </section>
+
+  <div class="legend" aria-label="legend">
+    <span class="pill"><span class="dot"></span> Training/runtime</span>
+    <span class="pill"><span class="dot green"></span> Durable state</span>
+    <span class="pill"><span class="dot amber"></span> Ops boundary</span>
+    <span class="pill"><span class="dot violet"></span> Launch/config</span>
+    <span class="pill"><span class="dot teal"></span> Env/reward</span>
+    <span class="pill"><span class="dot red"></span> Failure/keepalive</span>
+  </div>
+</main>
+</body>
+</html>

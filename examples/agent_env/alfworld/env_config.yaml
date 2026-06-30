@@ -5,7 +5,7 @@ task:
 max_turns: 30
 
 timeouts:
-  policy_s: 300
+  policy_s: 600
   env_request_s: 660
 
 interaction:
@@ -60,7 +60,7 @@ env_server:
   reuse_workers: true
   reset_on_release: false
   worker_start_timeout_s: 300
-  worker_request_timeout_s: 180
+  worker_request_timeout_s: 660
   prewarm_splits:
     - train
   honor_direct_game_file: true

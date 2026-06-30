@@ -123,7 +123,7 @@ for ((i = 1; i <= $#; i++)); do
   fi
 done
 load_config_if_present "${AUX_CONFIG}"
-resolve_slime_runtime
+set_slime_runtime_defaults
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -150,12 +150,41 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+default_aux_serve_python() {
+  if [ -n "${SLIME_ENV:-}" ]; then
+    printf '%s\n' "${SLIME_PYTHON:-${SLIME_ENV}/bin/python}"
+    return 0
+  fi
+
+  case "${SLIME_RUNTIME}" in
+    image)
+      printf '%s\n' "${SLIME_IMAGE_PYTHON}"
+      ;;
+    pack|conda_pack|conda-pack)
+      printf '%s\n' "${SLIME_PACK_PATH}/bin/python"
+      ;;
+    auto)
+      if [ -x "${SLIME_IMAGE_PYTHON}" ] && slime_python_imports_slime "${SLIME_IMAGE_PYTHON}"; then
+        printf '%s\n' "${SLIME_IMAGE_PYTHON}"
+      else
+        printf '%s\n' "${SLIME_PACK_PATH}/bin/python"
+      fi
+      ;;
+    *)
+      echo "Unsupported SLIME_RUNTIME=${SLIME_RUNTIME}; expected auto, image, or pack" >&2
+      exit 1
+      ;;
+  esac
+}
+
 apply_aux_defaults() {
   AUX_SPEC=${AUX_SPEC:-local/Qwen3.5-122B-A10B}
   if [ -z "${AUX_NODE}" ] && [ -z "${AUX_NODE_INDICES}" ] && [ "${AUX_NODES_FILE}" = "${DEFAULT_AUX_NODES_FILE}" ]; then
     AUX_NODE_INDICES=3
   fi
-  AUX_PYTHON=${AUX_PYTHON:-${SLIME_PYTHON}}
+  if [ -z "${AUX_PYTHON}" ]; then
+    AUX_PYTHON=$(default_aux_serve_python)
+  fi
   AUX_SERVE_PYTHON=${AUX_SERVE_PYTHON:-${AUX_PYTHON}}
   if [ -z "${AUX_HELPER_PYTHON}" ]; then
     if [ -x "${AUX_PYTHON}" ]; then

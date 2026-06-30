@@ -14,6 +14,11 @@ scripts, not in this repo.
 - node-local runtime assets: `/tmp/server-ops-runtime`
 - run outputs: `${ROOT_DIR}/runs`
 
+If a cluster puts a smaller project quota on `${ROOT_DIR}`, keep the public
+layout unchanged and make `${ROOT_DIR}/models` or `${ROOT_DIR}/runs` symlinks
+to another shared-storage quota tree. Training code should still use the
+standard `${ROOT_DIR}` paths.
+
 ## Main Entrypoints
 
 - `launch_agentic_training.sh`: profile-driven distributed launcher. It resolves

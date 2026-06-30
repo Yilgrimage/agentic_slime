@@ -22,36 +22,25 @@ class FakeBackend:
     def start(self) -> dict:
         return {"num_tasks": int(self.config.get("num_tasks", 3))}
 
-    def reset(self, payload: dict) -> dict:
+    def run_episode(self, payload: dict) -> dict:
         self.reset_count += 1
-        self.step_count = 0
-        self.score = 0.0
-        self.done = False
-        return {
-            "observation": f"reset:{payload.get('task_index')}",
-            "info": {"admissible_commands": [["look"]]},
-            "split": str(payload.get("split") or self.split),
-            "task_index": int(payload.get("task_index") or 0),
-            "reset_count": self.reset_count,
-            "step_count": self.step_count,
-        }
-
-    def step(self, payload: dict) -> dict:
         self.step_count += 1
+        self.score = 0.0
         self.score = 1.0
         self.done = True
+        task_index = int(payload.get("task_index") or 0)
         return {
-            "observation": f"step:{payload.get('action')}",
+            "status": "completed",
+            "observation": f"episode:{task_index}",
             "score": self.score,
             "done": self.done,
             "success": True,
-            "info": {"won": [True]},
+            "info": {"won": [True], "task_index": task_index},
+            "split": str(payload.get("split") or self.split),
+            "task_index": task_index,
             "reset_count": self.reset_count,
             "step_count": self.step_count,
         }
-
-    def evaluate(self, payload: dict) -> dict:
-        return {"score": self.score, "done": self.done, "success": self.score > 0}
 
     def release(self, payload: dict) -> dict:
         return {"reset_count": self.reset_count, "step_count": self.step_count}
@@ -87,24 +76,26 @@ def main() -> None:
         health = json.loads(_OPENER.open(f"{base_url}/health", timeout=10).read().decode())
         assert health["ok"] is True
         assert health["num_tasks"] == 7
-        lease = _post(base_url, "/allocate", {"split": "train", "task_key": "train:0", "request_id": "r0"})
+        episode = _post(
+            base_url,
+            "/run_episode",
+            {"split": "train", "task_key": "train:0", "request_id": "r0", "task_index": 0},
+        )
+        assert episode["ok"] is True
+        assert episode["success"] is True
+        assert episode["observation"] == "episode:0"
+        assert episode["lease_id"].startswith("lease-")
+
+        lease = _post(base_url, "/allocate", {"split": "valid_seen", "task_key": "valid_seen:1", "request_id": "e0"})
         assert lease["ok"] is True
-        lease_id = lease["lease_id"]
-        worker_id = lease["worker_id"]
-        reset = _post(base_url, "/reset", {"lease_id": lease_id, "split": "train", "task_index": 0})
-        assert reset["observation"] == "reset:0"
-        step = _post(base_url, "/step", {"lease_id": lease_id, "action": "look"})
-        assert step["success"] is True
-        eval_payload = _post(base_url, "/evaluate", {"lease_id": lease_id})
-        assert eval_payload["score"] == 1.0
-        close = _post(base_url, "/close", {"lease_id": lease_id})
+        held_episode = _post(
+            base_url,
+            "/run_episode",
+            {"lease_id": lease["lease_id"], "split": "valid_seen", "task_index": 1, "release_on_done": False},
+        )
+        assert held_episode["split"] == "valid_seen"
+        close = _post(base_url, "/close", {"lease_id": lease["lease_id"]})
         assert close["found"] is True
-        eval_lease = _post(base_url, "/allocate", {"split": "valid_seen", "task_key": "valid_seen:1", "request_id": "e0"})
-        assert eval_lease["ok"] is True
-        assert eval_lease["worker_id"] == worker_id
-        eval_reset = _post(base_url, "/reset", {"lease_id": eval_lease["lease_id"], "split": "valid_seen", "task_index": 1})
-        assert eval_reset["split"] == "valid_seen"
-        _post(base_url, "/close", {"lease_id": eval_lease["lease_id"]})
         status = json.loads(_OPENER.open(f"{base_url}/status", timeout=10).read().decode())
         assert status["active_leases"] == 0
         assert list(status["pools"]) == ["__shared__"]

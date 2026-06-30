@@ -515,13 +515,18 @@ elif command -v ray >/dev/null 2>&1; then
 fi
 pkill -f '[e]xamples/agent_env/.*/server.py' 2>/dev/null || true
 pkill -f '[e]xamples/agent_env/router.py' 2>/dev/null || true
-if [ "${RESET_TRAIN_RUNTIME_ON_START}" = "force" ]; then
 pkill -f '[s]glang.launch_server' 2>/dev/null || true
+pkill -f '[r]ay::SGLangEngine' 2>/dev/null || true
+pkill -f '[s]glang::scheduler' 2>/dev/null || true
+pkill -f '[s]glang::detokenizer' 2>/dev/null || true
+pkill -f '[t]rain_entrypoint.py' 2>/dev/null || true
 pkill -f '[s]lime/ray/train' 2>/dev/null || true
 pkill -f '[t]rain_async.py' 2>/dev/null || true
 pkill -f '[t]rain_async_compat.py' 2>/dev/null || true
 pkill -f '[r]un_agent_env_train.sh' 2>/dev/null || true
 pkill -f '[r]aylet|[g]cs_server|[p]lasma_store|[d]ashboard_agent|[d]ashboard.py' 2>/dev/null || true
+if [ "${RESET_TRAIN_RUNTIME_ON_START}" = "force" ]; then
+pkill -f '[r]ay::' 2>/dev/null || true
 fi
 EOF
 }
@@ -550,7 +555,7 @@ reset_runtime_on_nodes() {
 task_env_path() {
   case "${ENV_NAME}" in
     mcp_server) printf '%s\n' "${MCP_SERVER_ENV:-${LOCAL_ENVS_DIR}/mcp_server}" ;;
-    alfworld|webshop|tau2|appworld) printf '%s/%s\n' "${LOCAL_ENVS_DIR}" "${ENV_NAME}" ;;
+    alfworld|webshop|tau2|appworld|openclaw) printf '%s/%s\n' "${LOCAL_ENVS_DIR}" "${ENV_NAME}" ;;
     *) return 1 ;;
   esac
 }
@@ -558,7 +563,7 @@ task_env_path() {
 task_env_python() {
   case "${ENV_NAME}" in
     mcp_server) printf '%s\n' "${MCP_SERVER_PYTHON:-$(task_env_path)/bin/python}" ;;
-    alfworld|webshop|tau2|appworld) printf '%s/bin/python\n' "$(task_env_path)" ;;
+    alfworld|webshop|tau2|appworld|openclaw) printf '%s/bin/python\n' "$(task_env_path)" ;;
     *) return 1 ;;
   esac
 }
@@ -568,7 +573,7 @@ require_runtime() {
   local env_python
   [ -x "${SLIME_PYTHON}" ] || { echo "Missing slime python: ${SLIME_PYTHON}" >&2; exit 1; }
   case "${ENV_NAME}" in
-    webshop|alfworld|tau2|appworld|mcp_server)
+    webshop|alfworld|tau2|appworld|mcp_server|openclaw)
       env_python=$(task_env_python)
       [ -x "${env_python}" ] || { echo "Missing ${ENV_NAME} env python: ${env_python}" >&2; exit 1; }
       ;;
@@ -630,7 +635,7 @@ start_env_server() {
         "$(quote_export JAVA_HOME "${java_home}")" \
         "$(quote_export JVM_PATH "${jvm_path}")")
       ;;
-    alfworld|mcp_server) ;;
+    alfworld|mcp_server|openclaw) ;;
     tau2) extra_exports=$(quote_export LITELLM_LOCAL_MODEL_COST_MAP True) ;;
     appworld)
       extra_exports=$(quote_export HOME "${LOCAL_RUNTIME_DIR}/data/appworld")

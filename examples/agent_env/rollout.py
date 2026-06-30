@@ -155,7 +155,7 @@ def _sample_case_dump_enabled(args: Any) -> bool:
         _case_dump_limit(args, "samples"),
         _case_dump_limit(args, "discarded"),
     )
-    return any(limit > 0 for limit in limits) and bool(_runtime_env(args, "RUN_ROOT") or _runtime_env(args, "MLF_RUN_ROOT"))
+    return any(limit > 0 for limit in limits) and bool(_runtime_env(args, "RUN_ROOT"))
 
 
 def _int_runtime_env(args: Any, name: str, default: str = "0") -> int:
@@ -307,7 +307,7 @@ def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, to
     limit = _case_dump_limit(args, bucket)
     if limit <= 0:
         return
-    run_root = _runtime_env(args, "RUN_ROOT") or _runtime_env(args, "MLF_RUN_ROOT")
+    run_root = _runtime_env(args, "RUN_ROOT")
     if not run_root:
         return
     counter_key = f"{spec.name}:{bucket}"
@@ -1326,9 +1326,41 @@ async def call_policy(
     if sample.session_id and getattr(args, "router_policy", None) == "consistent_hashing":
         headers = {"X-SMG-Routing-Key": sample.session_id}
     payload = {"input_ids": input_ids, "sampling_params": sampling_params, "return_logprob": True}
+    timeout_s = float(cfg_path(args, "timeouts.policy_s", 60.0))
+
+    async def direct_post_model() -> dict:
+        import httpx
+
+        last_exc: Exception | None = None
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s), trust_env=False) as client:
+            for attempt in range(3):
+                try:
+                    response = await client.post(url, json=payload, headers=headers)
+                    response.raise_for_status()
+                    return response.json()
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt >= 2:
+                        raise
+                    logger.warning(
+                        "%s policy generate request failed, retrying attempt=%d url=%s error=%s",
+                        spec.name,
+                        attempt + 1,
+                        url,
+                        exc,
+                    )
+                    await asyncio.sleep(0.5)
+        assert last_exc is not None
+        raise last_exc
+
+    # The env-server policy gateway serves requests from HTTP worker threads.
+    # Using Slime's distributed post helper there can wait inside Ray without
+    # actually issuing SGLang /generate requests. Direct HTTP keeps the gateway
+    # independent from Ray's internal async dispatch while still targeting the
+    # same SGLang router URL.
     output = await asyncio.wait_for(
-        post(url, payload, headers=headers),
-        timeout=float(cfg_path(args, "timeouts.policy_s", 60.0)),
+        direct_post_model(),
+        timeout=timeout_s,
     )
     text = output.get("text", "")
     meta = output.get("meta_info", {})
@@ -1356,6 +1388,26 @@ def env_server_url(args: Any, spec: AgentEnvSpec) -> str:
 
 async def post_env(args: Any, spec: AgentEnvSpec, endpoint: str, payload: dict, max_retries: int = 60) -> dict:
     timeout_s = float(cfg_path(args, "timeouts.env_request_s", 30.0))
+    from slime.utils import http_utils
+
+    if getattr(http_utils, "_http_client", None) is None:
+        import httpx
+
+        url = f"{env_server_url(args, spec)}{endpoint}"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s), trust_env=False) as client:
+            last_exc: Exception | None = None
+            for attempt in range(max(1, int(max_retries))):
+                try:
+                    response = await client.post(url, json=payload or {})
+                    response.raise_for_status()
+                    return response.json()
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt + 1 >= max(1, int(max_retries)):
+                        raise
+                    await asyncio.sleep(1)
+            assert last_exc is not None
+            raise last_exc
     return await asyncio.wait_for(
         post(f"{env_server_url(args, spec)}{endpoint}", payload, max_retries=max_retries),
         timeout=timeout_s,
@@ -1365,57 +1417,6 @@ async def post_env(args: Any, spec: AgentEnvSpec, endpoint: str, payload: dict, 
 def lease_request_id(sample: Sample) -> str:
     # Stable across HTTP retries for this in-memory rollout call only.
     return f"sample-{sample.index}-group-{sample.group_index}-obj-{id(sample)}"
-
-
-async def allocate_env(args: Any, spec: AgentEnvSpec, sample: Sample) -> dict:
-    payload = task_payload(sample, spec)
-    split = payload.get("split") or cfg_path(args, "task.split", spec.default_split)
-    index = task_index(sample)
-    logger.debug(
-        "%s allocate split=%s task_index=%s url=%s arg_%s=%s",
-        spec.name,
-        split,
-        index,
-        env_server_url(args, spec),
-        spec.env_url_arg,
-        arg(args, spec.env_url_arg, None),
-    )
-    return await post_env(
-        args,
-        spec,
-        "/allocate",
-        {**payload, "split": split, "task_key": task_key(sample, spec), "request_id": lease_request_id(sample)},
-    )
-
-
-async def reset_env(args: Any, spec: AgentEnvSpec, sample: Sample, lease_id: str, extra_payload: dict | None = None) -> dict:
-    payload = {
-        **task_payload(sample, spec),
-        "lease_id": lease_id,
-        "seed": metadata(sample).get("seed", sample.group_index if sample.group_index is not None else sample.index),
-    }
-    if extra_payload:
-        payload.update(extra_payload)
-    return await post_env(args, spec, "/reset", payload)
-
-
-async def step_env(args: Any, spec: AgentEnvSpec, lease_id: str, action: Any) -> dict:
-    return await post_env(args, spec, "/step", {"lease_id": lease_id, "action": action})
-
-
-async def evaluate_env(args: Any, spec: AgentEnvSpec, lease_id: str | None) -> dict:
-    if not lease_id:
-        return {}
-    return await post_env(args, spec, "/evaluate", {"lease_id": lease_id}, max_retries=3)
-
-
-async def close_env(args: Any, spec: AgentEnvSpec, lease_id: str | None) -> None:
-    if not lease_id:
-        return
-    try:
-        await post_env(args, spec, "/close", {"lease_id": lease_id}, max_retries=3)
-    except Exception:
-        logger.debug("Failed to close %s server lease %s", spec.name, lease_id, exc_info=True)
 
 
 def outcome_reward(args: Any, spec: AgentEnvSpec, success: bool, score: float) -> float:
@@ -1692,336 +1693,3 @@ def generate_rollout_fully_async_glm_padding(args: Any, rollout_id: int, data_bu
     if evaluation:
         raise ValueError("agent-env GLM-style fully-async rollout does not support evaluation mode")
     return run(_generate_rollout_fully_async_glm_padding(args, rollout_id, data_buffer))
-
-
-async def generate_agent_rollout(
-    args: Any,
-    sample: Sample,
-    sampling_params: dict,
-    *,
-    spec: AgentEnvSpec,
-    reset_payload: dict | None = None,
-) -> Sample:
-    assert not arg(args, "partial_rollout", False), f"{spec.name} rollout does not support partial rollout yet."
-
-    tok = tokenizer(args)
-    actions: list[str] = []
-    final_score = 0.0
-    success = False
-    index = task_index(sample)
-    lease_id = None
-    sample_metadata = metadata(sample)
-    split = sample_metadata.get("split") or cfg_path(args, "task.split", spec.default_split)
-    phase = "start"
-    if sample.status == Sample.Status.ABORTED:
-        sample.status = Sample.Status.PENDING
-    sample.remove_sample = False
-
-    try:
-        phase = "allocate"
-        lease = await allocate_env(args, spec, sample)
-        lease_id = lease["lease_id"]
-        phase = "reset"
-        reset = await reset_env(args, spec, sample, lease_id, reset_payload)
-        observation = str(reset.get("observation", ""))
-        info = reset.get("info") or {}
-        split = reset.get("split") or split
-        reset_discard_reason = _env_discard_reason(info)
-        if reset_discard_reason:
-            sample.status = Sample.Status.FAILED
-            sample.remove_sample = True
-            sample_metadata["discard_sample"] = True
-            sample_metadata["discard_reason"] = reset_discard_reason
-            sample_metadata["turn_count"] = 0
-            sample_metadata["format_ok"] = True
-            sample_metadata["env_score"] = float(reset.get("score", 0.0) or 0.0)
-            sample_metadata["env_success"] = False
-            sample_metadata["env_reward"] = 0.0
-            env_meta = spec.env_metadata(reset, index, split, lease_id)
-            env_meta.setdefault("server_url", env_server_url(args, spec))
-            record_env_metadata(sample_metadata, spec, env_meta)
-            sample.reward = 0.0
-            ensure_rollout_shapes(args, sample, spec)
-            dump_completed_sample_case(args, spec, sample, tok)
-            logger.warning("%s rollout discarded sample during reset reason=%s", spec.name, reset_discard_reason)
-            return sample
-
-        prompt = spec.initial_prompt(args, sample, observation, info)
-        mode = interaction_mode(args, spec)
-        tools = tool_schemas_for_rollout(args, spec, info)
-        enable_thinking = enable_thinking_for_rollout(args, spec)
-        messages = initial_messages_for_rollout(args, spec, sample, observation, info, prompt)
-        ledger = AgentTokenLedger(
-            args=args,
-            spec=spec,
-            tok=tok,
-            messages=messages,
-            tools=tools,
-            enable_thinking=enable_thinking,
-        )
-        trace_turns = _sample_case_dump_enabled(args)
-        sample.prompt = ledger.prompt_text
-        sample.tokens = list(ledger.tokens)
-        sample.response = ""
-        sample.response_length = 0
-        sample.loss_mask = []
-        sample.rollout_log_probs = None
-        sample_metadata["token_rewards"] = ledger.token_rewards
-        sample_metadata["actions"] = actions
-        sample_metadata["format_errors"] = 0
-        sample_metadata["interaction_mode"] = mode
-        if trace_turns:
-            sample_metadata["messages"] = ledger.messages
-        if tools:
-            sample_metadata["tool_schemas"] = tools
-
-        max_turns = int(cfg_path(args, "max_turns", spec.default_max_turns))
-        for _turn in range(max_turns):
-            turn_trace: dict[str, Any] | None = None
-            if trace_turns:
-                turn_trace = {
-                    "turn": _turn,
-                    "token_count_before_generation": len(ledger.tokens),
-                }
-            remaining = ledger.remaining_context()
-            if remaining is not None and remaining <= 0:
-                sample.status = Sample.Status.TRUNCATED
-                sample_metadata["truncated_reason"] = "context_limit"
-                break
-
-            params = turn_params(args, spec, sampling_params, remaining)
-            if params["max_new_tokens"] <= 0:
-                sample.status = Sample.Status.TRUNCATED
-                sample_metadata["truncated_reason"] = "context_limit"
-                break
-
-            phase = "policy"
-            response_text, _response_token_ids, _response_log_probs, finish_type = await call_policy(
-                args,
-                spec,
-                sample,
-                ledger.tokens,
-                params,
-            )
-            if finish_type == "abort":
-                sample.status = Sample.Status.ABORTED
-                break
-            if not _response_token_ids and response_text:
-                if bool(arg(args, "allow_policy_retokenize_fallback", False)):
-                    _response_token_ids = tok(response_text, add_special_tokens=False)["input_ids"]
-                    sample_metadata["policy_retokenize_fallbacks"] = int(
-                        sample_metadata.get("policy_retokenize_fallbacks", 0)
-                    ) + 1
-                else:
-                    sample.status = Sample.Status.FAILED
-                    sample.remove_sample = True
-                    sample_metadata["error"] = "SGLang did not return output token ids for non-empty policy text"
-                    break
-
-            decoded_raw = decode_token_ids(tok, _response_token_ids, skip_special_tokens=False)
-            raw_response_text = response_text or decoded_raw
-            text_view = parse_policy_text_view(args, spec, raw_response_text)
-            parser_text = text_view.content_text
-            if response_text and decoded_raw and response_text != decoded_raw:
-                sample_metadata.setdefault("policy_text_token_mismatches", 0)
-                sample_metadata["policy_text_token_mismatches"] = int(sample_metadata["policy_text_token_mismatches"]) + 1
-            if text_view.reasoning_parser:
-                sample_metadata["reasoning_parser"] = text_view.reasoning_parser
-                if not text_view.reasoning_ok:
-                    sample_metadata["reasoning_parse_errors"] = int(sample_metadata.get("reasoning_parse_errors", 0)) + 1
-                    sample_metadata.setdefault("reasoning_parse_error", text_view.reasoning_error)
-            if turn_trace is not None:
-                turn_trace.update(
-                    {
-                        "finish_type": finish_type,
-                        "response_text": response_text,
-                        "decoded_raw_response": decoded_raw,
-                        "parser_text": parser_text,
-                        "reasoning_parser": text_view.reasoning_parser,
-                        "reasoning_ok": text_view.reasoning_ok,
-                        "reasoning_error": text_view.reasoning_error,
-                        "reasoning_text": text_view.reasoning_text,
-                        "response_token_count": len(_response_token_ids),
-                    }
-                )
-
-            if mode == "tool_call":
-                parser_name = infer_tool_call_parser_name(tok)
-                sample_metadata["tool_call_parser"] = parser_name
-                action, format_valid, parse_mode = parse_standard_tool_call(parser_text, tools, parser_name)
-                if not format_valid and parse_mode == "no_standard_tool_call" and spec.allow_assistant_message:
-                    content = visible_assistant_text(parser_text)
-                    if content:
-                        action = {"type": "assistant_message", "content": content}
-                        format_valid = True
-                        parse_mode = "assistant_message"
-            else:
-                parser = action_parser(args, spec)
-                action, format_valid, parse_mode = parser(parser_text)
-            sample_metadata.setdefault("action_parse_modes", []).append(parse_mode)
-            record_format_check(sample_metadata, turn=_turn, valid=format_valid, parse_mode=parse_mode)
-
-            if finish_type == "length":
-                sample_metadata["max_response_tokens_hits"] = int(
-                    sample_metadata.get("max_response_tokens_hits", 0)
-                ) + 1
-
-            action = spec.choose_action(args, action, spec.info_actions(info), sample)
-            actions.append(action)
-            if turn_trace is not None:
-                turn_trace.update({"parse_mode": parse_mode, "format_valid": bool(format_valid), "action": action})
-
-            if mode == "tool_call":
-                assistant_message = policy_message_for_generation(
-                    mode,
-                    parser_text,
-                    action,
-                )
-            else:
-                assistant_text = parser_text if text_view.reasoning_parser else (parser_text or raw_response_text)
-                assistant_message = {"role": "assistant", "content": visible_assistant_text(assistant_text)}
-            if turn_trace is not None:
-                turn_trace["assistant_message"] = assistant_message
-
-            ledger.append_assistant_generation(
-                turn=_turn,
-                message=assistant_message,
-                token_ids=_response_token_ids,
-                text=raw_response_text,
-                log_probs=_response_log_probs,
-            )
-            if turn_trace is not None:
-                turn_trace["token_count_after_assistant"] = len(ledger.tokens)
-
-            phase = "step"
-            step = await step_env(args, spec, lease_id, action)
-            observation = str(step.get("observation", ""))
-            final_score = float(step.get("score", 0.0) or 0.0)
-            done = bool(step.get("done", False))
-            info = step.get("info") or {}
-            success = spec.success(info, final_score)
-            if turn_trace is not None:
-                turn_trace.update(
-                    {
-                        "done": done,
-                        "score": final_score,
-                        "success": success,
-                        "env_step": step,
-                        "observation": observation,
-                    }
-                )
-            discard_reason = _env_discard_reason(info)
-            if discard_reason:
-                sample.status = Sample.Status.FAILED
-                sample.remove_sample = True
-                sample_metadata["discard_sample"] = True
-                sample_metadata["discard_reason"] = discard_reason
-                sample_metadata["turn_count"] = len(actions)
-                sample_metadata["env_score"] = final_score
-                sample_metadata["env_success"] = success
-                sample_metadata["env_reward"] = 0.0
-                env_meta = spec.env_metadata(reset, index, split, lease_id)
-                env_meta.setdefault("server_url", env_server_url(args, spec))
-                record_env_metadata(sample_metadata, spec, env_meta)
-                if turn_trace is not None:
-                    turn_trace["discard_sample"] = True
-                    turn_trace["discard_reason"] = discard_reason
-                    sample_metadata.setdefault("turns", []).append(turn_trace)
-                ledger.materialize(sample, sample_metadata, include_trace=trace_turns)
-                sample_metadata["token_audit"] = ledger.audit()
-                sample.reward = 0.0
-                dump_completed_sample_case(args, spec, sample, tok)
-                ensure_rollout_shapes(args, sample, spec)
-                logger.warning("%s rollout discarded sample reason=%s", spec.name, discard_reason)
-                return sample
-            env_text = spec.observation_text(args, observation, info)
-            env_messages = environment_messages_from_step(
-                mode=mode,
-                action=action,
-                assistant_message=assistant_message,
-                observation=observation,
-                info=info,
-                done=done,
-                env_text=env_text,
-            )
-            if turn_trace is not None:
-                turn_trace["env_messages"] = env_messages
-
-            if env_messages:
-                add_next_generation_prompt = not done
-                fits_final, final_token_count = ledger.can_append_environment_messages(
-                    env_messages,
-                    add_generation_prompt=add_next_generation_prompt,
-                )
-                if fits_final:
-                    _delta_len, delta_mode = ledger.append_environment_messages(
-                        turn=_turn,
-                        messages=env_messages,
-                        add_generation_prompt=add_next_generation_prompt,
-                    )
-                    sample_metadata.setdefault("message_delta_modes", []).append(delta_mode)
-                elif not done:
-                    sample.status = Sample.Status.TRUNCATED
-                    sample_metadata["truncated_reason"] = "context_limit_after_observation"
-                    sample_metadata["context_limit_token_count"] = final_token_count
-                    if turn_trace is not None:
-                        turn_trace["context_limit_token_count"] = final_token_count
-                        turn_trace["token_count_after_environment"] = len(ledger.tokens)
-                        sample_metadata.setdefault("turns", []).append(turn_trace)
-                    break
-            if turn_trace is not None:
-                turn_trace["token_count_after_environment"] = len(ledger.tokens)
-                sample_metadata.setdefault("turns", []).append(turn_trace)
-
-            if done:
-                sample.status = Sample.Status.COMPLETED
-                break
-        else:
-            sample.status = Sample.Status.TRUNCATED
-            sample_metadata["truncated_reason"] = "max_turns"
-
-        env_reward = outcome_reward(args, spec, success, final_score)
-        env_meta = spec.env_metadata(reset, index, split, lease_id)
-        env_meta.setdefault("server_url", env_server_url(args, spec))
-        ledger.materialize(sample, sample_metadata, include_trace=trace_turns)
-        sample_metadata["token_audit"] = ledger.audit()
-        sample_metadata.update(
-            {
-                "turn_count": len(actions),
-                "format_ok": int(sample_metadata.get("format_errors", 0)) == 0,
-                "env_score": final_score,
-                "env_success": success,
-                "env_reward": env_reward,
-                "interaction_mode": sample_metadata["interaction_mode"],
-            }
-        )
-        record_env_metadata(sample_metadata, spec, env_meta)
-
-        if sample.status == Sample.Status.ABORTED:
-            sample.reward = 0.0
-        elif arg(args, "use_opd", False) and arg(args, "opd_type") == "sglang":
-            sample.reward = None
-        else:
-            sample.reward = None
-        dump_completed_sample_case(args, spec, sample, tok)
-        ensure_rollout_shapes(args, sample, spec)
-        return sample
-    except Exception as exc:
-        if phase in {"allocate", "reset", "policy", "step"} and _is_env_infra_exception(exc):
-            return _record_rollout_infra_failure(args, spec, sample, phase, exc, tok)
-        sample.status = Sample.Status.FAILED
-        sample.reward = 0.0
-        ensure_rollout_shapes(args, sample, spec)
-        metadata(sample).setdefault("error", repr(exc))
-        dump_completed_sample_case(args, spec, sample, tok)
-        logger.exception("%s rollout failed", spec.name)
-        return sample
-    finally:
-        if lease_id is not None:
-            try:
-                eval_payload = await evaluate_env(args, spec, lease_id)
-                if eval_payload:
-                    metadata(sample).setdefault("env_evaluate", eval_payload)
-            except Exception:
-                logger.debug("Failed to evaluate %s lease %s before close", spec.name, lease_id, exc_info=True)
-        await close_env(args, spec, lease_id)

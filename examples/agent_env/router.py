@@ -202,7 +202,7 @@ class EnvRouter:
             503,
         )
 
-    def lease_proxy(self, endpoint: str, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    def _lease_proxy(self, endpoint: str, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         global_lease_id = str(payload.get("lease_id") or payload.get("session_id") or "")
         if not global_lease_id:
             return {"ok": False, "error": "lease_id is required"}, 400
@@ -235,6 +235,23 @@ class EnvRouter:
             result["worker_idx"] = worker.idx
             result["worker_url"] = worker.url
         return result, _payload_status(result, status)
+
+    def run_episode(self, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if payload.get("lease_id") or payload.get("session_id"):
+            return self._lease_proxy("/run_episode", payload)
+        alloc, status = self.allocate(payload)
+        if not alloc.get("ok"):
+            return alloc, status
+        episode_payload = dict(payload)
+        episode_payload["lease_id"] = alloc["lease_id"]
+        episode_payload["session_id"] = alloc["session_id"]
+        result, status = self._lease_proxy("/run_episode", episode_payload)
+        result.setdefault("worker_idx", alloc.get("worker_idx"))
+        result.setdefault("worker_url", alloc.get("worker_url"))
+        return result, status
+
+    def close(self, payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        return self._lease_proxy("/close", payload)
 
     def health(self) -> dict[str, Any]:
         return {"ok": True, "num_workers": self.num_workers, "workers": [w.url for w in self.workers]}
@@ -273,8 +290,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if self.path == "/allocate":
                 result, status = self.router.allocate(payload)
-            elif self.path in ("/reset", "/step", "/evaluate", "/close", "/heartbeat"):
-                result, status = self.router.lease_proxy(self.path, payload)
+            elif self.path == "/run_episode":
+                result, status = self.router.run_episode(payload)
+            elif self.path == "/close":
+                result, status = self.router.close(payload)
             else:
                 _json_response(self, 404, {"ok": False, "error": "not found"})
                 return

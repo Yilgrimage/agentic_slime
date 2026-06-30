@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agentic Slime Discipline"
+  short_description: "Engineering discipline for the agentic Slime training stack."
+  default_prompt: "Use this skill when editing or reviewing agentic Slime envs, MCP tasks, reward modules, launch profiles, or RL training behavior."

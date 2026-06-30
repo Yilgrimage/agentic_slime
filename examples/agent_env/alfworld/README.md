@@ -1,19 +1,16 @@
 # ALFWorld agentic rollout for slime
 
 This example plugs ALFWorld into slime through `--custom-generate-function-path`.
-One rollout sample is one ALFWorld episode. `rollout.py` now only
-declares ALFWorld-specific prompt/action/success behavior and delegates the
-common agent loop to `examples.agent_env.rollout`. Model action tokens use
-`loss_mask=1`; environment observations use `loss_mask=0`. The shared rollout
-keeps semantic `messages` during interaction and lets slime's native
-`MultiTurnLossMaskGenerator` build final `tokens` and `loss_mask` at episode
-end. Rollout logprobs are not emitted by the env wrapper; the training backend
-recomputes old logprobs when needed.
+One rollout sample is one ALFWorld episode. `rollout.py` declares
+ALFWorld-specific prompt/action/success behavior and sends a single
+server-owned episode request to the ALFWorld env server. Model action tokens use
+`loss_mask=1`; environment observations use `loss_mask=0`. The Slime-side
+policy gateway owns chat templating, tokenization, rollout logprobs, and final
+`Sample` construction.
 
 Directory layout:
 
-- `rollout.py`: ALFWorld `AgentEnvSpec` for the shared rollout
-  loop.
+- `rollout.py`: ALFWorld `AgentEnvSpec` for the server-episode adapter.
 - `server.py`: ALFWorld backend for the shared process-pool lease server.
 - `prompt_data.py`: ALFWorld prompt metadata generation.
 - `scripts/`: ALFWorld shell entrypoints.
@@ -69,17 +66,20 @@ This adapter keeps the training/rollout environment and ALFWorld runtime
 decoupled:
 
 - `rollout.py` stays on the slime side. It only talks to SGLang
-  for model actions and to the ALFWorld HTTP server for `/reset`, `/step`, and
-  `/close`.
+  through the policy gateway and sends one `/run_episode` request to the
+  ALFWorld HTTP server. It materializes tokens, logprobs, loss masks, and Slime
+  samples after the server finishes the episode.
 - `server.py` owns the ALFWorld import, data path, and env lifecycle. The
   slime training environment does not need ALFWorld on its `PYTHONPATH`.
+  Server workers own the environment loop and call the policy gateway for model
+  actions.
 - The shared process-pool server prewarms a pool of ALFWorld env workers per
-  split. A rollout episode leases one worker at reset time and returns it on
-  close, so we avoid repeatedly constructing ALFWorld/TextWorld envs.
+  split. A rollout episode leases one worker for `/run_episode` and returns it
+  when the episode completes, so we avoid repeatedly constructing
+  ALFWorld/TextWorld envs.
 - The server is process-isolated. The HTTP process only owns lease routing and
   worker lifecycle; each warm ALFWorld/TextWorld env lives in a child process.
-  Independent active episodes can reset/step concurrently without sharing parser
-  state.
+  Independent active episodes can run concurrently without sharing parser state.
 - If slime uses `router_policy=consistent_hashing`, the adapter forwards
   `sample.session_id` as the SGLang routing key.
 - For high-throughput training with long-tail episode lengths, use slime
@@ -110,26 +110,20 @@ native seeded shuffle/reset sequence. Set `env_server.reuse_workers: false` if
 you explicitly want dedicated envs.
 
 
-### Lease API
+### Server API
 
-The ALFWorld server follows a lease/pool API for large-scale rollout workers:
+The ALFWorld server follows an episode API for large-scale rollout workers:
 
 ```text
-POST /allocate   -> {lease_id, worker_id}
-POST /reset      -> reset the leased worker to a task
-POST /step       -> execute one action on the same worker
-POST /evaluate   -> return the latest outcome state
-POST /heartbeat  -> refresh lease TTL
-POST /close      -> idempotently release the lease
+POST /run_episode -> run one complete env-driven episode on a worker
 GET  /status     -> pool, lease, and worker counters
 ```
 
-`session_id` is still accepted as an alias for `lease_id` for compatibility with
-older rollout code. `request_id` on `/allocate` is idempotent, which prevents a
-rollout retry from accidentally occupying two workers. Multi-node routing is
-handled by `examples.agent_env.router`, which encodes worker identity into the
-global `lease_id` and proxies all lease-scoped requests back to the owning env
-worker.
+`/run_episode` is the only training path. The router may use `/allocate`
+internally to pick a worker, and `/close` exists only for explicit cleanup of
+held leases. Slime rollout code does not send per-turn action requests to the
+env server; the env server requests policy actions through the policy gateway.
+Multi-node routing is handled by `examples.agent_env.router`.
 
 ## GRPO
 

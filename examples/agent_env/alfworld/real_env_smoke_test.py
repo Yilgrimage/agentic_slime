@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from slime.utils.types import Sample
 
 import examples.agent_env.alfworld.rollout as alf_gen
-import examples.agent_env.rollout as agent_rollout
+import examples.agent_env.episode as episode
 
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -28,6 +28,9 @@ class FakeTokenizer:
     def encode(self, text, add_special_tokens=False):
         return [ord(ch) for ch in text]
 
+    def decode(self, token_ids, skip_special_tokens=False):
+        return "".join(chr(int(token_id)) for token_id in token_ids if int(token_id) > 0)
+
     def apply_chat_template(self, messages, tokenize=True, tools=None, add_generation_prompt=False, **kwargs):
         pieces = []
         for message in messages:
@@ -42,7 +45,7 @@ class FakeTokenizer:
         return self.encode(rendered) if tokenize else rendered
 
 
-async def fake_policy(args, sample, input_ids, sampling_params):
+async def fake_policy(args, spec, sample, input_ids, sampling_params):
     return "<think>inspect the current room</think><action>look</action>", [101], [-0.1], "stop"
 
 
@@ -112,8 +115,9 @@ env_server:
 
 
 async def run(data_dir: str):
-    agent_rollout.tokenizer = lambda args: FakeTokenizer()
-    agent_rollout.call_policy = lambda args, spec, sample, input_ids, sampling_params: fake_policy(args, sample, input_ids, sampling_params)
+    os.environ["AGENT_ENV_POLICY_HOST"] = "127.0.0.1"
+    episode.tokenizer = lambda args: FakeTokenizer()
+    episode.call_policy = fake_policy
 
     proc, base_url, config_path = _start_alfworld_server(data_dir)
 
@@ -134,6 +138,9 @@ async def run(data_dir: str):
         loss_mask_type="qwen3_5",
         use_opd=False,
         opd_type=None,
+        train_env_vars={},
+        router_policy=None,
+        hf_checkpoint="fake",
     )
 
     try:

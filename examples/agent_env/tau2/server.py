@@ -17,6 +17,16 @@ import urllib.request
 
 import yaml
 
+from examples.agent_env.env_episode import (
+    call_policy_chat,
+    choose_tool_action,
+    environment_messages_from_step,
+    extract_tool_action,
+    finish_reason_is_length,
+    mark_assistant_messages_untrained,
+    policy_context_limit_reached,
+    valid_message_updates,
+)
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
@@ -97,6 +107,13 @@ def _worker_route_seed(worker_id: str) -> int:
 def _environment_config(raw: dict) -> dict:
     data_dir = _env_path(_deep_get(raw, "tau2", "data_dir", _default_tau2_data_dir()), "TAU2_DATA_DIR")
     return {
+        "_agent_env_runtime": {
+            "max_turns": int(raw.get("max_turns", _deep_get(raw, "tau2", "max_turns", 20))),
+            "timeouts": raw.get("timeouts") if isinstance(raw.get("timeouts"), dict) else {},
+            "interaction": raw.get("interaction") if isinstance(raw.get("interaction"), dict) else {},
+            "observation": raw.get("observation") if isinstance(raw.get("observation"), dict) else {},
+            "action": raw.get("action") if isinstance(raw.get("action"), dict) else {},
+        },
         "data_dir": data_dir,
         "domain": str(_deep_get(raw, "tau2", "domain", "retail")),
         "task_set": str(_deep_get(raw, "tau2", "task_set", _deep_get(raw, "tau2", "domain", "retail"))),
@@ -414,6 +431,11 @@ class Tau2Backend:
         self.user_model_endpoint: dict[str, str] | None = None
 
     @property
+    def runtime(self) -> dict[str, Any]:
+        value = self.config.get("_agent_env_runtime")
+        return value if isinstance(value, dict) else {}
+
+    @property
     def user_sim_enabled(self) -> bool:
         return bool(self.config.get("user_sim_enabled", False)) and not bool(self.config.get("solo_mode", False))
 
@@ -536,6 +558,42 @@ class Tau2Backend:
                     tools.append(getattr(tool, "name", str(tool)))
                 return "\n".join(tools)
 
+    def _available_tool_names(self, info: dict[str, Any]) -> list[str]:
+        tools = info.get("tools") if isinstance(info, dict) else None
+        if isinstance(tools, list):
+            return [str(tool) for tool in tools]
+        return []
+
+    def _format_tools(self, names: list[str]) -> str:
+        if not names:
+            return ""
+        return "\nAvailable tool names:\n" + "\n".join(f"- {name}" for name in names) + "\n"
+
+    def _observation_text(self, observation: str, info: dict[str, Any]) -> str:
+        text = f"Observation:\n{str(observation).strip()}\n"
+        observation_cfg = self.runtime.get("observation") if isinstance(self.runtime.get("observation"), dict) else {}
+        if bool(observation_cfg.get("include_actions", True)):
+            text += self._format_tools(self._available_tool_names(info))
+        return text
+
+    def _initial_messages(self, observation: str, info: dict[str, Any], prompt: str) -> list[dict[str, Any]]:
+        policy = str(info.get("policy") or "").strip()
+        messages: list[dict[str, Any]] = []
+        if policy:
+            messages.append({"role": "system", "content": policy})
+        agent_messages = valid_message_updates(info.get("agent_messages") or info.get("initial_messages"))
+        if agent_messages:
+            messages.extend(mark_assistant_messages_untrained(agent_messages))
+            return messages
+        if str(observation).strip():
+            messages.append({"role": "user", "content": str(observation).strip()})
+            return messages
+        if str(prompt).strip():
+            messages.append({"role": "user", "content": str(prompt).strip()})
+            return messages
+        return [{"role": "user", "content": "Use the available tools to solve the task."}]
+
+
     def _policy_doc(self) -> str:
         if not self.env or not self.config.get("include_policy", True):
             return ""
@@ -602,6 +660,12 @@ class Tau2Backend:
             seen.add(name)
             unique.append(schema)
         return unique
+
+    def _episode_tool_schemas(self, info: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_tools = info.get("tool_schemas") if isinstance(info, dict) else None
+        if isinstance(raw_tools, list) and raw_tools:
+            return [tool for tool in raw_tools if isinstance(tool, dict)]
+        return self._tool_schemas()
 
     def _initial_observation(self) -> str:
         assert self.task is not None
@@ -1104,6 +1168,145 @@ class Tau2Backend:
         info["agent_messages"] = self._agent_openai_messages()
         self.last_info = info
         return self._result(observation, info)
+
+    def run_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        if not policy:
+            raise ValueError("tau2 run_episode requires policy endpoint")
+        reset = self.reset(payload)
+        observation = str(reset.get("observation", ""))
+        info = reset.get("info") if isinstance(reset.get("info"), dict) else {}
+        messages = self._initial_messages(observation, info, str(payload.get("prompt") or ""))
+        tools = self._episode_tool_schemas(info)
+        runtime = self.runtime
+        action_cfg = runtime.get("action") if isinstance(runtime.get("action"), dict) else {}
+        metadata: dict[str, Any] = {
+            "actions": [],
+            "action_parse_modes": [],
+            "format_checks": [],
+            "format_errors": 0,
+            "policy_usage": [],
+            "turn_count": 0,
+        }
+        include_trace = bool(payload.get("include_trace", False))
+        if include_trace:
+            metadata["messages"] = messages
+            metadata["turns"] = []
+
+        max_turns = int(payload.get("max_turns") or runtime.get("max_turns") or self.config.get("max_turns") or 20)
+        sampling_params = payload.get("sampling_params") if isinstance(payload.get("sampling_params"), dict) else {}
+        max_tokens = int(payload.get("max_response_tokens") or 512)
+        timeout_s = float((payload.get("timeouts") or {}).get("policy_s") or (runtime.get("timeouts") or {}).get("policy_s") or 300)
+        final_score = 0.0
+        success = False
+        status = "truncated"
+        truncated_reason = "max_turns"
+        last_step: dict[str, Any] = reset
+
+        for turn in range(max_turns):
+            turn_trace: dict[str, Any] = {"turn": turn} if include_trace else {}
+            reply = call_policy_chat(
+                policy=policy,
+                messages=messages,
+                tools=tools,
+                sampling_params=sampling_params,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+            )
+            assistant_message = reply.message
+            messages.append(assistant_message)
+            metadata["policy_usage"].append(reply.usage)
+            if policy_context_limit_reached(reply):
+                metadata["context_limit_hits"] = int(metadata.get("context_limit_hits", 0) or 0) + 1
+                truncated_reason = "context_limit_after_observation"
+                if include_trace:
+                    turn_trace.update(
+                        {
+                            "assistant_message": assistant_message,
+                            "format_valid": False,
+                            "parse_mode": "context_limit",
+                            "finish_reason": reply.finish_reason,
+                            "truncated_reason": truncated_reason,
+                        }
+                    )
+                    metadata["turns"].append(turn_trace)
+                break
+            if finish_reason_is_length(reply):
+                metadata["max_response_tokens_hits"] = int(metadata.get("max_response_tokens_hits", 0) or 0) + 1
+            action, valid, parse_mode = extract_tool_action(assistant_message)
+            if action.get("type") == "assistant_message" and str(action.get("content") or "").strip():
+                valid = True
+                parse_mode = "assistant_message"
+            metadata["action_parse_modes"].append(parse_mode)
+            metadata["format_checks"].append({"turn": turn, "valid": bool(valid), "parse_mode": parse_mode})
+            if not valid:
+                metadata["format_errors"] = int(metadata.get("format_errors", 0) or 0) + 1
+            action = choose_tool_action(
+                action,
+                self._available_tool_names(info),
+                restrict_to_available=bool(action_cfg.get("restrict_to_available", False)),
+                metadata=metadata,
+            )
+            metadata["actions"].append(action)
+            step = self.step({"action": action})
+            last_step = step
+            observation = str(step.get("observation", ""))
+            info = step.get("info") if isinstance(step.get("info"), dict) else {}
+            final_score = float(step.get("score", 0.0) or 0.0)
+            done = bool(step.get("done", False))
+            success = bool(step.get("success", final_score >= 1.0))
+            discard_reason = info.get("discard_reason") if isinstance(info, dict) else None
+            if bool(info.get("discard_sample", False)):
+                metadata["discard_sample"] = True
+                metadata["discard_reason"] = discard_reason or "tau2_env_discard"
+                status = "failed"
+                truncated_reason = ""
+                break
+            env_messages = environment_messages_from_step(
+                mode="tool_call",
+                action=action,
+                assistant_message=assistant_message,
+                observation=observation,
+                info=info,
+                done=done,
+                env_text=self._observation_text(observation, info),
+            )
+            messages.extend(env_messages)
+            if include_trace:
+                turn_trace.update(
+                    {
+                        "assistant_message": assistant_message,
+                        "action": action,
+                        "format_valid": bool(valid),
+                        "parse_mode": parse_mode,
+                        "finish_reason": reply.finish_reason,
+                        "env_step": step,
+                        "env_messages": env_messages,
+                    }
+                )
+                metadata["turns"].append(turn_trace)
+            if done:
+                status = "completed"
+                truncated_reason = ""
+                break
+
+        metadata["turn_count"] = len(metadata["actions"])
+        metadata["format_ok"] = int(metadata.get("format_errors", 0) or 0) == 0
+        if truncated_reason:
+            metadata["truncated_reason"] = truncated_reason
+        return {
+            "status": status,
+            "observation": observation,
+            "score": final_score,
+            "done": status == "completed",
+            "success": success,
+            "info": last_step.get("info") if isinstance(last_step.get("info"), dict) else {},
+            "task_index": self.task_index,
+            "num_tasks": len(self.tasks),
+            "reset_count": self.reset_count,
+            "step_count": self.step_count,
+            "metadata": metadata,
+        }
 
     def _result(self, observation: str, info: dict[str, Any]) -> dict[str, Any]:
         return {

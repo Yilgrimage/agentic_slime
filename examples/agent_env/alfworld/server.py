@@ -13,9 +13,23 @@ except ModuleNotFoundError:
     yaml = None
 
 from examples.agent_env.alfworld.task_ids import normalize_alfworld_task_id
+from examples.agent_env.env_episode import (
+    call_policy_chat,
+    choose_text_action,
+    finish_reason_is_length,
+    parse_text_action,
+    policy_context_limit_reached,
+)
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PROMPT = """You are an expert household task agent in ALFWorld.
+At each turn, read the current observation and valid actions, then choose one next action.
+The action text must be wrapped as:
+<action>one valid action</action>
+
+The action text must exactly match one of the valid actions when possible."""
 
 
 def _first(value: Any, default: Any = None) -> Any:
@@ -116,6 +130,16 @@ def _server_config(raw: dict) -> dict:
     }
 
 
+def _runtime_config(raw: dict) -> dict:
+    return {
+        "max_turns": int(raw.get("max_turns", _deep_get(raw, "alfworld", "max_turns", 30))),
+        "timeouts": raw.get("timeouts") if isinstance(raw.get("timeouts"), dict) else {},
+        "interaction": raw.get("interaction") if isinstance(raw.get("interaction"), dict) else {},
+        "observation": raw.get("observation") if isinstance(raw.get("observation"), dict) else {},
+        "action": raw.get("action") if isinstance(raw.get("action"), dict) else {},
+    }
+
+
 def _default_alfworld_config(raw: dict) -> dict:
     alfworld = raw.get("alfworld") if isinstance(raw.get("alfworld"), dict) else {}
     data_dir = os.path.expandvars(
@@ -147,7 +171,7 @@ def _default_alfworld_config(raw: dict) -> dict:
     }
 
 
-def _load_configs(path: str, overrides: dict | None = None) -> tuple[dict, dict]:
+def _load_configs(path: str, overrides: dict | None = None) -> tuple[dict, dict, dict]:
     raw = _safe_load_config(path)
     server_config = _server_config(raw)
     config_path = _deep_get(raw, "alfworld", "config_path")
@@ -157,7 +181,7 @@ def _load_configs(path: str, overrides: dict | None = None) -> tuple[dict, dict]
         config = raw
     else:
         config = _default_alfworld_config(raw)
-    return _deep_update(config, overrides or {}), server_config
+    return _deep_update(config, overrides or {}), server_config, _runtime_config(raw)
 
 
 def _select_game_file(game_files: list[str], task_index: int) -> str:
@@ -202,6 +226,33 @@ class ALFWorldBackend:
         self.success = False
         self.last_info: dict[str, Any] = {}
         self.task_index: int | None = None
+
+    @property
+    def runtime(self) -> dict[str, Any]:
+        return self.config.get("_agent_env_runtime", {}) if isinstance(self.config.get("_agent_env_runtime"), dict) else {}
+
+    def _admissible(self, info: dict[str, Any]) -> list[str]:
+        commands = _first(info.get("admissible_commands") if info else None, [])
+        return [str(command) for command in list(commands or [])]
+
+    def _format_actions(self, commands: list[str]) -> str:
+        if not commands:
+            return ""
+        return "\nValid actions:\n" + "\n".join(f"- {command}" for command in commands) + "\n"
+
+    def _observation_text(self, observation: str, info: dict[str, Any]) -> str:
+        text = f"Observation:\n{str(observation).strip()}\n"
+        observation_cfg = self.runtime.get("observation") if isinstance(self.runtime.get("observation"), dict) else {}
+        if bool(observation_cfg.get("include_actions", True)):
+            text += self._format_actions(self._admissible(info))
+        return text
+
+    def _initial_prompt(self, prompt: str, observation: str, info: dict[str, Any]) -> str:
+        base = str(prompt or "").strip() or DEFAULT_PROMPT
+        admissible = self._format_actions(self._admissible(info)).strip()
+        if "{observation}" in base or "{admissible_actions}" in base:
+            return base.format(observation=str(observation).strip(), admissible_actions=admissible)
+        return f"{base}\n\n{self._observation_text(observation, info)}"
 
     def _load_wrapper(self, split: str) -> dict[str, Any]:
         import sys
@@ -305,6 +356,133 @@ class ALFWorldBackend:
             "step_count": self.step_count,
         }
 
+    def run_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        if not policy:
+            raise ValueError("ALFWorld run_episode requires policy endpoint")
+        reset = self.reset(payload)
+        observation = str(reset.get("observation", ""))
+        info = reset.get("info") if isinstance(reset.get("info"), dict) else {}
+        prompt = self._initial_prompt(str(payload.get("prompt") or ""), observation, info)
+        messages = [{"role": "user", "content": prompt}]
+        runtime = self.runtime
+        action_cfg = runtime.get("action") if isinstance(runtime.get("action"), dict) else {}
+        interaction_cfg = runtime.get("interaction") if isinstance(runtime.get("interaction"), dict) else {}
+        tag = str(
+            (
+                interaction_cfg.get("text_action")
+                if isinstance(interaction_cfg.get("text_action"), dict)
+                else {}
+            ).get("tag", "action")
+        )
+        metadata: dict[str, Any] = {
+            "actions": [],
+            "action_parse_modes": [],
+            "format_checks": [],
+            "format_errors": 0,
+            "policy_usage": [],
+            "turn_count": 0,
+        }
+        include_trace = bool(payload.get("include_trace", False))
+        if include_trace:
+            metadata["messages"] = messages
+            metadata["turns"] = []
+
+        max_turns = int(payload.get("max_turns") or runtime.get("max_turns") or 30)
+        sampling_params = payload.get("sampling_params") if isinstance(payload.get("sampling_params"), dict) else {}
+        max_tokens = int(payload.get("max_response_tokens") or 512)
+        timeout_s = float((payload.get("timeouts") or {}).get("policy_s") or (runtime.get("timeouts") or {}).get("policy_s") or 300)
+        final_score = 0.0
+        success = False
+        status = "truncated"
+        truncated_reason = "max_turns"
+        last_step: dict[str, Any] = reset
+
+        for turn in range(max_turns):
+            turn_trace: dict[str, Any] = {"turn": turn} if include_trace else {}
+            reply = call_policy_chat(
+                policy=policy,
+                messages=messages,
+                sampling_params=sampling_params,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+            )
+            assistant_message = reply.message
+            messages.append(assistant_message)
+            metadata["policy_usage"].append(reply.usage)
+            if policy_context_limit_reached(reply):
+                metadata["context_limit_hits"] = int(metadata.get("context_limit_hits", 0) or 0) + 1
+                truncated_reason = "context_limit_after_observation"
+                if include_trace:
+                    turn_trace.update(
+                        {
+                            "assistant_message": assistant_message,
+                            "format_valid": False,
+                            "parse_mode": "context_limit",
+                            "finish_reason": reply.finish_reason,
+                            "truncated_reason": truncated_reason,
+                        }
+                    )
+                    metadata["turns"].append(turn_trace)
+                break
+            if finish_reason_is_length(reply):
+                metadata["max_response_tokens_hits"] = int(metadata.get("max_response_tokens_hits", 0) or 0) + 1
+            action, valid, parse_mode = parse_text_action(str(assistant_message.get("content") or ""), tag=tag)
+            metadata["action_parse_modes"].append(parse_mode)
+            metadata["format_checks"].append({"turn": turn, "valid": bool(valid), "parse_mode": parse_mode})
+            if not valid:
+                metadata["format_errors"] = int(metadata.get("format_errors", 0) or 0) + 1
+            action = choose_text_action(
+                action,
+                self._admissible(info),
+                restrict_to_available=bool(action_cfg.get("restrict_to_available", False)),
+                invalid_fallback=str(action_cfg.get("invalid_fallback") or "model"),
+                metadata=metadata,
+            )
+            metadata["actions"].append(action)
+            step = self.step({"action": action})
+            last_step = step
+            observation = str(step.get("observation", ""))
+            info = step.get("info") if isinstance(step.get("info"), dict) else {}
+            final_score = float(step.get("score", 0.0) or 0.0)
+            done = bool(step.get("done", False))
+            success = bool(_first(info.get("won") if info else None, final_score > 0))
+            if include_trace:
+                turn_trace.update(
+                    {
+                        "assistant_message": assistant_message,
+                        "action": action,
+                        "format_valid": bool(valid),
+                        "parse_mode": parse_mode,
+                        "finish_reason": reply.finish_reason,
+                        "env_step": step,
+                    }
+                )
+                metadata["turns"].append(turn_trace)
+            if done:
+                status = "completed"
+                truncated_reason = ""
+                break
+            messages.append({"role": "user", "content": self._observation_text(observation, info)})
+
+        metadata["turn_count"] = len(metadata["actions"])
+        metadata["format_ok"] = int(metadata.get("format_errors", 0) or 0) == 0
+        if truncated_reason:
+            metadata["truncated_reason"] = truncated_reason
+        return {
+            "status": status,
+            "observation": observation,
+            "score": final_score,
+            "done": status == "completed",
+            "success": success,
+            "info": last_step.get("info") if isinstance(last_step.get("info"), dict) else {},
+            "game_file": self.game_file,
+            "task_index": self.task_index,
+            "reset_count": self.reset_count,
+            "step_count": self.step_count,
+            "metadata": metadata,
+        }
+
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         assert self.env is not None
         action = str(payload.get("action") or "look")
@@ -361,7 +539,8 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper()), format="[%(asctime)s] %(levelname)s %(name)s: %(message)s")
-    alfworld_config, server_config = _load_configs(args.config)
+    alfworld_config, server_config, runtime_config = _load_configs(args.config)
+    alfworld_config["_agent_env_runtime"] = runtime_config
     env_config = {
         "alfworld_config": alfworld_config,
         "env_type": args.env_type,

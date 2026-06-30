@@ -2,13 +2,14 @@
 
 This example keeps WebShop outside the slime training environment. The slime
 process calls `examples.agent_env.webshop.rollout.generate`, which declares WebShop's
-environment-specific `AgentEnvSpec` and delegates the common agent loop to
-`examples.agent_env.rollout`. The WebShop env server owns process-isolated
-workers and must run in the separate WebShop conda-pack runtime.
+environment-specific `AgentEnvSpec` and delegates episode execution to the
+WebShop env server through the Slime-side policy gateway. The WebShop env
+server owns process-isolated workers and must run in the separate WebShop
+conda-pack runtime.
 
 Directory layout:
 
-- `rollout.py`: WebShop prompt/action/success spec for the shared rollout loop.
+- `rollout.py`: WebShop prompt/action/success spec for the server-episode adapter.
 - `server.py`: WebShop backend for the shared process-pool lease server.
 - `prompt_data.py`: WebShop prompt metadata generation.
 - `env_config.yaml`: WebShop data, reward, interaction, and env server config.
@@ -83,7 +84,7 @@ WebShop.
 The intended scalable design is:
 
 - process-isolated episode workers keep lease/session lifecycle, observations,
-  action parsing, and reset/step ownership;
+  action parsing, policy-gateway calls, and environment-loop ownership;
 - a shared WebShop backend service loads product data, goals, and Lucene search
   index once per node;
 - workers call the backend for `SimServer.receive`-equivalent operations.

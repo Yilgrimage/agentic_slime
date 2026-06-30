@@ -8,8 +8,12 @@ environment folder.
 
 - `server.py`: generic process-pool environment HTTP server.
 - `router.py`: generic multi-node lease router.
-- `rollout.py`: generic multi-turn custom-generate loop, token ledger, env HTTP
-  calls, sample dumping, and common shape handling.
+- `episode.py`: Slime-side policy gateway, token ledger, env episode RPC, sample
+  dumping, and common shape handling.
+- `env_episode.py`: env-side helpers for calling the policy gateway from a
+  server-owned episode loop.
+- `rollout.py`: shared rollout utilities used by server-owned episode
+  adapters.
 - `fully_async_rollout.py`: external full-async rollout wrapper with dynamic
   filtering and GLM-style padding support.
 - `group_rm.py`: single/group RM hook that dispatches to reward
@@ -24,11 +28,21 @@ environment folder.
 
 ## Environment Folders
 
-`<env>/` owns prompt rendering, parser/action semantics, backend reset/step,
-success/score interpretation, task data settings, and env-specific smoke tests.
+`<env>/` owns prompt rendering, parser/action semantics, server-side episode
+loops, backend internals, success/score interpretation, task data settings,
+and env-specific smoke tests.
+
+Env servers are pure environment RPC services. They own process isolation,
+leases, episode loops, and backend state. The public training contract is one
+episode request: `POST /run_episode`. Env servers call the Slime-side policy
+gateway when they need a model action. They must not own chat templating,
+tokenizer state, rollout logprobs, loss masks, or Slime `Sample` construction.
+Those stay in Slime-side rollout code so training tokens and masks follow the
+same contract as the rest of Slime.
 
 The shared rollout layer should not know task data layout or environment reward
-semantics. Keep those in `<env>/env_config.yaml` and `<env>/rollout.py`.
+semantics. Keep those in `<env>/env_config.yaml` and the env server/rollout
+adapter for that environment.
 
 ## Boundaries
 

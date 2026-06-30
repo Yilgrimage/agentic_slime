@@ -1,57 +1,44 @@
 ---
 name: agentic-slime-discipline
-description: "Use when editing, reviewing, launching, or debugging the agentic Slime RL training stack: configs/agent_env profiles, examples/agent_env rollout/reward/env code, Slime CLI adapters, launch profile boundaries, reward/filter/padding logic, sync/full-async training behavior, and non-invasive integration with upstream Slime."
+description: "Use when editing, reviewing, launching, or debugging the agentic Slime RL training stack: configs/agent_env profiles, examples/agent_env rollout/reward/env code, prompt-data alignment, Slime CLI adapters, launch boundaries, reward/filter/padding logic, sync/full-async behavior, and non-invasive integration with upstream Slime."
 ---
 
 # Agentic Slime Discipline
 
 Keep the agentic Slime stack small, non-invasive, and auditable. Prefer one
-clear owner for each behavior over copied profiles, wrappers, fallback branches,
-or patch-style fixes.
+clear owner for each behavior. Remove obsolete compatibility paths instead of
+adding compensating wrappers.
 
-## Core Boundary
+## Boundaries
 
 - Do not modify Slime core for agent-env behavior unless explicitly asked.
-  Prefer external hooks selected by Slime CLI arguments.
-- Keep upstream Slime updateable. Agentic extensions live outside core Slime
-  packages, usually under `examples/agent_env`, `configs/agent_env`, and
-  launch/adapter scripts.
-- Do not hide experiment semantics in launch scripts. Launchers orchestrate;
-  profiles own configuration; env code owns environment behavior.
-- Do not reimplement server keepalive or node materialization in agentic Slime.
-  Use the server ops root interfaces, for example
-  `${ROOT_DIR}/scripts/run_bench.sh`,
+- Keep agentic extensions outside core Slime, mainly under `examples/agent_env`,
+  `configs/agent_env`, and thin launch/adapter scripts.
+- Launchers orchestrate. Profiles own experiment semantics. Env code owns env
+  behavior. Server keepalive/materialization belongs to server ops scripts.
+- Use `${ROOT_DIR}/scripts/run_bench.sh`,
   `${ROOT_DIR}/scripts/gpu_idle_watchdog.sh`, and
-  `${ROOT_DIR}/scripts/prepare_node_runtime.sh`.
-
-Common hook paths:
-
-```text
---custom-generate-function-path examples.agent_env.<env>.rollout.generate
---custom-reward-post-process-path examples.agent_env.reward_post_process.post_process_rewards
---dynamic-sampling-filter-path examples.agent_env.reward_post_process.check_reward_nonzero_std
---rollout-sample-filter-path examples.agent_env.rollout.glm_style_pad_groups_filter
---group-rm
---custom-rm-path examples.agent_env.group_rm.group_reward
---rollout-function-path examples.agent_env.fully_async_rollout.generate_rollout_fully_async
-```
+  `${ROOT_DIR}/scripts/prepare_node_runtime.sh`; do not duplicate them here.
+- Prepare task data through `${ROOT_DIR}/scripts/prepare_data.sh`, pack it with
+  `${ROOT_DIR}/scripts/pack_data.sh`, and let node materialization only unpack
+  or copy validated data. Agentic Slime launch code should not download data.
 
 ## Configuration Ownership
 
-- `configs/agent_env/runs/*.env`: select env, env config, model profile, train
-  profile, topology profile, optional aux profile, and experiment naming only.
+- `configs/agent_env/runs/*.env`: choose env, env config, model profile, train
+  profile, topology profile, optional aux profile, and run naming.
 - `configs/agent_env/models/*.env`: model identity, model args, loss-mask
-  family, dropout/model extras, and model compatibility defaults.
+  family, dropout/model compatibility defaults.
 - `configs/agent_env/train/*.env`: env-specific training baseline, algorithm,
-  sync/full-async mode, rollout sampling/filtering, batch sizes, token budgets,
-  TP/CP, actor/rollout allocation, checkpointing, logging, and Slime flags.
+  sync/full-async mode, rollout filters, batch/token budgets, TP/CP,
+  actor/rollout allocation, checkpointing, logging, and Slime flags.
 - `configs/agent_env/topology/*.env`: node indexes, visible GPUs, and ports
-  only. Keep algorithm, batch, token, actor/rollout, model, and aux semantics
-  out of topology.
-- `configs/agent_env/aux/*.env`: auxiliary inference endpoint only.
-- `examples/agent_env/<env>/env_config.yaml`: environment semantics, reward
-  fields, task/data settings, parser/interaction settings, and env server
-  settings.
+  only. Keep algorithm, model, batch, token, aux, and env semantics out.
+- `configs/agent_env/aux/*.env`: auxiliary endpoint identity and credentials
+  only.
+- `configs/nodes/*.txt`: local IP files only; commit examples, not real IPs.
+- `examples/agent_env/<env>/env_config.yaml`: environment semantics, parser,
+  task/data settings, env server settings, and reward configuration.
 
 Train profile names should be:
 
@@ -61,56 +48,74 @@ Train profile names should be:
 
 Do not include model names or aux providers in train profile names.
 
-## Change Discipline
+## Runtime Contract
 
-- Locate the current owner of a setting before editing.
-- Change the existing owner instead of adding a wrapper, override layer, copied
-  YAML/env file, or one-off profile.
-- Create a new profile only for a durable reusable baseline.
-- Add config keys only when they are consumed by the launcher/adapter or Slime
-  CLI and visible in resolved profiles.
-- Remove dead compatibility paths and abandoned scripts instead of preserving
-  them for vague safety.
-- Prefer direct APIs over thin wrappers that only rename, format one path, or
-  forward arguments. Keep wrappers only when they own validation, lifecycle,
-  compatibility, metrics, retry, async, or cross-module boundary behavior.
+- Support image and conda-pack Slime runtimes through
+  `scripts/utils/slime_runtime.sh`.
+- Treat Megatron-LM as part of the Slime training runtime, not as a separate
+  materialized source. A valid runtime is either an image that already contains
+  Slime plus Megatron, or a Slime pack that contains `src/Megatron-LM`.
+- Do not add `--sources Megatron-LM`, `MEGATRON_LOCAL_PATH`, NAS checkout
+  fallbacks, or repo-specific Megatron paths to agentic training scripts.
+- `MEGATRON_PATH` may appear only as the resolved backend path exported by the
+  Slime runtime resolver and used in `PYTHONPATH`.
+- W&B is an optional reporting runtime. Prefer a separate `wandb` env pack when
+  cluster images ship incompatible SDKs, then fall back to the Slime runtime,
+  then to a version-compatible local Python. Do not install W&B during training
+  startup.
 
-## Rollout And Reward Rules
+## Launch Contract
 
-- Env wrappers own prompt rendering, parser/action semantics, backend reset/step
-  calls, success/score interpretation, and env-specific metadata.
-- Generic rollout code owns message/token ledger, env HTTP lease lifecycle,
-  sample shape, common dumping, and Slime data contracts.
-- Reward post-process owns final reward composition: env score, format reward,
-  truncation penalty, and optional judge reward.
-- Group RM should judge only when a judge is explicitly enabled. It should not
-  silently become a second reward combiner.
-- Dynamic sampling drops zero-variance reward groups after reward computation.
+- Public launch resolves run/model/train/topology/aux profiles once and writes
+  run-local artifacts under `RUN_ROOT/logs`.
+- Internal head/worker roles consume `resolved_launch.env`; the train adapter
+  consumes `resolved_train.env`. They must not re-parse git profiles.
+- `resolved_train.env` is the final train adapter contract: Slime CLI args,
+  env semantics, model paths, runtime overrides, and training runtime paths.
+- `resolved_launch.env` is launch-only state: SSH, node selectors, Ray ports,
+  env/router/aux lifecycle, bench/watchdog settings, and run directories.
+- Keep resolved files in run directories and out of git. Do not freeze arbitrary
+  ambient shell variables into them.
+- Use `${ROOT_DIR}/models` for durable model checkpoints and `${ROOT_DIR}/runs`
+  for run outputs. If a cluster needs those artifacts in another NAS quota
+  tree, handle that with symlinks at the server-ops layer; do not add alternate
+  artifact roots to training profiles or scripts.
+
+## Rollout And Reward
+
+- Env wrappers own prompt rendering, parser/action semantics, reset/step calls,
+  success/score interpretation, and env-specific metadata.
+- Generic rollout code owns message/token accounting, env HTTP lease lifecycle,
+  sample shape, common dumping, infra discard, and Slime data contracts.
+- Reward implementations own final reward composition. Select them through
+  `env_config.yaml` under `reward.impl` and task-specific reward fields.
+- Reward post-process should adapt already-computed RM rewards to Slime's reward
+  tensor contract. It should not secretly append env, format, or truncation
+  rewards unless that is the selected reward implementation.
+- Dynamic sampling drops zero-variance reward groups after RM reward computation.
   It does not resample individual samples.
-- GLM-style padding is for infra-discard recovery. Discard bad samples, then pad
-  from valid samples; never train on discarded samples as real data.
+- GLM-style padding is for infra-discard recovery: discard bad samples, then
+  pad kept groups from valid samples. Never train on discarded samples as real
+  data.
 
 ## Training Pitfalls
 
-- Disable model dropout for PPO/GRPO/RL training. Dropout corrupts old/current
-  logprob comparisons and can make KL/clip metrics meaningless.
+- Disable dropout for PPO/GRPO/RL training.
 - In full-async training, use rollout-time logprobs as the old policy
   denominator, for example `USE_ROLLOUT_LOGPROBS=1`.
 - Treat `train_rollout_logprob_abs_diff=0` under rollout-logprob mode as a
-  metric wart if it compares rollout logprobs to themselves. Cross-check PPO KL,
-  clipfrac, reward, length, and grad norm.
+  metrics wart if it compares rollout logprobs to themselves. Cross-check PPO
+  KL, clipfrac, reward, length, and grad norm.
 - Align `GLOBAL_BATCH_SIZE`, `ROLLOUT_BATCH_SIZE * N_SAMPLES_PER_PROMPT`, and
   full-async in-flight capacity unless deliberately testing staleness.
-- `SGLANG_SERVER_CONCURRENCY` may limit request submission rather than SGLang's
-  internal `max_running_requests`; verify the actual path before drawing
-  throughput conclusions.
 - Keep checkpointing sparse and capped during debugging.
 
-## Review Checklist
+## Change Discipline
 
-- Is Slime core untouched?
-- Is the run profile thin?
-- Is each changed parameter in the right owner file?
-- Are model, train, topology, aux, and env semantics separated?
-- Are resolved profiles sufficient to audit the effective run?
-- Did the change remove complexity rather than add a compensating patch?
+- Locate the current owner of a setting before editing.
+- Change the existing owner instead of adding wrappers, copied profiles, ad hoc
+  env vars, or temporary YAML/env files.
+- Create a new profile only for a durable reusable baseline.
+- Remove dead compatibility paths and abandoned scripts.
+- Before finishing, check that Slime core is untouched, run profiles stay thin,
+  runtime paths are not hard-coded, and resolved files can audit the run.

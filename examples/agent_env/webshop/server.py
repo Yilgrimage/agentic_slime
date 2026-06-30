@@ -9,9 +9,27 @@ from typing import Any
 
 import yaml
 
+from examples.agent_env.env_episode import (
+    call_policy_chat,
+    choose_text_action,
+    finish_reason_is_length,
+    parse_text_action,
+    policy_context_limit_reached,
+)
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PROMPT = """You are an expert shopping agent in WebShop.
+At each turn, read the current webpage observation and available actions, then choose one next action.
+The action text must be wrapped as:
+<action>one valid action</action>
+
+Actions must use WebShop syntax:
+- search[query words]
+- click[visible option or button text]
+
+The action text should exactly match one available action when possible."""
 
 
 def _load_text_env_class(webshop_lib: str | None):
@@ -143,6 +161,13 @@ def _environment_config(raw: dict) -> dict:
         "attr_file": os.path.expandvars(str(attr_file)) if attr_file else None,
         "num_products": num_products,
         "human_goals": _deep_get(raw, "webshop", "human_goals", True),
+        "_agent_env_runtime": {
+            "max_turns": int(raw.get("max_turns", _deep_get(raw, "webshop", "max_turns", 20))),
+            "timeouts": raw.get("timeouts") if isinstance(raw.get("timeouts"), dict) else {},
+            "interaction": raw.get("interaction") if isinstance(raw.get("interaction"), dict) else {},
+            "observation": raw.get("observation") if isinstance(raw.get("observation"), dict) else {},
+            "action": raw.get("action") if isinstance(raw.get("action"), dict) else {},
+        },
     }
 
 
@@ -204,6 +229,30 @@ class WebShopBackend:
         self.final_score = 0.0
         self.done = False
         self.last_info: dict[str, Any] = {}
+
+    @property
+    def runtime(self) -> dict[str, Any]:
+        value = self.config.get("_agent_env_runtime")
+        return value if isinstance(value, dict) else {}
+
+    def _format_actions(self, actions: list[str]) -> str:
+        if not actions:
+            return ""
+        return "\nAvailable actions:\n" + "\n".join(f"- {action}" for action in actions) + "\n"
+
+    def _observation_text(self, observation: str, info: dict[str, Any]) -> str:
+        text = f"Observation:\n{str(observation).strip()}\n"
+        observation_cfg = self.runtime.get("observation") if isinstance(self.runtime.get("observation"), dict) else {}
+        if bool(observation_cfg.get("include_actions", True)):
+            text += self._format_actions(_available_actions(self.env, info) if self.env is not None else [])
+        return text
+
+    def _initial_prompt(self, prompt: str, observation: str, info: dict[str, Any]) -> str:
+        base = str(prompt or "").strip() or DEFAULT_PROMPT
+        available = self._format_actions(_available_actions(self.env, info) if self.env is not None else []).strip()
+        if "{observation}" in base or "{available_actions}" in base:
+            return base.format(observation=str(observation).strip(), available_actions=available)
+        return f"{base}\n\n{self._observation_text(observation, info)}"
 
     def start(self) -> dict[str, Any]:
         import sys
@@ -283,6 +332,128 @@ class WebShopBackend:
             "num_tasks": self.num_tasks,
             "reset_count": self.reset_count,
             "step_count": self.step_count,
+        }
+
+    def run_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        if not policy:
+            raise ValueError("WebShop run_episode requires policy endpoint")
+        reset = self.reset(payload)
+        observation = str(reset.get("observation", ""))
+        info = reset.get("info") if isinstance(reset.get("info"), dict) else {}
+        prompt = self._initial_prompt(str(payload.get("prompt") or ""), observation, info)
+        messages = [{"role": "user", "content": prompt}]
+        runtime = self.runtime
+        action_cfg = runtime.get("action") if isinstance(runtime.get("action"), dict) else {}
+        interaction_cfg = runtime.get("interaction") if isinstance(runtime.get("interaction"), dict) else {}
+        text_action_cfg = interaction_cfg.get("text_action") if isinstance(interaction_cfg.get("text_action"), dict) else {}
+        tag = str(text_action_cfg.get("tag", "action"))
+        metadata: dict[str, Any] = {
+            "actions": [],
+            "action_parse_modes": [],
+            "format_checks": [],
+            "format_errors": 0,
+            "policy_usage": [],
+            "turn_count": 0,
+        }
+        include_trace = bool(payload.get("include_trace", False))
+        if include_trace:
+            metadata["messages"] = messages
+            metadata["turns"] = []
+
+        max_turns = int(payload.get("max_turns") or runtime.get("max_turns") or 20)
+        sampling_params = payload.get("sampling_params") if isinstance(payload.get("sampling_params"), dict) else {}
+        max_tokens = int(payload.get("max_response_tokens") or 512)
+        timeout_s = float((payload.get("timeouts") or {}).get("policy_s") or (runtime.get("timeouts") or {}).get("policy_s") or 120)
+        final_score = 0.0
+        success = False
+        status = "truncated"
+        truncated_reason = "max_turns"
+        last_step: dict[str, Any] = reset
+
+        for turn in range(max_turns):
+            turn_trace: dict[str, Any] = {"turn": turn} if include_trace else {}
+            reply = call_policy_chat(
+                policy=policy,
+                messages=messages,
+                sampling_params=sampling_params,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+            )
+            assistant_message = reply.message
+            messages.append(assistant_message)
+            metadata["policy_usage"].append(reply.usage)
+            if policy_context_limit_reached(reply):
+                metadata["context_limit_hits"] = int(metadata.get("context_limit_hits", 0) or 0) + 1
+                truncated_reason = "context_limit_after_observation"
+                if include_trace:
+                    turn_trace.update(
+                        {
+                            "assistant_message": assistant_message,
+                            "format_valid": False,
+                            "parse_mode": "context_limit",
+                            "finish_reason": reply.finish_reason,
+                            "truncated_reason": truncated_reason,
+                        }
+                    )
+                    metadata["turns"].append(turn_trace)
+                break
+            if finish_reason_is_length(reply):
+                metadata["max_response_tokens_hits"] = int(metadata.get("max_response_tokens_hits", 0) or 0) + 1
+            action, valid, parse_mode = parse_text_action(str(assistant_message.get("content") or ""), tag=tag)
+            metadata["action_parse_modes"].append(parse_mode)
+            metadata["format_checks"].append({"turn": turn, "valid": bool(valid), "parse_mode": parse_mode})
+            if not valid:
+                metadata["format_errors"] = int(metadata.get("format_errors", 0) or 0) + 1
+            action = choose_text_action(
+                action,
+                _available_actions(self.env, info) if self.env is not None else [],
+                restrict_to_available=bool(action_cfg.get("restrict_to_available", False)),
+                invalid_fallback=str(action_cfg.get("invalid_fallback") or "model"),
+                metadata=metadata,
+            )
+            metadata["actions"].append(action)
+            step = self.step({"action": action})
+            last_step = step
+            observation = str(step.get("observation", ""))
+            info = step.get("info") if isinstance(step.get("info"), dict) else {}
+            final_score = float(step.get("score", 0.0) or 0.0)
+            done = bool(step.get("done", False))
+            success = final_score > 0
+            if include_trace:
+                turn_trace.update(
+                    {
+                        "assistant_message": assistant_message,
+                        "action": action,
+                        "format_valid": bool(valid),
+                        "parse_mode": parse_mode,
+                        "finish_reason": reply.finish_reason,
+                        "env_step": step,
+                    }
+                )
+                metadata["turns"].append(turn_trace)
+            if done:
+                status = "completed"
+                truncated_reason = ""
+                break
+            messages.append({"role": "user", "content": self._observation_text(observation, info)})
+
+        metadata["turn_count"] = len(metadata["actions"])
+        metadata["format_ok"] = int(metadata.get("format_errors", 0) or 0) == 0
+        if truncated_reason:
+            metadata["truncated_reason"] = truncated_reason
+        return {
+            "status": status,
+            "observation": observation,
+            "score": final_score,
+            "done": status == "completed",
+            "success": success,
+            "info": last_step.get("info") if isinstance(last_step.get("info"), dict) else {},
+            "task_index": self.task_index,
+            "num_tasks": self.num_tasks,
+            "reset_count": self.reset_count,
+            "step_count": self.step_count,
+            "metadata": metadata,
         }
 
     def evaluate(self, payload: dict[str, Any]) -> dict[str, Any]:

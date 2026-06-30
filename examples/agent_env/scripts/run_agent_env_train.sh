@@ -56,7 +56,7 @@ if [ -n "${RESUME_FROM:-}" ] && [ -z "${LOAD_DIR:-}" ]; then
   export LOAD_DIR="${RESUME_FROM}"
 fi
 
-ENV_NAME=${ENV_NAME:?Set ENV_NAME to alfworld, webshop, tau2, appworld, or mcp_server}
+ENV_NAME=${ENV_NAME:?Set ENV_NAME to alfworld, webshop, tau2, appworld, mcp_server, or openclaw}
 WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${ROOT_DIR}/secrets/wandb.env}
 resolve_slime_runtime
 if [ "${ENABLE_WANDB:-0}" = "1" ] || [ "${USE_WANDB:-0}" = "1" ]; then
@@ -98,6 +98,12 @@ configure_env_defaults() {
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.mcp_server.rollout.generate}
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/mcp_server/env_config.yaml}}
       export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/mcp_server/prompt_data.py}
+      export PROMPT_DATA_CONFIG=${PROMPT_DATA_CONFIG:-${CUSTOM_CONFIG_PATH}}
+      ;;
+    openclaw)
+      export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.openclaw.rollout.generate}
+      export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/openclaw/env_config.yaml}}
+      export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/openclaw/prompt_data.py}
       export PROMPT_DATA_CONFIG=${PROMPT_DATA_CONFIG:-${CUSTOM_CONFIG_PATH}}
       ;;
     *)

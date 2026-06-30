@@ -1,18 +1,23 @@
 ---
 name: server-ops-discipline
-description: "Use when preparing remote servers or GPU nodes, managing reusable runtime or data packs, materializing node-local environments, handling node IP files, launching distributed jobs, preserving idle GPUs with watchdog/bench, separating durable shared-storage state from disposable local state, or moving this workflow to another cluster."
+description: "Use when preparing remote GPU nodes, building or publishing runtime/data packs, materializing node-local envs/data/source mirrors, handling node IP files, launching distributed jobs, preserving idle GPUs with watchdog/bench, separating durable shared state from disposable local state, or moving this workflow to another cluster."
 ---
 
 # Server Ops Discipline
 
-Keep server operations reproducible. Durable state belongs on shared storage or
-in git; node-local state is disposable and should be rebuilt from packs or
-scripts.
+Keep server operations reproducible. Shared storage is the source of truth;
+node-local disks are disposable caches rebuilt from packs and scripts.
 
-## Bundled Scripts
+## Root And Scripts
 
-This skill ships reusable ops scripts under `scripts/`. Install or sync them to
-the shared cluster root before wiring project launchers to them:
+- Confirm the cluster workspace root with the user before first use. Store it in
+  a local, non-git config:
+
+```bash
+server-ops-discipline/scripts/configure_root.sh /path/to/root
+```
+
+- Install reusable scripts under `${ROOT_DIR}/scripts`:
 
 ```bash
 mkdir -p "${ROOT_DIR}/scripts"
@@ -20,59 +25,37 @@ cp -a server-ops-discipline/scripts/. "${ROOT_DIR}/scripts/"
 chmod +x "${ROOT_DIR}/scripts/"*.sh
 ```
 
-Before using these scripts on a new machine or cluster, determine the current
-shared workspace root with the user and confirm it explicitly. Store that value
-in a local, non-git config file:
-
-```bash
-server-ops-discipline/scripts/configure_root.sh /path/to/current/root
-```
-
-By default this writes `${HOME}/.jingyuan/server_ops.env`. Do not commit this
-file or any concrete root path. If a different config location is needed, set
-`SERVER_OPS_CONFIG=/path/to/local/env`.
-
-Use `ROOT_DIR` as the portable root for the cluster workspace. Do not introduce
-project- or cluster-branded root variables in reusable ops scripts. The mounted
-cloud disk, user, and workspace name can change across clusters; callers should
-set `ROOT_DIR` explicitly or install the scripts under `${ROOT_DIR}/scripts` so
-they can infer it from their location.
-
-Stable interfaces:
+- Use `ROOT_DIR`, not project- or cluster-branded root variables. Do not commit
+  concrete root paths.
+- Stable interfaces:
 
 ```text
 ${ROOT_DIR}/scripts/run_bench.sh start|stop|status|restart [--nodes nodes.txt --node 0,1]
 ${ROOT_DIR}/scripts/gpu_idle_watchdog.sh start|stop|status|restart
-${ROOT_DIR}/scripts/configure_root.sh /path/to/current/root
+${ROOT_DIR}/scripts/prepare_data.sh --data alfworld,webshop,tau2,mcp_server
+${ROOT_DIR}/scripts/pack_data.sh --data alfworld,webshop,tau2,mcp_server
 ${ROOT_DIR}/scripts/prepare_node_runtime.sh --local-only|--all-nodes ...
 ${ROOT_DIR}/scripts/materialize_node_runtime.sh --envs ... --data ... --sources ...
-${ROOT_DIR}/scripts/pack_data.sh
 ```
 
-Launchers that need `bench_on_exit` must call `${ROOT_DIR}/scripts/run_bench.sh`
-instead of embedding their own keepalive implementation. Watchdogs must call the
-same `run_bench.sh` interface. Repo-specific launch code may set `ROOT_DIR`,
-`LOCAL_ENVS_DIR`, `LOCAL_RUNTIME_DIR`, `PACK_DIR`, `BENCH_PYTHON`, SSH
-variables, and node selectors, but should not duplicate these scripts.
-
-Reusable ops scripts must not default to one training stack. Runtime
-materialization defaults to `none`; callers choose environment packs, datasets,
-and source mirrors explicitly. `run_bench.sh` defaults to system Python, and
-training repos should pass `BENCH_PYTHON` when CUDA torch lives in a project
-environment.
+Project launchers may call these scripts, but must not reimplement bench,
+watchdog, node materialization, SSH fanout, or root discovery.
 
 ## State Model
 
-- Treat shared storage as the source of truth for code, data, models, packs,
-  secrets, and run outputs.
-- Treat node-local disks as cache: envs, source mirrors, data mirrors, and temp
-  runtime state can be deleted and materialized again.
-- Do not install packages during normal training startup. Build reusable packs
-  first, then materialize them onto nodes.
-- Keep generated outputs out of git: run logs, checkpoints, W&B outputs, data,
-  model weights, env packs, secrets, and node-local runtime files.
+- Durable: code, packs, data, models, secrets, runs, and node files live under
+  `${ROOT_DIR}`.
+  If a cluster puts a smaller quota on the workspace tree, keep the same public
+  layout and make `${ROOT_DIR}/models` or `${ROOT_DIR}/runs` symlinks to the
+  real shared-storage locations.
+- Disposable: extracted envs, source mirrors, data mirrors, Ray temp state, and
+  service scratch live on node-local disks such as `/tmp`.
+- Do not install packages during normal training startup. Build packs first,
+  then materialize them onto nodes.
+- Keep generated outputs, real node IP files, secrets, packs, data, models,
+  checkpoints, and run logs out of git.
 
-Recommended root layout:
+Recommended layout:
 
 ```text
 ${ROOT_DIR}/code
@@ -86,75 +69,99 @@ ${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}
 ${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
 ```
 
-When moving clusters, preserve the same roles even if the paths change.
+On the current A100 cluster, `${ROOT_DIR}` is
+`/mnt/bn/jixf-nas-lq/mlf`. Models and run outputs are physically stored outside
+that quota tree, but remain available through standard symlinks:
 
-## Node And IP Handling
+```bash
+${ROOT_DIR}/models -> /mnt/bn/jixf-nas-lq/yanjingyuan_models
+${ROOT_DIR}/runs   -> /mnt/bn/jixf-nas-lq/yanjingyuan_runs
+```
 
-- Maintain one node file as the source of truth for current IPs.
-- Let topology or launch profiles select nodes by index from that file.
-- Do not scatter literal IPs through training configs, env configs, aux configs,
-  or scripts.
-- After resource reset, update the node file first, then prepare runtime, then
-  launch jobs.
-- Prefer idempotent per-node setup commands. A repeated setup should either skip
-  unchanged packs or rebuild only what is stale.
+Treat this as an A100-local storage layout. H100 or other clusters should use
+their own shared NAS target paths behind the same `${ROOT_DIR}/models` and
+`${ROOT_DIR}/runs` names, not these concrete A100 paths.
 
-## Runtime Pack Discipline
+## Runtime Packs
 
-- Split runtime packs by dependency domain. Do not create one giant mutable
-  environment that every task edits.
-- For foundation training stacks such as Slime, Verl, SGLang, vLLM, Megatron,
-  and PyTorch, prefer the node/container image's preinstalled environment when
-  it matches the target stack. If the image does not provide a compatible stack,
-  use a separately packed conda environment as the fallback.
-- Keep task or environment dependencies such as ALFWorld, WebShop, tau2, and
-  custom env servers in dedicated conda environment packs even when the training
-  stack comes from the image. Do not mix these env dependencies into the base
-  training environment during launch.
-- Use `${ROOT_DIR}/scripts/pack_data.sh`,
-  `${ROOT_DIR}/scripts/prepare_node_runtime.sh`, and
-  `${ROOT_DIR}/scripts/materialize_node_runtime.sh` as the shared vocabulary for
-  pack creation and node-local installation.
-- Keep data/source packs separate from conda or Python environment packs.
-- Keep model checkpoints on shared storage unless local copies are explicitly
-  needed and documented.
-- Do not hot-edit dependency checkouts for temporary fixes. Store repeatable
-  dependency changes as patch files and provide apply/check/reverse commands.
-- Materialization scripts should be explicit about what they install, copy, or
-  skip; avoid hidden package installation inside launch scripts.
+- Prefer image-provided foundation training stacks when the image is complete
+  and compatible.
+- If the image is not complete, use one complete conda pack per foundation
+  stack. For Slime, the pack must include Slime, SGLang/vLLM/Torch dependencies
+  needed by that stack, and bundled Megatron source at `src/Megatron-LM`.
+- Do not materialize Megatron-LM as a standalone source mirror for Slime
+  training. It is part of the Slime runtime, not a separate runtime component.
+- Keep task envs separate: ALFWorld, WebShop, tau2, AppWorld, MCP servers, and
+  other env dependencies get their own packs.
+- Keep task data separate from env packs. Data preparation is a shared-storage
+  phase: run `prepare_data.sh --data ...` to download or construct
+  `${ROOT_DIR}/data/<name>`, then `pack_data.sh --data ...` to write immutable
+  `${ROOT_DIR}/packs/<name>-data.tar.gz` artifacts. Node materialization never
+  downloads data; it only unpacks a data pack or copies an already prepared
+  `${ROOT_DIR}/data/<name>` directory.
+- Data packs must contain every file an env server can need on any selected
+  node. For tau2, `prepare_data.sh --data tau2` must produce both raw
+  official/AReaL data and portable generated AReaL task/prompt files; training
+  launch should not generate node-local tau2 task files.
+- Private MCP server datasets may come from another NAS checkout rather than a
+  public downloader. Treat that checkout as an input source only: copy the
+  required JSON/JSONL task files and referenced assets into
+  `${ROOT_DIR}/data/mcp_server`, pack them as `mcp_server-data.tar.gz`, and have
+  training read the materialized `${AGENT_ENV_DATA_DIR}` copy. Set
+  `MCP_SERVER_REQUIRED_FILES` during preparation/packing for task-family
+  specific files that must exist, for example an IPR product-check task JSONL.
+- Validate task data before packing and after materialization. Domain-specific
+  datasets should fail fast on missing required files; for example ALFWorld
+  needs paired `game.tw-pddl`/`traj_data.json` files plus `logic/alfred.pddl`
+  and `logic/alfred.twl2`. Use `--validate-data-load` when bringing up a new
+  cluster to run supported env load smoke tests.
+- Keep optional reporting clients isolated when cluster images disagree. A
+  `wandb` conda pack may be materialized like any other env pack; training
+  repos should prefer that pack, fall back to the foundation runtime, then to a
+  version-compatible local Python if they choose to support W&B.
+- Keep task source mirrors only when the env itself needs a checkout, for
+  example WebShop. Source mirrors are not a replacement for Python runtime
+  dependencies.
+- Publish immutable pack artifacts to `${ROOT_DIR}/packs/<name>.tar.gz` plus
+  `.sha256` and `.revision`; materialize them with `--force` when replacing a
+  node-local env.
+- Validate a pack before use: check hashes, run `conda-unpack`, import critical
+  modules, and run an env-specific smoke test.
+- Do not run Python directly from a NAS env directory. Use node-local extracted
+  packs to avoid slow small-file IO and stale absolute prefixes.
 
-## Launch And Process Discipline
+## Node And Launch
 
-- Separate runtime preparation from job launch.
-- Launchers orchestrate services and submit jobs; they should not own algorithm
-  or experiment semantics.
-- Prefer tmux/system sessions with clear names and logs for long-running remote
-  processes.
-- Always leave an auditable run directory with resolved config, launch logs,
-  service logs, and train logs.
-- When resetting experiments, stop old train/Ray/env processes on selected nodes
-  before starting the new run. Do not kill unrelated user processes.
+- Maintain one current node file as the IP source of truth. Launch/topology
+  profiles select nodes by index.
+- For multi-node GPU jobs, make the routable training network interface an
+  explicit launch contract. Prefer `SOCKET_IFNAME=${MLP_SOCKET_IFNAME:-eth0}`
+  or a cluster-specific override, then propagate `NCCL_SOCKET_IFNAME`,
+  `GLOO_SOCKET_IFNAME`, and `TP_SOCKET_IFNAME` into Ray actor runtime envs.
+  Do not rely on outer-shell exports reaching Ray actors.
+- After resource reset: update node file, materialize runtime/data, start
+  watchdog/bench, then launch jobs.
+- Before launching training, stop bench on selected nodes. If training fails and
+  GPUs idle, watchdog should restart bench by utilization threshold.
+- `bench_on_exit` must call `${ROOT_DIR}/scripts/run_bench.sh`; do not embed a
+  separate keepalive implementation in training repos.
+- Reset experiments by stopping only selected train/Ray/env processes. Do not
+  kill unrelated user processes.
 
 ## GPU Keepalive
 
-- Keep GPU keepalive independent of the training framework.
-- Watchdog should protect idle GPUs by utilization only, not by checking Slime,
-  Ray, tmux session names, or process names.
-- Bench should be a replaceable keepalive workload. Starting bench should not
-  destroy unrelated tmux sessions or user processes.
-- Put bench and watchdog under `${ROOT_DIR}/scripts`, not under a repo-specific
-  `bash/` or `utils/` directory.
-- Before launching training, stop bench on nodes used by the job. If a job fails
-  and GPUs stay idle, watchdog should restart bench after the configured window.
+- Watchdog protects idle GPUs by utilization only. It should not special-case
+  Slime, Ray, tmux names, or process names.
+- Bench is a replaceable keepalive workload. Starting bench must not destroy
+  unrelated tmux sessions or user processes.
+- Keep watchdog and bench independent of training framework state.
 
 ## Debugging Order
 
-When a remote run behaves strangely:
-
-1. Confirm the node file and selected indexes are correct.
-2. Confirm env/data packs are materialized on every selected node.
-3. Check service logs and train logs before changing code.
-4. Check GPU memory/utilization to distinguish startup, rollout, actor, and
-   keepalive states.
-5. Check resolved config files to catch shell/env pollution or stale values.
-6. Add code or script changes only after locating the owning layer.
+1. Confirm node file and selected indexes.
+2. Confirm env/data/source materialization on every selected node.
+3. Check service logs and train logs.
+4. Check GPU utilization and memory to distinguish rollout, actor, aux, and
+   keepalive behavior.
+5. Check resolved configs for stale values or shell pollution.
+6. Change code only after locating the owning layer.
