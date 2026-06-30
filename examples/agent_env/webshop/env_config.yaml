@@ -19,6 +19,8 @@ action:
   invalid_fallback: model
 
 reward:
+  impl: legacy
+  judge_mode: none
   source: score
   outcome: 10.0
   format:

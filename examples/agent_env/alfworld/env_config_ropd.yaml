@@ -1,0 +1,66 @@
+# ALFWorld agent-env config for GRPO training with ROPD rewards.
+
+task:
+  split: train
+max_turns: 30
+
+timeouts:
+  policy_s: 600
+  env_request_s: 660
+
+interaction:
+  mode: text_action
+  text_action:
+    tag: action
+
+observation:
+  include_actions: true
+
+action:
+  restrict_to_available: false
+  invalid_fallback: model
+
+reward:
+  impl: ropd
+  judge_mode: aux
+  source: won
+  outcome: 10.0
+  format:
+    valid: 0.0
+    invalid: -0.1
+  ropd:
+    join_key: task_id
+    allow_online_rubric: true
+    rubric_cache_path: ${RUN_ROOT}/reward_cache/ropd_rubrics.json
+    teacher_file: ${ROOT_DIR}/data/teacher_traces/processed/alfworld_gpt_oss_120b_ropd_teacher.jsonl
+    teacher_answer_keys:
+      - teacher_response
+      - teacher_answer
+      - teacher_final_answer
+    rubric_keys:
+      - ropd_rubric
+      - reward_rubric
+      - rubric
+
+alfworld:
+  config_path: null
+  data_dir: ${AGENT_ENV_DATA_DIR}
+  training_method: dqn
+  num_train_games: -1
+  num_eval_games: -1
+  env_type: AlfredTWEnv
+  skip_to_task: false
+  direct_game_file: true
+
+env_server:
+  pool_size: 128
+  acquire_timeout_s: 600
+  lease_ttl_s: 1800
+  idempotency_ttl_s: 300
+  reuse_workers: true
+  reset_on_release: false
+  worker_start_timeout_s: 300
+  worker_request_timeout_s: 660
+  prewarm_splits:
+    - train
+  honor_direct_game_file: true

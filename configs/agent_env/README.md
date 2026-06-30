@@ -27,6 +27,9 @@ Reward implementation and task-specific reward data also belong under the
 selected env config's `reward:` section. Use `reward.impl` and
 `reward.judge_mode` for the active RM path, and keep ROPD teacher/rubric files
 or Valleydance process-reward weights out of generic train profiles.
+Durable reward variants should select a dedicated env config, such as
+`examples/agent_env/alfworld/env_config_ropd.yaml`, instead of overriding
+`AGENT_ENV_RM_IMPL` or `AGENT_ENV_JUDGE_MODE` from a run profile.
 
 ## Rules
 

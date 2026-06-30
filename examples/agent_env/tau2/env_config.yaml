@@ -16,6 +16,8 @@ action:
   restrict_to_available: false
   invalid_fallback: assistant_message
 reward:
+  impl: legacy
+  judge_mode: none
   source: score
   outcome: 10.0
   truncated: -1.0
