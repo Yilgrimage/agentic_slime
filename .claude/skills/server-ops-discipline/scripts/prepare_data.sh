@@ -26,7 +26,7 @@ that may download or construct dataset contents. Node-local materialization shou
 only unpack/copy already prepared data.
 
 Options:
-  --data LIST          Comma/space list: alfworld,webshop,tau2,mcp_server
+  --data LIST          Comma/space list: alfworld,webshop,tau2
   --force              Rebuild supported datasets even if validation already passes
   --no-validate-data   Skip final layout validation
   --validate-data-load Run supported env load smoke tests after preparation
@@ -37,14 +37,6 @@ Optional dataset inputs:
   TAU2_DATA_SOURCE_DIR      tau2 official data root, usually code/tau2-bench/data
   TAU2_AREAL_SOURCE_DIR     AReaL synthetic tau2 root with tau2_rl_train.jsonl
   TAU2_DOWNLOAD_AREAL=1     Download AReaL synthetic tau2 data if no local source exists
-  MCP_SERVER_DATA_SOURCE_DIR
-                            Private/NAS MCP task data tree copied into ROOT_DIR/data/mcp_server
-  MCP_SERVER_IPR_PRODUCT_CHECK_SOURCE_FILE
-                            Optional single JSONL copied to mcp_server/ipr_product_check/
-  MCP_SERVER_ROPD_SMOKE_SOURCE_FILE
-                            Optional teacher JSONL copied to mcp_server/ropd_smoke/
-  MCP_SERVER_REQUIRED_FILES Relative files that must exist after MCP data preparation
-
 tau2 preparation also generates portable AReaL task files and prompt JSONL under
 ROOT_DIR/data/tau2. Pack and materialize that data on every node that can host
 an env server.
@@ -63,7 +55,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "${DATASETS}" = "none" ]; then
-  echo "No datasets selected. Use --data alfworld,webshop,tau2,mcp_server or set DATASETS."
+  echo "No datasets selected. Use --data alfworld,webshop,tau2 or set DATASETS."
   exit 0
 fi
 

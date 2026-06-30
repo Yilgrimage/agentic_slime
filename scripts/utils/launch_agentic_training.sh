@@ -554,7 +554,6 @@ reset_runtime_on_nodes() {
 
 task_env_path() {
   case "${ENV_NAME}" in
-    mcp_server) printf '%s\n' "${MCP_SERVER_ENV:-${LOCAL_ENVS_DIR}/mcp_server}" ;;
     alfworld|webshop|tau2|appworld|openclaw) printf '%s/%s\n' "${LOCAL_ENVS_DIR}" "${ENV_NAME}" ;;
     *) return 1 ;;
   esac
@@ -562,7 +561,6 @@ task_env_path() {
 
 task_env_python() {
   case "${ENV_NAME}" in
-    mcp_server) printf '%s\n' "${MCP_SERVER_PYTHON:-$(task_env_path)/bin/python}" ;;
     alfworld|webshop|tau2|appworld|openclaw) printf '%s/bin/python\n' "$(task_env_path)" ;;
     *) return 1 ;;
   esac
@@ -573,7 +571,7 @@ require_runtime() {
   local env_python
   [ -x "${SLIME_PYTHON}" ] || { echo "Missing slime python: ${SLIME_PYTHON}" >&2; exit 1; }
   case "${ENV_NAME}" in
-    webshop|alfworld|tau2|appworld|mcp_server|openclaw)
+    webshop|alfworld|tau2|appworld|openclaw)
       env_python=$(task_env_python)
       [ -x "${env_python}" ] || { echo "Missing ${ENV_NAME} env python: ${env_python}" >&2; exit 1; }
       ;;
@@ -602,12 +600,7 @@ server_runtime_exports() {
     appworld)
       quote_export APPWORLD_ROOT "${LOCAL_RUNTIME_DIR}/data/appworld"
       ;;
-    tau2) ;;
-    mcp_server)
-      local mcp_env=${MCP_SERVER_ENV:-${LOCAL_ENVS_DIR}/mcp_server}
-      quote_export MCP_SERVER_ENV "${mcp_env}"
-      quote_export MCP_SERVER_PYTHON "${MCP_SERVER_PYTHON:-${mcp_env}/bin/python}"
-      ;;
+    tau2|openclaw) ;;
   esac
   quote_export_vars \
     AUX_ENDPOINT_PROVIDER AUX_ENDPOINT_MODEL AUX_ENDPOINT_BASE_URL AUX_ENDPOINT_API_KEY_PATH \
@@ -635,7 +628,7 @@ start_env_server() {
         "$(quote_export JAVA_HOME "${java_home}")" \
         "$(quote_export JVM_PATH "${jvm_path}")")
       ;;
-    alfworld|mcp_server|openclaw) ;;
+    alfworld|openclaw) ;;
     tau2) extra_exports=$(quote_export LITELLM_LOCAL_MODEL_COST_MAP True) ;;
     appworld)
       extra_exports=$(quote_export HOME "${LOCAL_RUNTIME_DIR}/data/appworld")

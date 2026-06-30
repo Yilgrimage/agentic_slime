@@ -1,1 +1,0 @@
-"""MCP-backed agent environment."""

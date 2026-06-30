@@ -178,20 +178,6 @@ validate_tau2_data() {
   [ "${missing}" -eq 0 ]
 }
 
-validate_mcp_server_data() {
-  local data_dir=$1
-  local required_file
-  require_dir_with_file "${data_dir}" || return 1
-  if ! find "${data_dir}" -type f \( -name '*.jsonl' -o -name '*.json' \) -print -quit 2>/dev/null | grep -q .; then
-    echo "MCP server data has no JSON/JSONL task or teacher files under ${data_dir}" >&2
-    return 1
-  fi
-  for required_file in $(ops_list_items "${MCP_SERVER_REQUIRED_FILES:-none}"); do
-    require_file "${data_dir}/${required_file}" || return 1
-  done
-  require_no_stale_path "${data_dir}" "${MCP_SERVER_STALE_PATH:-/tmp/mlf-runtime}" || return 1
-}
-
 validate_dataset() {
   local name=$1
   local data_dir=$2
@@ -213,9 +199,6 @@ validate_dataset() {
       ;;
     tau2)
       validate_tau2_data "${data_dir}" || return 1
-      ;;
-    mcp_server)
-      validate_mcp_server_data "${data_dir}" || return 1
       ;;
     *)
       echo "No dataset-specific validator for ${name}; checked directory existence only."
@@ -416,64 +399,12 @@ prepare_tau2_data() {
   echo "tau2_DATA=${dst}"
 }
 
-copy_optional_file() {
-  local src=$1
-  local dst=$2
-  [ -n "${src}" ] || return 0
-  require_file "${src}" || return 1
-  mkdir -p "$(dirname "${dst}")"
-  cp -a "${src}" "${dst}"
-}
-
-prepare_mcp_server_data() {
-  local dst="${ROOT_DIR}/data/mcp_server"
-  local tmp="${dst}.tmp.$$"
-  local src="${MCP_SERVER_DATA_SOURCE_DIR:-}"
-  if [ "${FORCE:-0}" -eq 0 ] && validate_mcp_server_data "${dst}" >/dev/null 2>&1; then
-    echo "mcp_server_DATA=${dst} (prepared)"
-    return 0
-  fi
-
-  rm -rf "${tmp}"
-  mkdir -p "${tmp}"
-
-  if [ -n "${src}" ]; then
-    [ -d "${src}" ] || {
-      echo "Invalid MCP_SERVER_DATA_SOURCE_DIR: ${src}" >&2
-      rm -rf "${tmp}"
-      return 1
-    }
-    copy_tree_excluding_parts "${src}" "${tmp}"
-  fi
-
-  copy_optional_file \
-    "${MCP_SERVER_IPR_PRODUCT_CHECK_SOURCE_FILE:-}" \
-    "${tmp}/ipr_product_check/${MCP_SERVER_IPR_PRODUCT_CHECK_TARGET_FILE:-standardized_data_fix_shuf_tail1800.jsonl}"
-  copy_optional_file \
-    "${MCP_SERVER_ROPD_SMOKE_SOURCE_FILE:-}" \
-    "${tmp}/ropd_smoke/${MCP_SERVER_ROPD_SMOKE_TARGET_FILE:-ipr_norm_brand_teacher.jsonl}"
-
-  if [ -d "${ROOT_DIR}/data/valleydance/ipr_product_check" ] && [ ! -d "${tmp}/ipr_product_check" ]; then
-    copy_tree_excluding_parts "${ROOT_DIR}/data/valleydance/ipr_product_check" "${tmp}/ipr_product_check"
-  fi
-  if [ -d "${ROOT_DIR}/data/agent_env/ropd_smoke" ] && [ ! -d "${tmp}/ropd_smoke" ]; then
-    copy_tree_excluding_parts "${ROOT_DIR}/data/agent_env/ropd_smoke" "${tmp}/ropd_smoke"
-  fi
-
-  validate_mcp_server_data "${tmp}"
-  rm -rf "${dst}"
-  mv "${tmp}" "${dst}"
-  validate_dataset mcp_server "${dst}"
-  echo "mcp_server_DATA=${dst}"
-}
-
 prepare_dataset() {
   local name=$1
   case "${name}" in
     alfworld) prepare_alfworld_data ;;
     webshop) prepare_webshop_data ;;
     tau2) prepare_tau2_data ;;
-    mcp_server) prepare_mcp_server_data ;;
     *) echo "No prepare implementation for dataset: ${name}" >&2; return 1 ;;
   esac
 }

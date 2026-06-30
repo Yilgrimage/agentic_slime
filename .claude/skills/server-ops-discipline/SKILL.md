@@ -32,8 +32,8 @@ chmod +x "${ROOT_DIR}/scripts/"*.sh
 ```text
 ${ROOT_DIR}/scripts/run_bench.sh start|stop|status|restart [--nodes nodes.txt --node 0,1]
 ${ROOT_DIR}/scripts/gpu_idle_watchdog.sh start|stop|status|restart
-${ROOT_DIR}/scripts/prepare_data.sh --data alfworld,webshop,tau2,mcp_server
-${ROOT_DIR}/scripts/pack_data.sh --data alfworld,webshop,tau2,mcp_server
+${ROOT_DIR}/scripts/prepare_data.sh --data alfworld,webshop,tau2
+${ROOT_DIR}/scripts/pack_data.sh --data alfworld,webshop,tau2
 ${ROOT_DIR}/scripts/prepare_node_runtime.sh --local-only|--all-nodes ...
 ${ROOT_DIR}/scripts/materialize_node_runtime.sh --envs ... --data ... --sources ...
 ```
@@ -91,7 +91,7 @@ their own shared NAS target paths behind the same `${ROOT_DIR}/models` and
   needed by that stack, and bundled Megatron source at `src/Megatron-LM`.
 - Do not materialize Megatron-LM as a standalone source mirror for Slime
   training. It is part of the Slime runtime, not a separate runtime component.
-- Keep task envs separate: ALFWorld, WebShop, tau2, AppWorld, MCP servers, and
+- Keep task envs separate: ALFWorld, WebShop, tau2, AppWorld, OpenClaw, and
   other env dependencies get their own packs.
 - Keep task data separate from env packs. Data preparation is a shared-storage
   phase: run `prepare_data.sh --data ...` to download or construct
@@ -103,13 +103,6 @@ their own shared NAS target paths behind the same `${ROOT_DIR}/models` and
   node. For tau2, `prepare_data.sh --data tau2` must produce both raw
   official/AReaL data and portable generated AReaL task/prompt files; training
   launch should not generate node-local tau2 task files.
-- Private MCP server datasets may come from another NAS checkout rather than a
-  public downloader. Treat that checkout as an input source only: copy the
-  required JSON/JSONL task files and referenced assets into
-  `${ROOT_DIR}/data/mcp_server`, pack them as `mcp_server-data.tar.gz`, and have
-  training read the materialized `${AGENT_ENV_DATA_DIR}` copy. Set
-  `MCP_SERVER_REQUIRED_FILES` during preparation/packing for task-family
-  specific files that must exist, for example an IPR product-check task JSONL.
 - Validate task data before packing and after materialization. Domain-specific
   datasets should fail fast on missing required files; for example ALFWorld
   needs paired `game.tw-pddl`/`traj_data.json` files plus `logic/alfred.pddl`

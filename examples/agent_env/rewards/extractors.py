@@ -166,7 +166,7 @@ def metadata_values(sample: Sample, keys: tuple[str, ...]) -> Any:
     for key in keys:
         if key in sample_metadata and sample_metadata[key] not in (None, "", []):
             return sample_metadata[key]
-    for nested_key in ("task", "task_ref", "label", "reference", "mcp_server", "env_metadata"):
+    for nested_key in ("task", "task_ref", "label", "reference", "env_metadata"):
         nested = sample_metadata.get(nested_key)
         if not isinstance(nested, dict):
             continue
