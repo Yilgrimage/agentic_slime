@@ -1,10 +1,10 @@
 task:
   split: train
-max_turns: 40
+max_turns: 50
 
 timeouts:
   policy_s: 120
-  env_request_s: 660
+  env_request_s: 900
 
 interaction:
   mode: text_action
@@ -31,11 +31,11 @@ reward:
     invalid: -0.1
 
 env_server:
-  pool_size: 4
+  pool_size: 48
   prewarm_splits: ["train"]
   shared_pool: true
   worker_start_timeout_s: 300
-  worker_request_timeout_s: 180
+  worker_request_timeout_s: 900
 
 appworld:
   root: ${APPWORLD_ROOT}
@@ -45,7 +45,7 @@ appworld:
   num_tasks_per_scenario: null
   only_tagged: null
   num_tasks: null
-  max_interactions: 40
+  max_interactions: 50
   raise_on_failure: false
   experiment_prefix: slime_agent_env
   include_api_overview: true

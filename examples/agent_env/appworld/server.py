@@ -9,6 +9,12 @@ from typing import Any
 
 import yaml
 
+from examples.agent_env.env_episode import (
+    call_policy_chat,
+    finish_reason_is_length,
+    parse_text_action,
+    policy_context_limit_reached,
+)
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
@@ -51,8 +57,14 @@ def _env_path(value: Any, envvar: str) -> str:
 
 def _environment_config(raw: dict) -> dict:
     root = _env_path(_deep_get(raw, "appworld", "root", os.environ.get("APPWORLD_ROOT", "")), "APPWORLD_ROOT")
+    interaction = raw.get("interaction") if isinstance(raw.get("interaction"), dict) else {}
+    text_action = interaction.get("text_action") if isinstance(interaction.get("text_action"), dict) else {}
+    action = raw.get("action") if isinstance(raw.get("action"), dict) else {}
     return {
         "root": root,
+        "max_turns": int(raw.get("max_turns") or _deep_get(raw, "appworld", "max_interactions", 40)),
+        "text_action_tag": str(text_action.get("tag") or "code"),
+        "legacy_text_as_code": bool(action.get("legacy_text_as_code", False)),
         "dataset_name": str(_deep_get(raw, "appworld", "dataset_name", "train")),
         "eval_dataset_name": _deep_get(raw, "appworld", "eval_dataset_name", None),
         "difficulty": _deep_get(raw, "appworld", "difficulty", None),
@@ -169,6 +181,20 @@ class AppWorldBackend:
         )
         return "\n\n".join(parts)
 
+    def _initial_prompt(self, prompt: str, observation: str, info: dict[str, Any]) -> str:
+        base = prompt.strip()
+        if not base:
+            base = (
+                "You are an expert AppWorld agent. Solve the user's task by writing Python code "
+                "against the provided `apis` object."
+            )
+        if "{observation}" in base:
+            return base.format(observation=observation.strip())
+        return f"{base}\n\n{self._observation_text(observation, info)}"
+
+    def _observation_text(self, observation: str, info: dict[str, Any]) -> str:
+        return f"Observation:\n{observation.strip()}\n"
+
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         split = str(payload.get("split") or self.split)
         dataset = _split_dataset(self.config, split)
@@ -271,6 +297,127 @@ class AppWorldBackend:
         info["done"] = self.done
         self.last_info = info
         return self._result(observation, info)
+
+    def run_episode(self, payload: dict[str, Any]) -> dict[str, Any]:
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        if not policy:
+            raise ValueError("AppWorld run_episode requires policy endpoint")
+
+        reset = self.reset(payload)
+        observation = str(reset.get("observation", ""))
+        info = reset.get("info") if isinstance(reset.get("info"), dict) else {}
+        prompt = self._initial_prompt(str(payload.get("prompt") or ""), observation, info)
+        messages = [{"role": "user", "content": prompt}]
+        metadata: dict[str, Any] = {
+            "actions": [],
+            "action_parse_modes": [],
+            "format_checks": [],
+            "format_errors": 0,
+            "policy_usage": [],
+            "turn_count": 0,
+        }
+        include_trace = bool(payload.get("include_trace", False))
+        if include_trace:
+            metadata["messages"] = messages
+            metadata["turns"] = []
+
+        runtime = self.config
+        max_turns = int(payload.get("max_turns") or runtime.get("max_turns") or runtime.get("max_interactions") or 40)
+        sampling_params = payload.get("sampling_params") if isinstance(payload.get("sampling_params"), dict) else {}
+        max_tokens = int(payload.get("max_response_tokens") or 1024)
+        timeout_s = float((payload.get("timeouts") or {}).get("policy_s") or 120)
+        tag = str(runtime.get("text_action_tag") or "code")
+        legacy_text_as_code = bool(runtime.get("legacy_text_as_code", False))
+        status = "truncated"
+        truncated_reason = "max_turns"
+        final_score = 0.0
+        success = False
+        last_step: dict[str, Any] = reset
+
+        for turn in range(max_turns):
+            turn_trace: dict[str, Any] = {"turn": turn} if include_trace else {}
+            reply = call_policy_chat(
+                policy=policy,
+                messages=messages,
+                sampling_params=sampling_params,
+                max_tokens=max_tokens,
+                timeout_s=timeout_s,
+            )
+            assistant_message = reply.message
+            messages.append(assistant_message)
+            metadata["policy_usage"].append(reply.usage)
+            if policy_context_limit_reached(reply):
+                metadata["context_limit_hits"] = int(metadata.get("context_limit_hits", 0) or 0) + 1
+                truncated_reason = "context_limit_after_observation"
+                if include_trace:
+                    turn_trace.update(
+                        {
+                            "assistant_message": assistant_message,
+                            "format_valid": False,
+                            "parse_mode": "context_limit",
+                            "finish_reason": reply.finish_reason,
+                            "truncated_reason": truncated_reason,
+                        }
+                    )
+                    metadata["turns"].append(turn_trace)
+                break
+            if finish_reason_is_length(reply):
+                metadata["max_response_tokens_hits"] = int(metadata.get("max_response_tokens_hits", 0) or 0) + 1
+
+            content = str(assistant_message.get("content") or "")
+            code, valid, parse_mode = parse_text_action(content, tag=tag)
+            metadata["action_parse_modes"].append(parse_mode)
+            metadata["format_checks"].append({"turn": turn, "valid": bool(valid), "parse_mode": parse_mode})
+            if not valid:
+                metadata["format_errors"] = int(metadata.get("format_errors", 0) or 0) + 1
+            if valid or legacy_text_as_code:
+                action: dict[str, Any] = {"type": "tool_call", "name": "execute", "arguments": {"code": code}}
+            else:
+                action = {"type": "tool_call", "name": "format_error", "arguments": {"response": content[:500]}}
+            metadata["actions"].append(action)
+            step = self.step({"action": action})
+            last_step = step
+            observation = str(step.get("observation", ""))
+            info = step.get("info") if isinstance(step.get("info"), dict) else {}
+            final_score = float(step.get("score", 0.0) or 0.0)
+            done = bool(step.get("done", False))
+            success = bool(step.get("success", False))
+            if include_trace:
+                turn_trace.update(
+                    {
+                        "assistant_message": assistant_message,
+                        "action": action,
+                        "format_valid": bool(valid),
+                        "parse_mode": parse_mode,
+                        "finish_reason": reply.finish_reason,
+                        "env_step": step,
+                    }
+                )
+                metadata["turns"].append(turn_trace)
+            if done:
+                status = "completed"
+                truncated_reason = ""
+                break
+            messages.append({"role": "user", "content": self._observation_text(observation, info)})
+
+        metadata["turn_count"] = len(metadata["actions"])
+        metadata["format_ok"] = int(metadata.get("format_errors", 0) or 0) == 0
+        if truncated_reason:
+            metadata["truncated_reason"] = truncated_reason
+        return {
+            "status": status,
+            "observation": observation,
+            "score": final_score,
+            "done": status == "completed",
+            "success": success,
+            "info": last_step.get("info") if isinstance(last_step.get("info"), dict) else {},
+            "split": self.split,
+            "task_index": self.task_index,
+            "num_tasks": len(self.task_ids),
+            "reset_count": self.reset_count,
+            "step_count": self.step_count,
+            "metadata": metadata,
+        }
 
     def _result(self, observation: str, info: dict[str, Any]) -> dict[str, Any]:
         return {

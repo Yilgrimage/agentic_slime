@@ -14,7 +14,6 @@ from slime.utils.types import Sample
 from .config import resolve_path, reward_cfg_path
 from . import naive
 from .extractors import (
-    bool_value,
     float_value,
     int_value,
     metadata,
@@ -222,8 +221,6 @@ def _dump_limit(args: Any) -> int:
     raw = runtime_env(args, "AGENT_ENV_ROPD_DUMP_N", "").strip()
     if raw == "":
         raw = str(_cfg(args, "dump_n", "") or "").strip()
-    if raw == "" and bool_value(runtime_env(args, "SAVE_DEBUG_TRAIN_DATA", ""), False):
-        raw = "8"
     return max(0, int_value(raw, 0))
 
 
@@ -238,10 +235,10 @@ def _dump_dir(args: Any) -> Path | None:
     run_root = runtime_env(args, "RUN_ROOT", "").strip()
     if not run_root:
         return None
-    return Path(run_root) / "reward_debug" / "ropd"
+    return Path(run_root) / "reward_artifacts" / "ropd"
 
 
-def _dump_debug(args: Any, stage: str, record: dict[str, Any]) -> None:
+def _dump_artifact(args: Any, stage: str, record: dict[str, Any]) -> None:
     output_dir = _dump_dir(args)
     if output_dir is None:
         return
@@ -254,7 +251,7 @@ def _dump_debug(args: Any, stage: str, record: dict[str, Any]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{stage}_pid{os.getpid()}.jsonl"
     payload = {
-        "schema_version": "agent_env.ropd_debug.v1",
+        "schema_version": "agent_env.ropd_artifact.v1",
         "stage": stage,
         "pid": os.getpid(),
         "time": time.time(),
@@ -770,7 +767,7 @@ async def _rubric_for_bucket(
             **_role_endpoint(args, "rubric"),
         )
     except Exception as exc:
-        _dump_debug(
+        _dump_artifact(
             args,
             "rubricator",
             {
@@ -786,7 +783,7 @@ async def _rubric_for_bucket(
         )
         return None, "rubric_error", None, teacher_answers
     rubric = _normalize_rubric(payload)
-    _dump_debug(
+    _dump_artifact(
         args,
         "rubricator",
         {
@@ -916,7 +913,7 @@ async def _score_bucket(
         scored_items = _parse_batch_scores(payload, rubric=rubric, expected=len(answer_items))
     except Exception as exc:
         details = {"stage": "verifier", "type": type(exc).__name__, "message": str(exc)}
-        _dump_debug(
+        _dump_artifact(
             args,
             "verifier",
             {
@@ -949,7 +946,7 @@ async def _score_bucket(
     teacher_scores = tuple(float(score) for score in teacher_scores_by_index if score is not None)
     maximum_score = _maximum_score(rubric)
     teacher_below_student = bool(teacher_scores and min(teacher_scores) < max(item[0] for item in student_scores_by_index if item is not None))
-    _dump_debug(
+    _dump_artifact(
         args,
         "verifier",
         {

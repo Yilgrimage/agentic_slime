@@ -93,6 +93,9 @@ configure_env_defaults() {
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ENV_CONFIG:-examples/agent_env/appworld/env_config.yaml}}
       export APPWORLD_ROOT=${APPWORLD_ROOT:-${LOCAL_RUNTIME_DIR}/data/appworld}
       export HOME=${APPWORLD_ROOT}
+      export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/appworld/prompt_data.py}
+      export PROMPT_DATA_PYTHON=${PROMPT_DATA_PYTHON:-${APPWORLD_ENV:-${LOCAL_ENVS_DIR}/appworld}/bin/python}
+      export PROMPT_DATA_CONFIG=${PROMPT_DATA_CONFIG:-${CUSTOM_CONFIG_PATH}}
       ;;
     openclaw)
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.openclaw.rollout.generate}

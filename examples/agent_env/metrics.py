@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+_WANDB_REWARD_METRICS_DEFINED = False
+
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
@@ -23,27 +25,26 @@ def _as_dict(value: Any) -> dict[str, Any]:
 def _reward_call_metrics(
     metrics: dict[str, float],
     *,
-    prefix: str,
     role: str,
     calls: list[dict[str, Any]],
     sample_count: int,
 ) -> None:
     if not calls:
         return
-    metrics[f"{prefix}/reward/llm/{role}_call_rate"] = len(calls) / sample_count if sample_count else 0.0
-    metrics[f"{prefix}/reward/llm/{role}_latency_s_mean"] = _mean(
+    metrics[f"reward/llm/{role}_call_rate"] = len(calls) / sample_count if sample_count else 0.0
+    metrics[f"reward/llm/{role}_latency_s_mean"] = _mean(
         [value for call in calls if (value := _float_or_none(call.get("latency_s"))) is not None]
     )
-    metrics[f"{prefix}/reward/llm/{role}_prompt_chars_mean"] = _mean(
+    metrics[f"reward/llm/{role}_prompt_chars_mean"] = _mean(
         [value for call in calls if (value := _float_or_none(call.get("prompt_chars"))) is not None]
     )
     for token_key in ("prompt_tokens", "completion_tokens", "total_tokens"):
         values = [value for call in calls if (value := _float_or_none(call.get(token_key))) is not None]
         if values:
-            metrics[f"{prefix}/reward/llm/{role}_{token_key}_mean"] = _mean(values)
+            metrics[f"reward/llm/{role}_{token_key}_mean"] = _mean(values)
 
 
-def reward_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
+def reward_metrics(samples: list[Any]) -> dict[str, float]:
     if not samples:
         return {}
 
@@ -126,34 +127,34 @@ def reward_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     total = len(real_samples)
     metrics: dict[str, float] = {}
     if rm_scores:
-        metrics[f"{prefix}/reward/rm_score_mean"] = _mean(rm_scores)
-        metrics[f"{prefix}/reward/rm_score_nonzero_rate"] = sum(1 for value in rm_scores if value != 0.0) / len(rm_scores)
+        metrics["reward/rm_score_mean"] = _mean(rm_scores)
+        metrics["reward/rm_score_nonzero_rate"] = sum(1 for value in rm_scores if value != 0.0) / len(rm_scores)
     for impl, count in rm_impls.items():
-        metrics[f"{prefix}/reward/impl_{impl}_rate"] = count / total
+        metrics[f"reward/impl_{impl}_rate"] = count / total
     for version, count in reward_versions.items():
-        metrics[f"{prefix}/reward/version_{version}_rate"] = count / total
+        metrics[f"reward/version_{version}_rate"] = count / total
     for name, values in component_values.items():
-        metrics[f"{prefix}/reward/component_{name}_mean"] = _mean(values)
+        metrics[f"reward/component_{name}_mean"] = _mean(values)
     for reason, count in fallback_reasons.items():
-        metrics[f"{prefix}/reward/fallback_{reason}_rate"] = count / total
+        metrics[f"reward/fallback_{reason}_rate"] = count / total
     for source, count in rubric_sources.items():
-        metrics[f"{prefix}/reward/ropd/rubric_source_{source}_rate"] = count / total
+        metrics[f"reward/ropd/rubric_source_{source}_rate"] = count / total
     if rubric_sources:
-        metrics[f"{prefix}/reward/ropd/rubric_count"] = float(sum(rubric_sources.values()))
+        metrics["reward/ropd/rubric_count"] = float(sum(rubric_sources.values()))
     if ropd_student_scores:
-        metrics[f"{prefix}/reward/ropd/student_score_mean"] = _mean(ropd_student_scores)
+        metrics["reward/ropd/student_score_mean"] = _mean(ropd_student_scores)
     if ropd_teacher_scores:
-        metrics[f"{prefix}/reward/ropd/teacher_score_mean"] = _mean(ropd_teacher_scores)
+        metrics["reward/ropd/teacher_score_mean"] = _mean(ropd_teacher_scores)
     if ropd_reward_scores:
-        metrics[f"{prefix}/reward/ropd/reward_score_mean"] = _mean(ropd_reward_scores)
+        metrics["reward/ropd/reward_score_mean"] = _mean(ropd_reward_scores)
     if ropd_maximum_scores:
-        metrics[f"{prefix}/reward/ropd/maximum_score_mean"] = _mean(ropd_maximum_scores)
+        metrics["reward/ropd/maximum_score_mean"] = _mean(ropd_maximum_scores)
     if ropd_rubric_sizes:
-        metrics[f"{prefix}/reward/ropd/rubric_size_mean"] = _mean(ropd_rubric_sizes)
+        metrics["reward/ropd/rubric_size_mean"] = _mean(ropd_rubric_sizes)
     if ropd_teacher_below_student_seen:
-        metrics[f"{prefix}/reward/ropd/teacher_below_student_rate"] = ropd_teacher_below_student / total
-    _reward_call_metrics(metrics, prefix=prefix, role="judge", calls=judge_calls, sample_count=total)
-    _reward_call_metrics(metrics, prefix=prefix, role="rubric", calls=rubric_calls, sample_count=total)
+        metrics["reward/ropd/teacher_below_student_rate"] = ropd_teacher_below_student / total
+    _reward_call_metrics(metrics, role="judge", calls=judge_calls, sample_count=total)
+    _reward_call_metrics(metrics, role="rubric", calls=rubric_calls, sample_count=total)
     return metrics
 
 
@@ -220,9 +221,10 @@ def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_ext
     from slime.utils import logging_utils
     from slime.utils.metric_utils import compute_rollout_step
 
+    _define_reward_wandb_metrics(args)
     log_dict = {**(rollout_extra_metrics or {})}
     log_dict |= environment_metrics(samples, prefix=prefix)
-    log_dict |= reward_metrics(samples, prefix=prefix)
+    log_dict |= reward_metrics(samples)
     log_dict |= {f"rollout/{k}": v for k, v in compute_metrics_from_samples(args, samples).items()}
     log_dict |= {f"perf/{k}": v for k, v in compute_perf_metrics_from_samples(args, samples, rollout_time).items()}
     log_dict["rollout/step"] = compute_rollout_step(args, rollout_id)
@@ -237,6 +239,20 @@ def log_eval_rollout_data_for_env(prefix: str, rollout_id, args, data, extra_met
         samples = info.get("samples") or []
         for key, value in environment_metrics(samples, prefix=prefix).items():
             extra_metrics[f"eval/{name}/{key.removeprefix(prefix + '/')}"] = value
-        for key, value in reward_metrics(samples, prefix=prefix).items():
-            extra_metrics[f"eval/{name}/{key.removeprefix(prefix + '/')}"] = value
+        for key, value in reward_metrics(samples).items():
+            extra_metrics[f"eval/{name}/{key}"] = value
     return False
+
+
+def _define_reward_wandb_metrics(args: Any) -> None:
+    global _WANDB_REWARD_METRICS_DEFINED
+    if _WANDB_REWARD_METRICS_DEFINED or not bool(getattr(args, "use_wandb", False)):
+        return
+    try:
+        import wandb
+
+        if wandb.run is not None:
+            wandb.define_metric("reward/*", step_metric="rollout/step")
+            _WANDB_REWARD_METRICS_DEFINED = True
+    except Exception:
+        return
