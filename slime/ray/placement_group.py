@@ -218,7 +218,7 @@ def create_rollout_manager(args, pg):
     rollout_manager_options = {
         "num_cpus": 1,
         "num_gpus": 0,
-        "runtime_env": {"env_vars": add_default_ray_env_vars(getattr(args, "train_env_vars", {}) or {})},
+        "runtime_env": {"env_vars": add_default_ray_env_vars()},
     }
     if getattr(args, "rollout_data_transport", "object-store") == "nixl":
         rollout_manager_options["enable_tensor_transport"] = True
