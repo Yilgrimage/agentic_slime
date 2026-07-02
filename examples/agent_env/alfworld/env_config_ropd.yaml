@@ -31,8 +31,6 @@ reward:
   ropd:
     join_key: task_id
     allow_online_rubric: true
-    rubric_cache_path: ${RUN_ROOT}/reward_cache/ropd_rubrics.json
-    teacher_file: ${ROOT_DIR}/data/teacher_traces/processed/alfworld_gpt_oss_120b_ropd_teacher.jsonl
     teacher_answer_keys:
       - teacher_response
       - teacher_answer

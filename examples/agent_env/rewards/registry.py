@@ -4,7 +4,7 @@ from typing import Any, Awaitable, Callable
 
 from slime.utils.types import Sample
 
-from . import legacy, naive, ropd, valleydance
+from . import legacy, naive, ropd
 from .config import reward_cfg_path
 from .extractors import record_reward_result, runtime_env
 from .types import RewardResult
@@ -30,8 +30,6 @@ def impl_name(args: Any) -> str:
         "legacy_aux": "legacy",
         "generic": "legacy",
         "naive_judge": "naive",
-        "valleydance_like": "valleydance",
-        "valleydance_v2": "valleydance",
         "ropd_like": "ropd",
     }
     return aliases.get(name, name)
@@ -47,11 +45,10 @@ async def score(args: Any, samples: Sample | list[Sample], **_: Any) -> float | 
     impl = {
         "legacy": legacy.score,
         "naive": naive.score,
-        "valleydance": valleydance.score,
         "ropd": ropd.score,
     }.get(name)
     if impl is None:
-        raise ValueError("AGENT_ENV_RM_IMPL must be one of: legacy, naive, valleydance, ropd")
+        raise ValueError("AGENT_ENV_RM_IMPL must be one of: legacy, naive, ropd")
 
     results = await impl(args, sample_list, single=single)
     if len(results) != len(sample_list):

@@ -183,7 +183,6 @@ criterion 内部没有部分分。每条 criterion 只能是 true 或 false。
 - 最终只输出 JSON object，不要输出解释、Markdown 或其他文本。
 """
 
-_TEACHER_CACHE: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
 _DUMP_COUNTS: dict[str, int] = {}
 
 
@@ -208,13 +207,6 @@ def _metadata_value(sample: Sample, keys: list[str]) -> Any:
         if value not in (None, "", []):
             return value
     return None
-
-
-def _cache_path(args: Any) -> Path | None:
-    path = runtime_env(args, "AGENT_ENV_ROPD_RUBRIC_CACHE_PATH", "").strip()
-    if not path:
-        path = str(_cfg(args, "rubric_cache_path", "") or "").strip()
-    return resolve_path(args, path) if path else None
 
 
 def _dump_limit(args: Any) -> int:
@@ -290,49 +282,6 @@ def _cache_key(sample: Sample) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _load_cache(path: Path | None) -> dict[str, Any]:
-    if path is None or not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def _save_cache(path: Path | None, cache: dict[str, Any]) -> None:
-    if path is None:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    current = _load_cache(path)
-    current.update(cache)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
-
-
-def _load_json_or_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        raise FileNotFoundError(path)
-    if path.suffix.lower() == ".jsonl":
-        rows = []
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    value = json.loads(line, strict=False)
-                    if isinstance(value, dict):
-                        rows.append(value)
-        return rows
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    if isinstance(value, dict) and isinstance(value.get("items"), list):
-        return [item for item in value["items"] if isinstance(item, dict)]
-    if isinstance(value, dict) and isinstance(value.get("tasks"), list):
-        return [item for item in value["tasks"] if isinstance(item, dict)]
-    raise ValueError(f"Unsupported ROPD teacher file format: {path}")
-
-
 def _join_key(args: Any) -> str:
     return str(_cfg(args, "join_key", "task_id") or "task_id")
 
@@ -347,48 +296,9 @@ def _join_value(args: Any, sample: Sample) -> str:
     return _cache_key(sample)
 
 
-def _teacher_files(args: Any) -> list[Path]:
-    override = runtime_env(args, "AGENT_ENV_ROPD_TEACHER_FILE", "").strip()
-    raw = override or _cfg(args, "teacher_file", None) or _cfg(args, "teacher_files", None)
-    return [resolve_path(args, item) for item in _list_value(raw)]
-
-
-def _teacher_index(args: Any) -> dict[str, dict[str, Any]]:
-    files = _teacher_files(args)
-    if not files:
-        return {}
-    key = _join_key(args)
-    cache_key = ("|".join(str(path) for path in files), key)
-    if cache_key in _TEACHER_CACHE:
-        return _TEACHER_CACHE[cache_key]
-
-    output: dict[str, dict[str, Any]] = {}
-    for path in files:
-        for row in _load_json_or_jsonl(path):
-            row_key = row.get(key)
-            if row_key in (None, "", []):
-                row_key = row.get("task_id") or row.get("id") or row.get("task_index")
-            if row_key in (None, "", []):
-                continue
-            output[str(row_key)] = row
-    _TEACHER_CACHE[cache_key] = output
-    return output
-
-
-def _teacher_data(args: Any, sample: Sample) -> dict[str, Any]:
-    return _teacher_index(args).get(_join_value(args, sample), {})
-
-
-def _teacher_or_metadata_value(args: Any, sample: Sample, teacher_data: dict[str, Any], cfg_name: str, default_keys: tuple[str, ...]) -> Any:
+def _configured_metadata_value(args: Any, sample: Sample, cfg_name: str, default_keys: tuple[str, ...]) -> Any:
     keys = _list_value(_cfg(args, cfg_name, None), default_keys)
-    value = _metadata_value(sample, keys)
-    if value not in (None, "", []):
-        return value
-    for key in keys:
-        value = teacher_data.get(key)
-        if value not in (None, "", []):
-            return value
-    return None
+    return _metadata_value(sample, keys)
 
 
 def _render_answer_block(label: str, answers: str | list[str] | tuple[str, ...], *, start_index: int = 0, force_labels: bool = False) -> str:
@@ -463,7 +373,7 @@ def _student_answer(args: Any, sample: Sample) -> str:
     return _trim_answer_for_judge(prediction_text(sample))
 
 
-def _teacher_answers(args: Any, sample: Sample, teacher_data: dict[str, Any]) -> tuple[str, ...]:
+def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
     keys = _list_value(
         _cfg(args, "teacher_answer_keys", None),
         ("teacher_response", "teacher_answer", "teacher_final_answer"),
@@ -475,21 +385,11 @@ def _teacher_answers(args: Any, sample: Sample, teacher_data: dict[str, Any]) ->
             values.extend(str(item) for item in metadata_value if str(item).strip())
         else:
             values.append(str(metadata_value))
-    for key in keys:
-        value = teacher_data.get(key)
-        if value in (None, "", []):
-            continue
-        if isinstance(value, (list, tuple)):
-            values.extend(str(item) for item in value if str(item).strip())
-        else:
-            values.append(str(value))
     if values:
         return tuple(
             dict.fromkeys(_sanitize_teacher_answer_for_anonymous_verifier(value) for value in values if value.strip())
         )
-
-    refs = reference_values(sample)
-    return tuple(dict.fromkeys(_sanitize_teacher_answer_for_anonymous_verifier(value) for value in refs if value.strip()))
+    return ()
 
 
 def _extra_rubric_instructions(args: Any) -> str:
@@ -577,18 +477,6 @@ def _maximum_score(rubric: Any) -> float:
 
 def _rubric_hash(rubric: Any) -> str:
     text = json.dumps(rubric, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _rubric_cache_key(args: Any, samples: list[Sample], teacher_answers: tuple[str, ...]) -> str:
-    raw = {
-        "join_key": _join_key(args),
-        "join_value": _join_value(args, samples[0]),
-        "prompt": task_prompt(samples[0]),
-        "teacher_answers": teacher_answers,
-        "student_answers": [_student_answer(args, sample) for sample in samples],
-    }
-    text = json.dumps(raw, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -711,11 +599,10 @@ def _parse_batch_scores(payload: Any, *, rubric: dict[str, Any], expected: int) 
     return scores
 
 
-def _existing_rubric(args: Any, sample: Sample, teacher_data: dict[str, Any]) -> Any:
-    return _teacher_or_metadata_value(
+def _existing_rubric(args: Any, sample: Sample) -> Any:
+    return _configured_metadata_value(
         args,
         sample,
-        teacher_data,
         "rubric_keys",
         ("rubric", "reward_rubric", "ropd_rubric"),
     )
@@ -731,24 +618,16 @@ def _weight(args: Any) -> float:
 async def _rubric_for_bucket(
     args: Any,
     samples: list[Sample],
-    cache: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None, tuple[str, ...]]:
     sample = samples[0]
-    teacher_data = _teacher_data(args, sample)
-    teacher_answers = _teacher_answers(args, sample, teacher_data)
+    teacher_answers = _teacher_answers(args, sample)
     if not teacher_answers:
         return None, "missing_teacher", None, ()
 
-    existing = _existing_rubric(args, sample, teacher_data)
+    existing = _existing_rubric(args, sample)
     existing_rubric = _normalize_rubric(existing)
     if existing_rubric is not None:
         return existing_rubric, "teacher", None, teacher_answers
-
-    key = _rubric_cache_key(args, samples, teacher_answers)
-    if key in cache:
-        cached_rubric = _normalize_rubric(cache[key])
-        if cached_rubric is not None:
-            return cached_rubric, "cache", None, teacher_answers
 
     allow_online_raw = runtime_env(args, "AGENT_ENV_ROPD_ALLOW_ONLINE_RUBRIC", "")
     if allow_online_raw == "":
@@ -773,7 +652,6 @@ async def _rubric_for_bucket(
             {
                 "join_key": _join_key(args),
                 "join_value": _join_value(args, sample),
-                "cache_key": key,
                 "status": "error",
                 "error": {"type": type(exc).__name__, "message": str(exc)},
                 "prompt": prompt,
@@ -789,7 +667,6 @@ async def _rubric_for_bucket(
         {
             "join_key": _join_key(args),
             "join_value": _join_value(args, sample),
-            "cache_key": key,
             "status": "ok" if rubric is not None else "invalid_rubric",
             "prompt": prompt,
             "payload": payload,
@@ -801,7 +678,6 @@ async def _rubric_for_bucket(
     )
     if rubric is None:
         return None, "invalid_online_rubric", call_metadata, teacher_answers
-    cache[key] = rubric
     return rubric, "online", call_metadata, teacher_answers
 
 
@@ -1000,8 +876,6 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
             result.reward_version = "ropd_v1_fallback_naive"
         return fallback_results
 
-    cache_path = _cache_path(args)
-    cache = _load_cache(cache_path)
     buckets: dict[str, list[int]] = {}
     for idx, sample in enumerate(samples):
         buckets.setdefault(_join_value(args, sample), []).append(idx)
@@ -1009,9 +883,8 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
     results: list[RewardResult | None] = [None] * len(samples)
     bucket_items = list(buckets.items())
     rubric_infos = await asyncio.gather(
-        *[_rubric_for_bucket(args, [samples[idx] for idx in indices], cache) for _, indices in bucket_items]
+        *[_rubric_for_bucket(args, [samples[idx] for idx in indices]) for _, indices in bucket_items]
     )
-    changed = any(rubric_source == "online" for _, rubric_source, _, _ in rubric_infos)
 
     judge_tasks = []
     judge_task_keys: list[list[int]] = []
@@ -1039,8 +912,6 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
         for indices, bucket_results in zip(judge_task_keys, await asyncio.gather(*judge_tasks), strict=True):
             for idx, result in zip(indices, bucket_results, strict=True):
                 results[idx] = result
-    if changed:
-        _save_cache(cache_path, cache)
     return [
         result if result is not None else _fallback_result(args, sample, "missing_result")
         for result, sample in zip(results, samples, strict=True)
