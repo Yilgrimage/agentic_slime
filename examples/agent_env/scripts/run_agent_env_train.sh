@@ -59,8 +59,12 @@ fi
 ENV_NAME=${ENV_NAME:?Set ENV_NAME to alfworld, webshop, tau2, appworld, or openclaw}
 WANDB_SECRET_FILE=${WANDB_SECRET_FILE:-${ROOT_DIR}/secrets/wandb.env}
 resolve_slime_runtime
+WANDB_ENABLED=0
 if [ "${ENABLE_WANDB:-0}" = "1" ] || [ "${USE_WANDB:-0}" = "1" ]; then
   resolve_wandb_runtime
+  WANDB_ENABLED=1
+else
+  unset WANDB_RUNTIME_RESOLVED WANDB_ENV WANDB_PYTHON WANDB_PYTHONPATH
 fi
 TRAIN_ENTRYPOINT=${TRAIN_ENTRYPOINT:-examples/agent_env/train_entrypoint.py}
 AGENT_ENV_TRAIN_LOOP=${AGENT_ENV_TRAIN_LOOP:-async}
@@ -370,7 +374,7 @@ SLIME_SITE_PACKAGES=$(python_site_packages "${SLIME_PYTHON}")
 unset PYTHONPATH
 unset CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER CONDA_SHLVL CONDA_EXE CONDA_PYTHON_EXE _CONDA_EXE _CONDA_ROOT _CE_CONDA _CE_M
 export PYTHONNOUSERSITE=1
-if [ -n "${WANDB_PYTHONPATH:-}" ]; then
+if [ "${WANDB_ENABLED}" = "1" ] && [ -n "${WANDB_PYTHONPATH:-}" ]; then
   export PYTHONPATH="${WANDB_PYTHONPATH}:${MEGATRON_PATH}:${REPO_DIR}:${SLIME_SITE_PACKAGES}"
 else
   export PYTHONPATH="${MEGATRON_PATH}:${REPO_DIR}:${SLIME_SITE_PACKAGES}"

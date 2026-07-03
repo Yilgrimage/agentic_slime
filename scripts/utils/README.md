@@ -63,12 +63,13 @@ data first with `prepare_data.sh`, optionally archive it with `pack_data.sh`,
 then use `--validate-data-load` once on new clusters to run heavier env load
 smoke checks.
 
-When the cluster image ships an incompatible W&B SDK, materialize a separate
-`wandb` env pack. By default W&B uses only that pack so launches do not
-silently import the image-provided SDK:
+W&B is isolated from the training runtime. If W&B is enabled, first build and
+materialize a separate `wandb` env pack on every training node. Launches do not
+fall back to image, user-site, or system Python W&B installs, because those
+paths can contaminate Slime imports:
 
 ```bash
-WANDB_SPEC='wandb' bash scripts/utils/build_wandb_env.sh
+WANDB_SPEC='wandb' bash ${ROOT_DIR}/scripts/build_wandb_env.sh
 
 ${ROOT_DIR}/scripts/prepare_node_runtime.sh \
   --all-nodes \
@@ -86,9 +87,9 @@ WANDB_RUNTIME=pack ENABLE_WANDB=1 \
 
 The builder publishes `${ROOT_DIR}/packs/wandb.tar.gz` plus `.sha256` and
 `.revision`; these generated pack artifacts stay out of git. Set
-`WANDB_SPEC='wandb==<version>'` to pin the official SDK. Explicitly set
-`WANDB_RUNTIME=auto`, `slime`, or `local` only when fallback to another runtime
-is intended.
+`WANDB_SPEC='wandb==<version>'` to pin the official SDK. If the pack is not
+materialized and `ENABLE_WANDB=1`, the launch should fail fast; set
+`ENABLE_WANDB=0` for no-W&B runs.
 
 Multi-node distributed training must use a routable socket interface. The
 launcher resolves `SOCKET_IFNAME=${MLP_SOCKET_IFNAME:-eth0}` unless overridden,

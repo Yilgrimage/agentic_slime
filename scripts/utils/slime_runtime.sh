@@ -17,8 +17,7 @@ set_wandb_runtime_defaults() {
   WANDB_RUNTIME=${WANDB_RUNTIME:-pack}
   WANDB_PACK_NAME=${WANDB_PACK_NAME:-wandb}
   WANDB_PACK_PATH=${WANDB_PACK_PATH:-${LOCAL_ENVS_DIR}/${WANDB_PACK_NAME}}
-  WANDB_LOCAL_PYTHON=${WANDB_LOCAL_PYTHON:-python}
-  export WANDB_RUNTIME WANDB_PACK_NAME WANDB_PACK_PATH WANDB_LOCAL_PYTHON
+  export WANDB_RUNTIME WANDB_PACK_NAME WANDB_PACK_PATH
 }
 
 resolve_slime_cuda_home() {
@@ -115,13 +114,6 @@ slime_runtime_candidate_available() {
   [ -x "${python}" ] || return 1
   [ -d "${backend_path}" ] || return 1
   slime_python_imports_slime "${python}"
-}
-
-wandb_runtime_candidate_available() {
-  local python=$1
-  [ -x "${python}" ] || return 1
-  python_imports_wandb "${python}" || return 1
-  [ "$(python_major_minor "${python}")" = "$(python_major_minor "${SLIME_PYTHON}")" ]
 }
 
 activate_slime_runtime() {
@@ -228,50 +220,19 @@ EOF
 resolve_wandb_runtime() {
   set_wandb_runtime_defaults
   if [ -z "${SLIME_PYTHON:-}" ]; then
-    resolve_slime_runtime
+    resolve_slime_runtime || return 1
   fi
 
-  if [ -n "${WANDB_PYTHONPATH:-}" ]; then
-    activate_wandb_runtime "pythonpath" "${WANDB_ENV:-}" "${WANDB_PYTHON:-}" "${WANDB_PYTHONPATH}"
-    return 0
-  fi
-
-  if [ -n "${WANDB_ENV:-}" ]; then
-    WANDB_PYTHON=${WANDB_PYTHON:-${WANDB_ENV}/bin/python}
-    require_wandb_runtime_candidate "explicit" "${WANDB_PYTHON}"
-    activate_wandb_runtime "explicit" "${WANDB_ENV}" "${WANDB_PYTHON}" "$(python_site_packages "${WANDB_PYTHON}")"
-    return 0
-  fi
+  unset WANDB_RUNTIME_RESOLVED WANDB_ENV WANDB_PYTHON WANDB_PYTHONPATH
 
   case "${WANDB_RUNTIME}" in
     pack|conda_pack|conda-pack)
       WANDB_PYTHON="${WANDB_PACK_PATH}/bin/python"
-      require_wandb_runtime_candidate "pack" "${WANDB_PYTHON}"
+      require_wandb_runtime_candidate "pack" "${WANDB_PYTHON}" || return 1
       activate_wandb_runtime "pack" "${WANDB_PACK_PATH}" "${WANDB_PYTHON}" "$(python_site_packages "${WANDB_PYTHON}")"
       ;;
-    slime|slime-runtime)
-      require_wandb_runtime_candidate "slime" "${SLIME_PYTHON}"
-      activate_wandb_runtime "slime" "${SLIME_ENV}" "${SLIME_PYTHON}" ""
-      ;;
-    local)
-      require_wandb_runtime_candidate "local" "${WANDB_LOCAL_PYTHON}"
-      activate_wandb_runtime "local" "" "${WANDB_LOCAL_PYTHON}" "$(python_site_packages "${WANDB_LOCAL_PYTHON}")"
-      ;;
-    auto)
-      if wandb_runtime_candidate_available "${WANDB_PACK_PATH}/bin/python"; then
-        WANDB_PYTHON="${WANDB_PACK_PATH}/bin/python"
-        activate_wandb_runtime "pack" "${WANDB_PACK_PATH}" "${WANDB_PYTHON}" "$(python_site_packages "${WANDB_PYTHON}")"
-      elif python_imports_wandb "${SLIME_PYTHON}"; then
-        activate_wandb_runtime "slime" "${SLIME_ENV}" "${SLIME_PYTHON}" ""
-      elif command -v "${WANDB_LOCAL_PYTHON}" >/dev/null 2>&1 && wandb_runtime_candidate_available "${WANDB_LOCAL_PYTHON}"; then
-        activate_wandb_runtime "local" "" "${WANDB_LOCAL_PYTHON}" "$(python_site_packages "${WANDB_LOCAL_PYTHON}")"
-      else
-        echo "W&B runtime not found in ${WANDB_PACK_PATH}, Slime runtime, or version-compatible local Python; continuing with Slime runtime import path." >&2
-        activate_wandb_runtime "missing" "" "" ""
-      fi
-      ;;
     *)
-      echo "Unsupported WANDB_RUNTIME=${WANDB_RUNTIME}; expected auto, pack, slime, or local" >&2
+      echo "Unsupported WANDB_RUNTIME=${WANDB_RUNTIME}; expected pack. Build and materialize ${WANDB_PACK_NAME}.tar.gz, or disable W&B." >&2
       return 1
       ;;
   esac
