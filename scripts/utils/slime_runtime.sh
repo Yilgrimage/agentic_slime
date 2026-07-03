@@ -62,7 +62,7 @@ PY
 
 slime_python_imports_slime() {
   local python=$1
-  "${python}" - <<'PY' >/dev/null 2>&1
+  PYTHONNOUSERSITE=1 "${python}" - <<'PY' >/dev/null 2>&1
 import importlib.util
 raise SystemExit(0 if importlib.util.find_spec("slime") else 1)
 PY
@@ -70,7 +70,7 @@ PY
 
 python_major_minor() {
   local python=$1
-  "${python}" - <<'PY'
+  PYTHONNOUSERSITE=1 "${python}" - <<'PY'
 import sys
 print(f"{sys.version_info.major}.{sys.version_info.minor}")
 PY
@@ -78,7 +78,7 @@ PY
 
 python_site_packages() {
   local python=$1
-  "${python}" - <<'PY'
+  PYTHONNOUSERSITE=1 "${python}" - <<'PY'
 import site
 import sysconfig
 
@@ -102,7 +102,7 @@ PY
 
 python_imports_wandb() {
   local python=$1
-  "${python}" - <<'PY' >/dev/null 2>&1
+  PYTHONNOUSERSITE=1 "${python}" - <<'PY' >/dev/null 2>&1
 import importlib.util
 raise SystemExit(0 if importlib.util.find_spec("wandb") else 1)
 PY
