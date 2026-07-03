@@ -7,6 +7,8 @@ from pathlib import Path
 
 import yaml
 
+from examples.agent_env.prompting import require_prompt
+
 
 def _agent_env_data_dir() -> Path | None:
     value = os.environ.get("AGENT_ENV_DATA_DIR", "").strip()
@@ -66,8 +68,20 @@ def load_tasks(config_path: Path) -> list[dict]:
     if task_file:
         tasks.extend(_load_json_or_jsonl(_resolve_path(task_file, config_dir=config_path.parent)))
     if not tasks:
-        tasks = [{"id": "default", "prompt": "Solve the assigned OpenClaw task using the available tools."}]
+        raise ValueError(f"OpenClaw config has no tasks or task_file entries: {config_path}")
     return tasks
+
+
+def load_policy(config_path: Path) -> str:
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    openclaw_cfg = cfg.get("openclaw") if isinstance(cfg.get("openclaw"), dict) else {}
+    policy = str(openclaw_cfg.get("policy") or cfg.get("policy") or "").strip()
+    policy_file = str(openclaw_cfg.get("policy_file") or cfg.get("policy_file") or "").strip()
+    if policy_file:
+        policy = _resolve_path(policy_file, config_dir=config_path.parent).read_text(encoding="utf-8").strip()
+    if not policy:
+        raise ValueError(f"OpenClaw config must define openclaw.policy or openclaw.policy_file: {config_path}")
+    return policy
 
 
 def reward_metadata(task: dict) -> dict:
@@ -95,17 +109,25 @@ def reward_metadata(task: dict) -> dict:
 
 
 def write_split(path: Path, split: str, num_tasks: int, prompt: str, start_task: int, tasks: list[dict]) -> None:
+    prompt = require_prompt(prompt, env_name="OpenClaw", source="prompt_data policy")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for offset in range(num_tasks):
             task_index = start_task + offset
             task = tasks[task_index % len(tasks)]
+            task_prompt = str(task.get("prompt") or task.get("query") or task.get("task_question") or "")
+            if not task_prompt.strip():
+                raise ValueError(
+                    f"OpenClaw task at index {task_index % len(tasks)} has no prompt/query/task_question, "
+                    "so env server cannot construct the task user prompt"
+                )
             row = {
-                "prompt": prompt or str(task.get("prompt") or task.get("query") or task.get("task_question") or ""),
+                "prompt": prompt,
                 "metadata": {
                     "task_index": task_index,
                     "split": split,
                     "task_id": task.get("id") or task.get("task_id", task_index),
+                    "task": task,
                 },
             }
             row["metadata"].update(reward_metadata(task))
@@ -129,17 +151,18 @@ def main() -> None:
 
     config_path = _resolve_path(args.config)
     tasks = load_tasks(config_path)
+    prompt = args.prompt or load_policy(config_path)
     num_tasks = len(tasks) if str(args.num_tasks).strip().lower() == "all" else int(args.num_tasks)
     if num_tasks <= 0:
         parser.error("--num-tasks must be a positive integer or all")
 
     if args.output:
-        write_split(Path(args.output), args.split, num_tasks, args.prompt, args.start_task, tasks)
+        write_split(Path(args.output), args.split, num_tasks, prompt, args.start_task, tasks)
         return
 
     output_dir = Path(args.output_dir)
     for split in args.splits:
-        write_split(output_dir / f"{split}_{num_tasks}.jsonl", split, num_tasks, args.prompt, args.start_task, tasks)
+        write_split(output_dir / f"{split}_{num_tasks}.jsonl", split, num_tasks, prompt, args.start_task, tasks)
 
 
 if __name__ == "__main__":

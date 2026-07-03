@@ -7,14 +7,8 @@ from slime.utils.types import Sample
 from examples.agent_env.episode import generate_server_episode_rollout
 from examples.agent_env.alfworld.task_ids import normalize_alfworld_task_id
 from examples.agent_env.metrics import log_eval_rollout_data_for_env, log_rollout_data_for_env
+from examples.agent_env.prompting import require_prompt
 from examples.agent_env.rollout import AgentEnvSpec, cfg_path, first, metadata
-
-DEFAULT_PROMPT = """You are an expert household task agent in ALFWorld.
-At each turn, read the current observation and valid actions, then choose one next action.
-The final action must be wrapped in this format:
-<action>one valid action</action>
-
-The action text must exactly match one of the valid actions when possible."""
 
 
 def _admissible(info: dict) -> list[str]:
@@ -36,7 +30,7 @@ def _observation_text(args: Any, observation: str, info: dict) -> str:
 
 
 def _initial_prompt(args: Any, sample: Sample, observation: str, info: dict) -> str:
-    base = sample.prompt.strip() if isinstance(sample.prompt, str) and sample.prompt.strip() else DEFAULT_PROMPT
+    base = require_prompt(sample.prompt, env_name="ALFWorld")
     admissible = _format_actions(_admissible(info)).strip()
     if "{observation}" in base or "{admissible_actions}" in base:
         return base.format(observation=observation.strip(), admissible_actions=admissible)

@@ -8,6 +8,9 @@ from typing import Any
 
 import yaml
 
+from examples.agent_env.appworld.prompt import DEFAULT_PROMPT
+from examples.agent_env.prompting import require_prompt
+
 
 def _env_path(value: Any, envvar: str) -> str:
     text = str(value or "").strip()
@@ -61,6 +64,7 @@ def _num_tasks(value: str, available: int) -> int:
 
 
 def write_split(path: Path, split: str, num_tasks: int, prompt: str, start_task: int, task_ids: list[str], dataset_name: str) -> None:
+    prompt = require_prompt(prompt, env_name="AppWorld", source="prompt_data --prompt")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for offset in range(num_tasks):
@@ -86,7 +90,7 @@ def main() -> None:
     parser.add_argument("--start-task", type=int, default=0)
     parser.add_argument("--split", default="train", help="Split used with --output.")
     parser.add_argument("--splits", nargs="+", default=("train", "dev"), help="Splits used with --output-dir.")
-    parser.add_argument("--prompt", default="")
+    parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--config", default="examples/agent_env/appworld/env_config.yaml")
     args = parser.parse_args()
 

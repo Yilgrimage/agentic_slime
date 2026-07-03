@@ -20,17 +20,10 @@ from examples.agent_env.env_episode import (
     parse_text_action,
     policy_context_limit_reached,
 )
+from examples.agent_env.prompting import require_prompt
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_PROMPT = """You are an expert household task agent in ALFWorld.
-At each turn, read the current observation and valid actions, then choose one next action.
-The action text must be wrapped as:
-<action>one valid action</action>
-
-The action text must exactly match one of the valid actions when possible."""
-
 
 def _first(value: Any, default: Any = None) -> Any:
     if value is None:
@@ -247,12 +240,15 @@ class ALFWorldBackend:
             text += self._format_actions(self._admissible(info))
         return text
 
-    def _initial_prompt(self, prompt: str, observation: str, info: dict[str, Any]) -> str:
-        base = str(prompt or "").strip() or DEFAULT_PROMPT
-        admissible = self._format_actions(self._admissible(info)).strip()
-        if "{observation}" in base or "{admissible_actions}" in base:
-            return base.format(observation=str(observation).strip(), admissible_actions=admissible)
-        return f"{base}\n\n{self._observation_text(observation, info)}"
+    def _initial_messages(self, prompt: str, observation: str, info: dict[str, Any]) -> list[dict[str, str]]:
+        system_prompt = require_prompt(prompt, env_name="ALFWorld", source="run_episode.prompt")
+        user_prompt = self._observation_text(observation, info).strip()
+        if not user_prompt:
+            raise ValueError("ALFWorld initial user prompt is empty after reset")
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
     def _load_wrapper(self, split: str) -> dict[str, Any]:
         import sys
@@ -319,6 +315,8 @@ class ALFWorldBackend:
         skip_to_task = bool(payload.get("skip_to_task", False))
         num_tasks = payload.get("num_tasks")
         task_id = payload.get("task_id")
+        if task_id not in (None, "", []) and not (direct_game_file and self.honor_direct_game_file):
+            raise ValueError("ALFWorld prompt data provided task_id, but direct game-file selection is disabled")
 
         if direct_game_file and self.honor_direct_game_file:
             if task_id not in (None, "", []):
@@ -363,8 +361,7 @@ class ALFWorldBackend:
         reset = self.reset(payload)
         observation = str(reset.get("observation", ""))
         info = reset.get("info") if isinstance(reset.get("info"), dict) else {}
-        prompt = self._initial_prompt(str(payload.get("prompt") or ""), observation, info)
-        messages = [{"role": "user", "content": prompt}]
+        messages = self._initial_messages(str(payload.get("prompt") or ""), observation, info)
         runtime = self.runtime
         action_cfg = runtime.get("action") if isinstance(runtime.get("action"), dict) else {}
         interaction_cfg = runtime.get("interaction") if isinstance(runtime.get("interaction"), dict) else {}

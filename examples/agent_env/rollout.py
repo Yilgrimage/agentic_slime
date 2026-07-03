@@ -382,7 +382,7 @@ def task_payload(sample: Sample, spec: AgentEnvSpec) -> dict[str, Any]:
         "split": split,
         "task_index": task_index(sample),
     }
-    for key in ("env", "data_source", "domain", "task_set", "task_id", "seed", "task_ref"):
+    for key in ("env", "data_source", "domain", "task_set", "dataset_name", "task_id", "seed", "task_ref", "task"):
         if key in sample_metadata and sample_metadata[key] is not None:
             payload[key] = sample_metadata[key]
     return payload
@@ -391,7 +391,7 @@ def task_payload(sample: Sample, spec: AgentEnvSpec) -> dict[str, Any]:
 def task_key(sample: Sample, spec: AgentEnvSpec) -> str:
     payload = task_payload(sample, spec)
     parts = []
-    for key in ("env", "domain", "task_set", "split", "task_id", "task_index"):
+    for key in ("env", "domain", "task_set", "dataset_name", "split", "task_id", "task_index"):
         value = payload.get(key)
         if value is not None:
             parts.append(f"{key}={value}")
@@ -408,7 +408,7 @@ def task_key(sample: Sample, spec: AgentEnvSpec) -> str:
 
 def record_env_metadata(sample_metadata: dict[str, Any], spec: AgentEnvSpec, env_meta: dict[str, Any]) -> None:
     sample_metadata[spec.name] = env_meta
-    for key in ("task_id", "task_ref", "domain", "data_source", "task_set"):
+    for key in ("task_id", "task_ref", "domain", "data_source", "task_set", "dataset_name"):
         value = env_meta.get(key)
         if value not in (None, "", []):
             sample_metadata.setdefault(key, value)
@@ -431,14 +431,23 @@ def _normalize_tool_call_arguments(value: Any) -> dict[str, Any]:
 
 
 def messages_for_chat_template(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Canonical message shape for tokenizer chat templates and trajectory match.
+
+    OpenAI tool-call ids are wire-only correlation fields. They should stay in
+    env/server HTTP traffic, but not in training history: clients may rewrite
+    them, and chat templates do not need them.
+    """
     normalized = copy.deepcopy(messages)
     for message in normalized:
+        if message.get("role") == "tool":
+            message.pop("tool_call_id", None)
         tool_calls = message.get("tool_calls")
         if not isinstance(tool_calls, list):
             continue
         for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
                 continue
+            tool_call.pop("id", None)
             fn = tool_call.get("function")
             if not isinstance(fn, dict):
                 continue
@@ -743,8 +752,9 @@ class TokenSegment:
 class AgentTokenLedger:
     """Token-in/token-out conversation state for agent-env rollouts.
 
-    `tokens` is the training truth. `messages` is a semantic/logging view and is
-    only used to render newly introduced non-model messages or for audit.
+    Agent-env trains one complete environment episode as one Slime sample. This
+    ledger keeps token accounting local to that contract instead of inheriting
+    generic trajectory forking semantics from core Slime adapters.
     """
 
     def __init__(

@@ -9,11 +9,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from examples.agent_env.tau2.prompt import DEFAULT_PROMPT
 
-def _placeholder_prompt() -> list[dict[str, str]]:
-    # Real tau2 rollout prompts are built after env reset from policy + observation.
-    # This placeholder keeps slime's chat-template dataset path message-shaped.
-    return [{"role": "user", "content": "Start the task."}]
+def _prompt() -> str:
+    # The tau2 server builds the task-specific system policy after env reset.
+    # The dataset prompt remains explicit so missing prompt data never falls
+    # through to a hidden server fallback.
+    return DEFAULT_PROMPT
 
 
 def _split_csv(value: str | None, default: Sequence[str]) -> list[str]:
@@ -73,7 +75,7 @@ def _domain_rows(domain: str, task_set: str, split: str | None, tasks: Sequence[
         task_id = getattr(task, "id", None)
         rows.append(
             {
-                "prompt": _placeholder_prompt(),
+                "prompt": _prompt(),
                 "metadata": {
                     "env": "tau2",
                     "data_source": "official",
@@ -240,7 +242,7 @@ def build_areal_rows(args: argparse.Namespace) -> list[dict[str, Any]]:
 
         rel_task_path = task_path.relative_to(areal_root)
         row = {
-            "prompt": _placeholder_prompt(),
+            "prompt": _prompt(),
             "metadata": {
                 "env": "tau2",
                 "data_source": "areal_synthetic",

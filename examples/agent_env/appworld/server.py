@@ -15,6 +15,7 @@ from examples.agent_env.env_episode import (
     parse_text_action,
     policy_context_limit_reached,
 )
+from examples.agent_env.prompting import require_prompt
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
@@ -181,27 +182,34 @@ class AppWorldBackend:
         )
         return "\n\n".join(parts)
 
-    def _initial_prompt(self, prompt: str, observation: str, info: dict[str, Any]) -> str:
-        base = prompt.strip()
-        if not base:
-            base = (
-                "You are an expert AppWorld agent. Solve the user's task by writing Python code "
-                "against the provided `apis` object."
-            )
-        if "{observation}" in base:
-            return base.format(observation=observation.strip())
-        return f"{base}\n\n{self._observation_text(observation, info)}"
+    def _initial_messages(self, prompt: str, observation: str, info: dict[str, Any]) -> list[dict[str, str]]:
+        system_prompt = require_prompt(prompt, env_name="AppWorld", source="run_episode.prompt")
+        user_prompt = self._observation_text(observation, info).strip()
+        if not user_prompt:
+            raise ValueError("AppWorld initial user prompt is empty after reset")
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
     def _observation_text(self, observation: str, info: dict[str, Any]) -> str:
         return f"Observation:\n{observation.strip()}\n"
 
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         split = str(payload.get("split") or self.split)
-        dataset = _split_dataset(self.config, split)
+        dataset = str(payload.get("dataset_name") or _split_dataset(self.config, split))
         if dataset != self.dataset_name:
             self.dataset_name = dataset
             self.task_ids = self._load_task_ids(dataset)
-        self.task_index = int(payload.get("task_index") or 0) % max(1, len(self.task_ids))
+        requested_task_id = str(payload.get("task_id") or "").strip()
+        if requested_task_id:
+            if requested_task_id not in self.task_ids:
+                raise KeyError(
+                    f"AppWorld task_id from prompt data is not available in dataset={dataset}: {requested_task_id}"
+                )
+            self.task_index = self.task_ids.index(requested_task_id)
+        else:
+            self.task_index = int(payload.get("task_index") or 0) % max(1, len(self.task_ids))
         self.task_id = self.task_ids[self.task_index]
         self._close_world()
         from appworld.environment import AppWorld
@@ -306,8 +314,7 @@ class AppWorldBackend:
         reset = self.reset(payload)
         observation = str(reset.get("observation", ""))
         info = reset.get("info") if isinstance(reset.get("info"), dict) else {}
-        prompt = self._initial_prompt(str(payload.get("prompt") or ""), observation, info)
-        messages = [{"role": "user", "content": prompt}]
+        messages = self._initial_messages(str(payload.get("prompt") or ""), observation, info)
         metadata: dict[str, Any] = {
             "actions": [],
             "action_parse_modes": [],

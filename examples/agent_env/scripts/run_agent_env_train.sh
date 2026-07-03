@@ -267,6 +267,56 @@ PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/scripts/
 PROMPT_DATA_PYTHON=${PROMPT_DATA_PYTHON:-${SLIME_PYTHON}}
 PROMPT_USE_SERVER_NUM_TASKS=${PROMPT_USE_SERVER_NUM_TASKS:-1}
 
+validate_prompt_data() {
+  local path="$1"
+  "${SLIME_PYTHON}" - "${path}" "${ENV_NAME}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+env_name = sys.argv[2]
+
+if not path.exists():
+    raise SystemExit(f"prompt data does not exist: {path}")
+
+rows = 0
+with path.open(encoding="utf-8") as f:
+    for line_no, line in enumerate(f, 1):
+        line = line.strip()
+        if not line:
+            continue
+        rows += 1
+        row = json.loads(line)
+        prompt = row.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise SystemExit(f"{path}:{line_no} has empty/non-string prompt")
+        metadata = row.get("metadata")
+        if not isinstance(metadata, dict):
+            raise SystemExit(f"{path}:{line_no} has missing metadata object")
+        if "task_index" not in metadata:
+            raise SystemExit(f"{path}:{line_no} metadata is missing task_index")
+        if env_name in {"alfworld", "webshop", "appworld", "openclaw", "tau2"}:
+            if metadata.get("task_id") in (None, "", []):
+                raise SystemExit(f"{path}:{line_no} {env_name} metadata is missing task_id")
+        if env_name == "appworld":
+            for key in ("task_id", "dataset_name"):
+                if metadata.get(key) in (None, "", []):
+                    raise SystemExit(f"{path}:{line_no} appworld metadata is missing {key}")
+        elif env_name == "openclaw":
+            if not isinstance(metadata.get("task"), dict):
+                raise SystemExit(f"{path}:{line_no} openclaw metadata is missing task object")
+        elif env_name == "tau2":
+            if not isinstance(metadata.get("task_ref"), dict) and (
+                metadata.get("domain") in (None, "", []) or metadata.get("task_set") in (None, "", [])
+            ):
+                raise SystemExit(f"{path}:{line_no} tau2 metadata needs task_ref or domain/task_set")
+
+if rows <= 0:
+    raise SystemExit(f"prompt data has no rows: {path}")
+PY
+}
+
 export TMPDIR=${TMPDIR:-${LOCAL_RUNTIME_DIR}/tmp}
 export no_proxy="localhost,127.0.0.1,0.0.0.0,::1,${MASTER_ADDR:-},${no_proxy:-}"
 export NO_PROXY="localhost,127.0.0.1,0.0.0.0,::1,${MASTER_ADDR:-},${NO_PROXY:-}"
@@ -298,23 +348,22 @@ fi
 PROMPT_NUM_TASKS=${PROMPT_NUM_TASKS:-all}
 
 DATA_PATH=${DATA_PATH:-${DATA_DIR}/train_${PROMPT_NUM_TASKS}.jsonl}
-if [ "${FORCE_PROMPT_DATA:-0}" = "1" ] || [ ! -f "${DATA_PATH}" ]; then
-  read -r -a PROMPT_DATA_EXTRA_ARGS_ARRAY <<< "${PROMPT_DATA_EXTRA_ARGS:-}"
-  PROMPT_DATA_CONFIG_ARGS=()
-  if [ -n "${PROMPT_DATA_CONFIG:-}" ]; then
-    PROMPT_DATA_CONFIG_ARGS=(--config "${PROMPT_DATA_CONFIG}")
-  fi
-  PROMPT_NUM_TASK_ARGS=()
-  if [ "${PROMPT_NUM_TASKS}" != "all" ]; then
-    PROMPT_NUM_TASK_ARGS=(--num-tasks "${PROMPT_NUM_TASKS}")
-  fi
-  "${PROMPT_DATA_PYTHON}" "${PROMPT_DATA_SCRIPT}" \
-    --output "${DATA_PATH}" \
-    --split train \
-    "${PROMPT_DATA_CONFIG_ARGS[@]}" \
-    "${PROMPT_NUM_TASK_ARGS[@]}" \
-    "${PROMPT_DATA_EXTRA_ARGS_ARRAY[@]}"
+read -r -a PROMPT_DATA_EXTRA_ARGS_ARRAY <<< "${PROMPT_DATA_EXTRA_ARGS:-}"
+PROMPT_DATA_CONFIG_ARGS=()
+if [ -n "${PROMPT_DATA_CONFIG:-}" ]; then
+  PROMPT_DATA_CONFIG_ARGS=(--config "${PROMPT_DATA_CONFIG}")
 fi
+PROMPT_NUM_TASK_ARGS=()
+if [ "${PROMPT_NUM_TASKS}" != "all" ]; then
+  PROMPT_NUM_TASK_ARGS=(--num-tasks "${PROMPT_NUM_TASKS}")
+fi
+"${PROMPT_DATA_PYTHON}" "${PROMPT_DATA_SCRIPT}" \
+  --output "${DATA_PATH}" \
+  --split train \
+  "${PROMPT_DATA_CONFIG_ARGS[@]}" \
+  "${PROMPT_NUM_TASK_ARGS[@]}" \
+  "${PROMPT_DATA_EXTRA_ARGS_ARRAY[@]}"
+validate_prompt_data "${DATA_PATH}"
 
 resolve_slime_cuda_home
 SLIME_SITE_PACKAGES=$(python_site_packages "${SLIME_PYTHON}")

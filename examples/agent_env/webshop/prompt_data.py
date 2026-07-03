@@ -2,8 +2,12 @@ import argparse
 import json
 from pathlib import Path
 
+from examples.agent_env.prompting import require_prompt
+from examples.agent_env.webshop.prompt import DEFAULT_PROMPT
+
 
 def write_split(path: Path, split: str, num_tasks: int, prompt: str, start_task: int) -> None:
+    prompt = require_prompt(prompt, env_name="WebShop", source="prompt_data --prompt")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for task_index in range(start_task, start_task + num_tasks):
@@ -11,6 +15,7 @@ def write_split(path: Path, split: str, num_tasks: int, prompt: str, start_task:
                 "prompt": prompt,
                 "metadata": {
                     "task_index": task_index,
+                    "task_id": f"webshop:{split}:{task_index}",
                     "split": split,
                 },
             }
@@ -30,7 +35,7 @@ def main():
         default=("train", "valid_seen", "valid_unseen"),
         help="Splits used with --output-dir.",
     )
-    parser.add_argument("--prompt", default="")
+    parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     args = parser.parse_args()
 
     if bool(args.output) == bool(args.output_dir):

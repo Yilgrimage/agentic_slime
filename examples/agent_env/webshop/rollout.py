@@ -6,17 +6,8 @@ from slime.utils.types import Sample
 
 from examples.agent_env.episode import generate_server_episode_rollout
 from examples.agent_env.metrics import log_eval_rollout_data_for_env, log_rollout_data_for_env
+from examples.agent_env.prompting import require_prompt
 from examples.agent_env.rollout import AgentEnvSpec, cfg_path, metadata
-
-DEFAULT_PROMPT = """You are an expert shopping agent in WebShop.
-At each turn, read the current webpage observation and available actions, then respond in exactly this format:
-<action>one valid action</action>
-
-Actions must use WebShop syntax:
-- search[query words]
-- click[visible option or button text]
-
-The action text should exactly match one available action when possible."""
 
 
 def _available_actions(info: dict) -> list[str]:
@@ -47,7 +38,7 @@ def _observation_text(args: Any, observation: str, info: dict) -> str:
 
 
 def _initial_prompt(args: Any, sample: Sample, observation: str, info: dict) -> str:
-    base = sample.prompt.strip() if isinstance(sample.prompt, str) and sample.prompt.strip() else DEFAULT_PROMPT
+    base = require_prompt(sample.prompt, env_name="WebShop")
     available = _format_actions(_available_actions(info)).strip()
     if "{observation}" in base or "{available_actions}" in base:
         return base.format(observation=observation.strip(), available_actions=available)

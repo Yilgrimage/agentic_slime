@@ -2,8 +2,11 @@ import argparse
 import json
 from pathlib import Path
 
+from examples.agent_env.prompting import require_prompt
+
 
 def write_split(path: Path, split: str, num_tasks: int, prompt: str, start_task: int) -> None:
+    prompt = require_prompt(prompt, env_name="generic agent-env", source="prompt_data --prompt")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for task_index in range(start_task, start_task + num_tasks):
@@ -25,7 +28,7 @@ def main() -> None:
     parser.add_argument("--start-task", type=int, default=0)
     parser.add_argument("--split", default="train", help="Split used with --output.")
     parser.add_argument("--splits", nargs="+", default=("train", "eval"), help="Splits used with --output-dir.")
-    parser.add_argument("--prompt", default="")
+    parser.add_argument("--prompt", required=True)
     args = parser.parse_args()
 
     if bool(args.output) == bool(args.output_dir):

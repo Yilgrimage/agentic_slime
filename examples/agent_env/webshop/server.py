@@ -16,21 +16,10 @@ from examples.agent_env.env_episode import (
     parse_text_action,
     policy_context_limit_reached,
 )
+from examples.agent_env.prompting import require_prompt
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_PROMPT = """You are an expert shopping agent in WebShop.
-At each turn, read the current webpage observation and available actions, then choose one next action.
-The action text must be wrapped as:
-<action>one valid action</action>
-
-Actions must use WebShop syntax:
-- search[query words]
-- click[visible option or button text]
-
-The action text should exactly match one available action when possible."""
-
 
 def _load_text_env_class(webshop_lib: str | None):
     if not webshop_lib:
@@ -247,12 +236,15 @@ class WebShopBackend:
             text += self._format_actions(_available_actions(self.env, info) if self.env is not None else [])
         return text
 
-    def _initial_prompt(self, prompt: str, observation: str, info: dict[str, Any]) -> str:
-        base = str(prompt or "").strip() or DEFAULT_PROMPT
-        available = self._format_actions(_available_actions(self.env, info) if self.env is not None else []).strip()
-        if "{observation}" in base or "{available_actions}" in base:
-            return base.format(observation=str(observation).strip(), available_actions=available)
-        return f"{base}\n\n{self._observation_text(observation, info)}"
+    def _initial_messages(self, prompt: str, observation: str, info: dict[str, Any]) -> list[dict[str, str]]:
+        system_prompt = require_prompt(prompt, env_name="WebShop", source="run_episode.prompt")
+        user_prompt = self._observation_text(observation, info).strip()
+        if not user_prompt:
+            raise ValueError("WebShop initial user prompt is empty after reset")
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
     def start(self) -> dict[str, Any]:
         import sys
@@ -296,6 +288,11 @@ class WebShopBackend:
         assert self.env is not None
         self.split = str(payload.get("split") or self.split)
         self.task_index = int(payload.get("task_index") or 0)
+        requested_task_id = str(payload.get("task_id") or "").strip()
+        if requested_task_id:
+            expected_task_id = f"webshop:{self.split}:{self.task_index}"
+            if requested_task_id != expected_task_id:
+                raise ValueError(f"WebShop task_id mismatch: expected {expected_task_id}, got {requested_task_id}")
         obs = _reset_env(self.env, self.task_index)
         self.reset_count += 1
         self.step_count = 0
@@ -341,8 +338,7 @@ class WebShopBackend:
         reset = self.reset(payload)
         observation = str(reset.get("observation", ""))
         info = reset.get("info") if isinstance(reset.get("info"), dict) else {}
-        prompt = self._initial_prompt(str(payload.get("prompt") or ""), observation, info)
-        messages = [{"role": "user", "content": prompt}]
+        messages = self._initial_messages(str(payload.get("prompt") or ""), observation, info)
         runtime = self.runtime
         action_cfg = runtime.get("action") if isinstance(runtime.get("action"), dict) else {}
         interaction_cfg = runtime.get("interaction") if isinstance(runtime.get("interaction"), dict) else {}

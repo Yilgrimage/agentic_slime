@@ -11,6 +11,7 @@ from urllib import error, request
 
 import yaml
 
+from examples.agent_env.prompting import require_prompt
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
@@ -127,7 +128,7 @@ def _environment_config(raw: dict, config_dir: Path | None = None) -> dict:
     if task_file:
         tasks = [*tasks, *_load_json_or_jsonl(_resolve_runtime_path(task_file, config_dir))]
     if not tasks:
-        tasks = [{"id": "default", "prompt": "Solve the assigned OpenClaw task."}]
+        raise ValueError("openclaw.tasks or openclaw.task_file is required")
 
     base_url = _expand_text(cfg.get("base_url") or os.environ.get("OPENCLAW_HARNESS_URL", ""))
     if not base_url or _missing_env_placeholder(base_url):
@@ -137,6 +138,8 @@ def _environment_config(raw: dict, config_dir: Path | None = None) -> dict:
     policy_file = _expand_text(cfg.get("policy_file") or "")
     if policy_file:
         policy = _resolve_runtime_path(policy_file, config_dir).read_text(encoding="utf-8")
+    if not policy.strip():
+        raise ValueError("openclaw.policy or openclaw.policy_file is required")
 
     return {
         "name": str(cfg.get("name") or "openclaw_harness"),
@@ -237,8 +240,27 @@ class OpenClawBackend:
         if self.client is None:
             raise RuntimeError("OpenClaw harness client is not started")
         self.split = str(payload.get("split") or self.split)
-        self.task_index = int(payload.get("task_index") or 0) % max(1, len(self.tasks))
-        self.task = dict(self.tasks[self.task_index])
+        payload_task = payload.get("task") if isinstance(payload.get("task"), dict) else None
+        payload_task_id = str((payload_task or {}).get("id") or (payload_task or {}).get("task_id") or "").strip()
+        requested_task_id = str(payload.get("task_id") or payload_task_id).strip()
+        if payload.get("task_id") not in (None, "", []) and payload_task_id and str(payload.get("task_id")).strip() != payload_task_id:
+            raise ValueError(f"OpenClaw task_id mismatch between metadata and task payload: {payload.get('task_id')} != {payload_task_id}")
+        if payload_task is not None:
+            self.task = dict(payload_task)
+            self.task_index = int(payload.get("task_index") or 0)
+        elif requested_task_id:
+            matches = [
+                index
+                for index, task in enumerate(self.tasks)
+                if str(task.get("id") or task.get("task_id") or "").strip() == requested_task_id
+            ]
+            if not matches:
+                raise KeyError(f"OpenClaw task_id from prompt data is not available: {requested_task_id}")
+            self.task_index = matches[0]
+            self.task = dict(self.tasks[self.task_index])
+        else:
+            self.task_index = int(payload.get("task_index") or 0) % max(1, len(self.tasks))
+            self.task = dict(self.tasks[self.task_index])
         self.session_id = f"{self.worker_id}-{uuid.uuid4().hex[:12]}"
         self.reset_count += 1
         self.final_score = 0.0
@@ -253,7 +275,7 @@ class OpenClawBackend:
             "max_turns": int(payload.get("max_turns") or self.config.get("max_turns", 20)),
             "policy": payload.get("policy") or {},
             "sampling_params": payload.get("sampling_params") or {},
-            "policy_instruction": self.config.get("policy") or "",
+            "policy_instruction": require_prompt(payload.get("prompt"), env_name="OpenClaw", source="run_episode.prompt"),
             "metadata": {
                 key: value
                 for key, value in payload.items()

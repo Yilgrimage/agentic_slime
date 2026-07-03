@@ -13,6 +13,7 @@ from slime.utils.types import Sample
 
 import examples.agent_env.alfworld.rollout as alf_gen
 import examples.agent_env.episode as episode
+from examples.agent_env.alfworld.prompt import DEFAULT_PROMPT
 
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -146,7 +147,7 @@ async def run(data_dir: str):
     try:
         results = []
         for task_index in range(2):
-            sample = Sample(prompt="", metadata={"task_index": task_index, "split": "train"})
+            sample = Sample(prompt=DEFAULT_PROMPT, metadata={"task_index": task_index, "split": "train"})
             result = await alf_gen.generate(args, sample, sampling_params={})
             results.append(result)
 

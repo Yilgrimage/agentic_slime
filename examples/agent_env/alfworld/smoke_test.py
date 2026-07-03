@@ -11,6 +11,7 @@ from slime.utils.types import Sample
 
 import examples.agent_env.episode as episode
 import examples.agent_env.alfworld.rollout as alf_gen
+from examples.agent_env.alfworld.prompt import DEFAULT_PROMPT
 
 
 class FakeTokenizer:
@@ -133,7 +134,7 @@ async def main():
             router_policy=None,
             hf_checkpoint="fake",
         )
-        sample = Sample(prompt="", metadata={"task_index": 0})
+        sample = Sample(prompt=DEFAULT_PROMPT, metadata={"task_index": 0})
         result = await alf_gen.generate(args, sample, sampling_params={})
 
         assert result.status == Sample.Status.COMPLETED

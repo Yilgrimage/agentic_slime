@@ -6,11 +6,8 @@ from slime.utils.types import Sample
 
 from examples.agent_env.episode import generate_server_episode_rollout
 from examples.agent_env.metrics import log_eval_rollout_data_for_env, log_rollout_data_for_env
+from examples.agent_env.prompting import require_prompt
 from examples.agent_env.rollout import AgentEnvSpec, cfg_path
-
-DEFAULT_PROMPT = """You are an OpenClaw agent.
-Use available tools to inspect state, take actions, and complete the task. When the task is complete, call the finish tool if it is available.
-Do not send a natural-language message and make a tool call in the same turn."""
 
 
 def _available_actions(info: dict) -> list[str]:
@@ -40,7 +37,7 @@ def _observation_text(args: Any, observation: str, info: dict) -> str:
 
 
 def _initial_prompt(args: Any, sample: Sample, observation: str, info: dict) -> str:
-    base = sample.prompt.strip() if isinstance(sample.prompt, str) and sample.prompt.strip() else DEFAULT_PROMPT
+    base = require_prompt(sample.prompt, env_name="OpenClaw")
     tools = _format_tools(_available_actions(info)).strip()
     if "{observation}" in base or "{available_tools}" in base:
         return base.format(observation=observation.strip(), available_tools=tools)

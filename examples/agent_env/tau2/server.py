@@ -591,27 +591,21 @@ class Tau2Backend:
         if str(prompt).strip():
             messages.append({"role": "user", "content": str(prompt).strip()})
             return messages
-        return [{"role": "user", "content": "Use the available tools to solve the task."}]
+        raise ValueError("tau2 initial messages are empty: policy, env messages, observation, and prompt are all missing")
 
 
     def _policy_doc(self) -> str:
         if not self.env or not self.config.get("include_policy", True):
             return ""
-        try:
-            policy = str(self.env.get_policy()).strip()
-        except Exception:
-            return ""
+        policy = str(self.env.get_policy()).strip()
+        if not policy:
+            raise RuntimeError("tau2 include_policy=true but env.get_policy() returned an empty policy")
         try:
             from tau2.agent.llm_agent import AGENT_INSTRUCTION, SYSTEM_PROMPT
 
             return SYSTEM_PROMPT.format(domain_policy=policy, agent_instruction=AGENT_INSTRUCTION).strip()
-        except Exception:
-            return (
-                "You are a customer service agent that helps the user according to the <policy> provided below.\n"
-                "In each turn you can either send a message to the user or make a tool call. "
-                "You cannot do both at the same time.\n\n"
-                f"<policy>\n{policy}\n</policy>"
-            ).strip()
+        except Exception as exc:
+            raise RuntimeError("Failed to load tau2.agent.llm_agent system prompt templates") from exc
 
     def _user_tool_schemas(self) -> list[dict[str, Any]]:
         if self.env is None or not self.config.get("include_tools", True):
@@ -1029,9 +1023,27 @@ class Tau2Backend:
             self.task, task_context = self._load_file_task(task_ref)
             self.task_index = int(payload.get("task_index") or 0)
             self.tasks = [self.task]
+            requested_task_id = str(payload.get("task_id") or "").strip()
+            actual_task_id = str(getattr(self.task, "id", "") or "").strip()
+            if requested_task_id and actual_task_id and requested_task_id != actual_task_id:
+                raise ValueError(f"tau2 task_ref loaded task_id={actual_task_id}, expected {requested_task_id}")
         else:
             self.tasks = self._tasks_for(self.task_set, None if self.split == "all" else self.split)
-            self.task_index = int(payload.get("task_index") or 0) % max(1, len(self.tasks))
+            requested_task_id = str(payload.get("task_id") or "").strip()
+            if requested_task_id:
+                matches = [
+                    index
+                    for index, task in enumerate(self.tasks)
+                    if str(getattr(task, "id", "") or "").strip() == requested_task_id
+                ]
+                if not matches:
+                    raise KeyError(
+                        f"tau2 task_id from prompt data is not available in task_set={self.task_set} "
+                        f"split={self.split}: {requested_task_id}"
+                    )
+                self.task_index = matches[0]
+            else:
+                self.task_index = int(payload.get("task_index") or 0) % max(1, len(self.tasks))
             self.task = self.tasks[self.task_index]
         self.env = self._build_env_for_task(self.domain, task_context)
         self._apply_initial_state()

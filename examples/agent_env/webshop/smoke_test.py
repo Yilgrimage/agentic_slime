@@ -11,6 +11,7 @@ from slime.utils.types import Sample
 
 import examples.agent_env.episode as episode
 import examples.agent_env.webshop.rollout as rollout
+from examples.agent_env.webshop.prompt import DEFAULT_PROMPT
 
 
 class FakeTokenizer:
@@ -126,7 +127,7 @@ async def main():
             router_policy=None,
             hf_checkpoint="fake",
         )
-        sample = Sample(prompt="", metadata={"task_index": 0})
+        sample = Sample(prompt=DEFAULT_PROMPT, metadata={"task_index": 0})
         result = await rollout.generate(args, sample, sampling_params={})
 
         assert result.status == Sample.Status.COMPLETED
