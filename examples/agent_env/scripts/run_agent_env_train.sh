@@ -77,6 +77,8 @@ configure_env_defaults() {
       export CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:-${ALFWORLD_CONFIG:-${ENV_CONFIG:-examples/agent_env/alfworld/env_config.yaml}}}
       export DATA_DIR=${DATA_DIR:-${LOCAL_RUNTIME_DIR}/data/alfworld}
       export PROMPT_DATA_SCRIPT=${PROMPT_DATA_SCRIPT:-${REPO_DIR}/examples/agent_env/alfworld/prompt_data.py}
+      export PROMPT_DATA_PYTHON=${PROMPT_DATA_PYTHON:-${ALFWORLD_ENV:-${LOCAL_ENVS_DIR}/alfworld}/bin/python}
+      export PROMPT_DATA_CONFIG=${PROMPT_DATA_CONFIG:-${CUSTOM_CONFIG_PATH}}
       ;;
     webshop)
       export CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:-examples.agent_env.webshop.rollout.generate}
@@ -234,6 +236,7 @@ export NUM_ROLLOUT=${NUM_ROLLOUT:-${TOTAL_NUM_STEPS:-${NUM_STEPS}}}
 export SAVE_INTERVAL=${SAVE_INTERVAL:-${TOTAL_NUM_STEPS:-${NUM_STEPS}}}
 export AGENT_ENV_ROLLOUT_DUMP_N=${AGENT_ENV_ROLLOUT_DUMP_N:-${ROLLOUT_CASE_DUMP_N:-0}}
 export AGENT_ENV_ROLLOUT_DUMP_DISCARD_N=${AGENT_ENV_ROLLOUT_DUMP_DISCARD_N:-${ROLLOUT_CASE_DUMP_DISCARD_N:-${AGENT_ENV_ROLLOUT_DUMP_N}}}
+export AGENT_ENV_ROLLOUT_DUMP_FORMAT_N=${AGENT_ENV_ROLLOUT_DUMP_FORMAT_N:-${ROLLOUT_CASE_DUMP_FORMAT_N:-0}}
 export AGENT_ENV_ROLLOUT_DUMP_TRACE=${AGENT_ENV_ROLLOUT_DUMP_TRACE:-${ROLLOUT_CASE_DUMP_TRACE:-both}}
 export CUSTOM_RM_PATH=${CUSTOM_RM_PATH:-examples.agent_env.group_rm.group_reward}
 export GROUP_RM=${GROUP_RM:-1}
@@ -537,6 +540,38 @@ if [ -n "${LOG_REWARD_CATEGORY:-}" ]; then
   ROLLOUT_ARGS+=(--log-reward-category "${LOG_REWARD_CATEGORY}")
 fi
 
+EVAL_ARGS=()
+if [ -n "${EVAL_CONFIG:-}" ]; then
+  EVAL_ARGS+=(--eval-config "${EVAL_CONFIG}")
+fi
+if [ -n "${EVAL_PROMPT_DATA:-}" ]; then
+  read -r -a EVAL_PROMPT_DATA_ARRAY <<< "${EVAL_PROMPT_DATA}"
+  EVAL_ARGS+=(--eval-prompt-data "${EVAL_PROMPT_DATA_ARRAY[@]}")
+fi
+if [ -n "${EVAL_INTERVAL:-}" ]; then
+  EVAL_ARGS+=(--eval-interval "${EVAL_INTERVAL}")
+fi
+if [ -n "${EVAL_FUNCTION_PATH:-}" ]; then
+  EVAL_ARGS+=(--eval-function-path "${EVAL_FUNCTION_PATH}")
+fi
+if [ -n "${EVAL_MAX_RESPONSE_LEN:-}" ]; then
+  EVAL_ARGS+=(--eval-max-response-len "${EVAL_MAX_RESPONSE_LEN}")
+fi
+if [ -n "${EVAL_TEMPERATURE:-}" ]; then
+  EVAL_ARGS+=(--eval-temperature "${EVAL_TEMPERATURE}")
+fi
+if [ -n "${EVAL_TOP_P:-}" ]; then
+  EVAL_ARGS+=(--eval-top-p "${EVAL_TOP_P}")
+fi
+if [ -n "${EVAL_TOP_K:-}" ]; then
+  EVAL_ARGS+=(--eval-top-k "${EVAL_TOP_K}")
+fi
+case "${SKIP_EVAL_BEFORE_TRAIN:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    EVAL_ARGS+=(--skip-eval-before-train)
+    ;;
+esac
+
 PERF_ARGS=(
    --tensor-model-parallel-size "${TP_SIZE:-4}"
    --sequence-parallel
@@ -615,6 +650,9 @@ OPTIMIZER_ARGS=(
    --adam-beta1 "${ADAM_BETA1:-0.9}"
    --adam-beta2 "${ADAM_BETA2:-0.98}"
 )
+if [ -n "${LR_DECAY_ITERS:-}" ]; then
+  OPTIMIZER_ARGS+=(--lr-decay-iters "${LR_DECAY_ITERS}")
+fi
 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine "${ROLLOUT_TP_SIZE:-1}"
@@ -674,6 +712,7 @@ keys = [
     "AGENT_ENV_DATA_DIR", "APPWORLD_ROOT", "RUN_ROOT", "LOG_DIR", "WANDB_DIR",
     "WANDB_RUNTIME", "WANDB_RUNTIME_RESOLVED", "WANDB_ENV", "WANDB_PYTHON", "WANDB_PYTHONPATH",
     "AGENT_ENV_ROLLOUT_DUMP_N", "AGENT_ENV_ROLLOUT_DUMP_DISCARD_N",
+    "AGENT_ENV_ROLLOUT_DUMP_FORMAT_N",
     "AGENT_ENV_ROLLOUT_DUMP_TRACE",
     "AGENT_ENV_MAX_CHECKPOINTS",
     "AGENT_ENV_ASYNC_MAX_INFLIGHT_GROUPS",
@@ -704,6 +743,7 @@ echo "Checkpoint options: save_interval=${SAVE_INTERVAL:-${NUM_STEPS}} no_save_o
    "${MODEL_ARGS[@]}" \
    "${MODEL_EXTRA_ARGS_ARRAY[@]}" \
    "${ROLLOUT_ARGS[@]}" \
+   "${EVAL_ARGS[@]}" \
    "${PERF_ARGS[@]}" \
    --train-env-vars "${TRAIN_ENV_VARS_JSON}" \
    "${GRPO_ARGS[@]}" \

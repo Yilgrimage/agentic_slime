@@ -120,6 +120,7 @@ def _server_config(raw: dict) -> dict:
         "worker_request_timeout_s": float(env_server.get("worker_request_timeout_s", 120.0)),
         "prewarm_splits": list(env_server.get("prewarm_splits", ["train"])),
         "honor_direct_game_file": bool(env_server.get("honor_direct_game_file", True)),
+        "require_task_id": bool(env_server.get("require_task_id", True)),
     }
 
 
@@ -189,6 +190,10 @@ def _select_game_file_by_task_id(game_files: list[str], task_id: str) -> tuple[i
     raise KeyError(f"ALFWorld task_id not found in split game files: {task_id}")
 
 
+def _task_id_for_game_file(game_file: str | None) -> str | None:
+    return normalize_alfworld_task_id(game_file) if game_file else None
+
+
 def _alfworld_backend_split(split: str) -> str:
     return {
         "valid_seen": "eval_in_distribution",
@@ -206,6 +211,7 @@ class ALFWorldBackend:
         self.env_type = config.get("env_type") or self.config.get("env", {}).get("type", "AlfredTWEnv")
         self.default_direct_game_file = bool(config.get("direct_game_file", True))
         self.honor_direct_game_file = bool(config.get("honor_direct_game_file", True))
+        self.require_task_id = bool(config.get("require_task_id", True))
         self.wrapper: Any | None = None
         self.env: Any | None = None
         self.base_game_files: list[str] = []
@@ -219,6 +225,11 @@ class ALFWorldBackend:
         self.success = False
         self.last_info: dict[str, Any] = {}
         self.task_index: int | None = None
+        self.requested_task_id: str | None = None
+
+    @property
+    def task_id(self) -> str | None:
+        return _task_id_for_game_file(self.game_file)
 
     @property
     def runtime(self) -> dict[str, Any]:
@@ -314,13 +325,16 @@ class ALFWorldBackend:
         direct_game_file = bool(payload.get("direct_game_file", self.default_direct_game_file))
         skip_to_task = bool(payload.get("skip_to_task", False))
         num_tasks = payload.get("num_tasks")
-        task_id = payload.get("task_id")
-        if task_id not in (None, "", []) and not (direct_game_file and self.honor_direct_game_file):
+        requested_task_id = str(payload.get("task_id") or "").strip()
+        self.requested_task_id = requested_task_id or None
+        if self.require_task_id and not requested_task_id:
+            raise ValueError("ALFWorld prompt data must provide metadata.task_id")
+        if requested_task_id and not (direct_game_file and self.honor_direct_game_file):
             raise ValueError("ALFWorld prompt data provided task_id, but direct game-file selection is disabled")
 
         if direct_game_file and self.honor_direct_game_file:
-            if task_id not in (None, "", []):
-                self.task_index, self.game_file = _select_game_file_by_task_id(self.base_game_files, str(task_id))
+            if requested_task_id:
+                self.task_index, self.game_file = _select_game_file_by_task_id(self.base_game_files, requested_task_id)
             else:
                 self.game_file = _select_game_file(self.base_game_files, self.task_index)
             self._ensure_env_for(self.game_file)
@@ -344,11 +358,19 @@ class ALFWorldBackend:
         self.done = False
         self.success = False
         self.last_info = info or {}
+        selected_task_id = self.task_id
+        if requested_task_id and selected_task_id != requested_task_id:
+            raise ValueError(f"ALFWorld selected task_id mismatch: requested={requested_task_id} selected={selected_task_id}")
+        self.last_info.setdefault("task_id", selected_task_id)
+        if requested_task_id:
+            self.last_info.setdefault("requested_task_id", requested_task_id)
         return {
             "observation": str(_first(obs, "")),
             "info": self.last_info,
             "split": self.split,
             "game_file": self.game_file,
+            "task_id": selected_task_id,
+            "requested_task_id": requested_task_id or None,
             "task_index": self.task_index,
             "reset_count": self.reset_count,
             "step_count": self.step_count,
@@ -474,6 +496,8 @@ class ALFWorldBackend:
             "success": success,
             "info": last_step.get("info") if isinstance(last_step.get("info"), dict) else {},
             "game_file": self.game_file,
+            "task_id": self.task_id,
+            "requested_task_id": self.requested_task_id,
             "task_index": self.task_index,
             "reset_count": self.reset_count,
             "step_count": self.step_count,
@@ -490,6 +514,9 @@ class ALFWorldBackend:
         won = _first(info.get("won") if info else None, None)
         self.success = bool(won) if won is not None else self.final_score > 0
         self.last_info = info or {}
+        self.last_info.setdefault("task_id", self.task_id)
+        if self.requested_task_id:
+            self.last_info.setdefault("requested_task_id", self.requested_task_id)
         return {
             "observation": str(_first(obs, "")),
             "score": self.final_score,
@@ -497,6 +524,8 @@ class ALFWorldBackend:
             "success": self.success,
             "info": self.last_info,
             "game_file": self.game_file,
+            "task_id": self.task_id,
+            "requested_task_id": self.requested_task_id,
             "task_index": self.task_index,
             "reset_count": self.reset_count,
             "step_count": self.step_count,
@@ -509,6 +538,8 @@ class ALFWorldBackend:
             "done": bool(self.done),
             "info": self.last_info,
             "game_file": self.game_file,
+            "task_id": self.task_id,
+            "requested_task_id": self.requested_task_id,
             "task_index": self.task_index,
             "reset_count": self.reset_count,
             "step_count": self.step_count,
@@ -543,6 +574,7 @@ def main() -> None:
         "env_type": args.env_type,
         "direct_game_file": not args.no_direct_game_file,
         "honor_direct_game_file": server_config.get("honor_direct_game_file", True),
+        "require_task_id": server_config.get("require_task_id", True),
     }
     serve_process_pool(
         host=args.host,

@@ -8,6 +8,10 @@ timeouts:
 
 interaction:
   mode: text_action
+  enable_thinking: true
+  reasoning:
+    parser: qwen3-thinking
+    fallback_to_raw: false
   text_action:
     tag: action
 

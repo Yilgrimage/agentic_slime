@@ -154,6 +154,7 @@ def _sample_case_dump_enabled(args: Any) -> bool:
     limits = (
         _case_dump_limit(args, "samples"),
         _case_dump_limit(args, "discarded"),
+        _case_dump_limit(args, "format_errors"),
     )
     return any(limit > 0 for limit in limits) and bool(_runtime_env(args, "RUN_ROOT"))
 
@@ -165,17 +166,33 @@ def _int_runtime_env(args: Any, name: str, default: str = "0") -> int:
         return 0
 
 
-def _case_dump_bucket(sample: Sample) -> str:
+def _case_dump_buckets(sample: Sample) -> list[str]:
     sample_metadata = sample.metadata or {}
+    buckets: list[str] = []
     if bool(getattr(sample, "remove_sample", False)) or bool(sample_metadata.get("discard_sample", False)):
-        return "discarded"
-    return "samples"
+        buckets.append("discarded")
+    else:
+        buckets.append("samples")
+    if int(sample_metadata.get("format_errors", 0) or 0) > 0:
+        buckets.append("format_errors")
+    return buckets
+
+
+def _case_dump_file_stem(bucket: str) -> str:
+    stems = {
+        "samples": "sample",
+        "discarded": "discarded",
+        "format_errors": "format_error",
+    }
+    return stems.get(bucket, bucket.rstrip("s") or "case")
 
 
 def _case_dump_limit(args: Any, bucket: str) -> int:
     fallback = str(_int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_N", "0"))
     if bucket == "discarded":
         return _int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_DISCARD_N", fallback)
+    if bucket == "format_errors":
+        return _int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_FORMAT_N", "0")
     return _int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_N", "0")
 
 
@@ -303,65 +320,66 @@ def _env_discard_reason(info: dict[str, Any]) -> str:
 
 
 def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, tok: Any | None = None) -> None:
-    bucket = _case_dump_bucket(sample)
-    limit = _case_dump_limit(args, bucket)
-    if limit <= 0:
-        return
     run_root = _runtime_env(args, "RUN_ROOT")
     if not run_root:
         return
-    counter_key = f"{spec.name}:{bucket}"
-    count = _SAMPLE_DUMP_COUNTS.get(counter_key, 0)
-    if count >= limit:
-        return
-    _SAMPLE_DUMP_COUNTS[counter_key] = count + 1
     sample_metadata = sample.metadata or {}
-    output_dir = Path(run_root) / "rollout_cases" / spec.name / bucket
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"{bucket[:-1]}_{count:04d}_pid{os.getpid()}_{uuid.uuid4().hex[:8]}.json"
     trace_mode = _dump_trace_mode(args)
-    record = {
-        "sample_index": count,
-        "dump_bucket": bucket,
-        "status": getattr(getattr(sample, "status", None), "name", str(getattr(sample, "status", ""))),
-        "remove_sample": bool(getattr(sample, "remove_sample", False)),
-        "discard_sample": bool(sample_metadata.get("discard_sample", False)),
-        "discard_reason": sample_metadata.get("discard_reason"),
-        "reward": getattr(sample, "reward", None),
-        "response_length": getattr(sample, "response_length", None),
-        "effective_response_length": getattr(sample, "effective_response_length", None),
-        "total_token_length": len(getattr(sample, "tokens", []) or []),
-        "response": getattr(sample, "response", None),
-        "turn_count": sample_metadata.get("turn_count"),
-        "format_errors": sample_metadata.get("format_errors"),
-        "format_checks": sample_metadata.get("format_checks"),
-        "max_response_tokens_hits": sample_metadata.get("max_response_tokens_hits"),
-        "truncated_reason": sample_metadata.get("truncated_reason"),
-        "env_score": sample_metadata.get("env_score"),
-        "env_success": sample_metadata.get("env_success"),
-        "env_reward": sample_metadata.get("env_reward"),
-        "rm_impl": sample_metadata.get("rm_impl"),
-        "rm_reward": sample_metadata.get("rm_reward"),
-        "rm_reward_for_train": sample_metadata.get("rm_reward_for_train"),
-        "reward_components": sample_metadata.get("reward_components"),
-        "raw_reward": sample_metadata.get("raw_reward"),
-        "judge_score": sample_metadata.get("judge_score"),
-        "judge_reason": sample_metadata.get("judge_reason"),
-        "env_metadata": sample_metadata.get(spec.name),
-        "actions": sample_metadata.get("actions"),
-        "turns": _json_safe(sample_metadata.get("turns")),
-        "action_parse_modes": sample_metadata.get("action_parse_modes"),
-        "dump_trace_mode": trace_mode,
-        "token_audit": sample_metadata.get("token_audit"),
-        "env_evaluate": sample_metadata.get("env_evaluate"),
-        "error": sample_metadata.get("error"),
-    }
-    if trace_mode in {"messages", "both"}:
-        record["messages"] = sample_metadata.get("messages")
-    if trace_mode in {"tokens", "both"}:
-        record["token_segments"] = sample_metadata.get("token_segments")
-        record.update(_decoded_sample_token_traces(tok, sample))
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    for bucket in _case_dump_buckets(sample):
+        limit = _case_dump_limit(args, bucket)
+        if limit <= 0:
+            continue
+        counter_key = f"{spec.name}:{bucket}"
+        count = _SAMPLE_DUMP_COUNTS.get(counter_key, 0)
+        if count >= limit:
+            continue
+        _SAMPLE_DUMP_COUNTS[counter_key] = count + 1
+        output_dir = Path(run_root) / "rollout_cases" / spec.name / bucket
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / f"{_case_dump_file_stem(bucket)}_{count:04d}_pid{os.getpid()}_{uuid.uuid4().hex[:8]}.json"
+        record = {
+            "sample_index": count,
+            "dump_bucket": bucket,
+            "status": getattr(getattr(sample, "status", None), "name", str(getattr(sample, "status", ""))),
+            "remove_sample": bool(getattr(sample, "remove_sample", False)),
+            "discard_sample": bool(sample_metadata.get("discard_sample", False)),
+            "discard_reason": sample_metadata.get("discard_reason"),
+            "reward": getattr(sample, "reward", None),
+            "response_length": getattr(sample, "response_length", None),
+            "effective_response_length": getattr(sample, "effective_response_length", None),
+            "total_token_length": len(getattr(sample, "tokens", []) or []),
+            "response": getattr(sample, "response", None),
+            "turn_count": sample_metadata.get("turn_count"),
+            "format_errors": sample_metadata.get("format_errors"),
+            "format_checks": sample_metadata.get("format_checks"),
+            "max_response_tokens_hits": sample_metadata.get("max_response_tokens_hits"),
+            "truncated_reason": sample_metadata.get("truncated_reason"),
+            "env_score": sample_metadata.get("env_score"),
+            "env_success": sample_metadata.get("env_success"),
+            "env_reward": sample_metadata.get("env_reward"),
+            "rm_impl": sample_metadata.get("rm_impl"),
+            "rm_reward": sample_metadata.get("rm_reward"),
+            "rm_reward_for_train": sample_metadata.get("rm_reward_for_train"),
+            "reward_components": sample_metadata.get("reward_components"),
+            "raw_reward": sample_metadata.get("raw_reward"),
+            "judge_score": sample_metadata.get("judge_score"),
+            "judge_reason": sample_metadata.get("judge_reason"),
+            "requested_task": sample_metadata.get("requested_task"),
+            "env_metadata": sample_metadata.get(spec.name),
+            "actions": sample_metadata.get("actions"),
+            "turns": _json_safe(sample_metadata.get("turns")),
+            "action_parse_modes": sample_metadata.get("action_parse_modes"),
+            "dump_trace_mode": trace_mode,
+            "token_audit": sample_metadata.get("token_audit"),
+            "env_evaluate": sample_metadata.get("env_evaluate"),
+            "error": sample_metadata.get("error"),
+        }
+        if trace_mode in {"messages", "both"}:
+            record["messages"] = sample_metadata.get("messages")
+        if trace_mode in {"tokens", "both"}:
+            record["token_segments"] = sample_metadata.get("token_segments")
+            record.update(_decoded_sample_token_traces(tok, sample))
+        path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def task_index(sample: Sample) -> int:

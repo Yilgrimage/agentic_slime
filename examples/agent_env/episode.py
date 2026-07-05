@@ -37,10 +37,12 @@ from examples.agent_env.rollout import (
     outcome_reward,
     parse_policy_text_view,
     parse_standard_tool_call,
+    parse_text_action,
     post_env,
     record_env_metadata,
     task_key,
     task_payload,
+    text_action_tag,
     tokenizer,
     turn_params,
     visible_assistant_text,
@@ -66,6 +68,16 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
 def _format_error(exc: BaseException) -> str:
     text = str(exc).strip()
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _recover_text_action_content(args: Any, raw_text: str) -> str:
+    tag = text_action_tag(args)
+    action, valid, parse_mode = parse_text_action(raw_text, tag=tag)
+    if valid and parse_mode == f"{tag}_tag":
+        return f"<{tag}>{action}</{tag}>"
+    if not valid:
+        return ""
+    return ""
 
 
 def _http_host(host: str) -> str:
@@ -173,7 +185,30 @@ class PolicySession:
         remaining = self.ledger.remaining_context() if self.ledger is not None else None
         return turn_params(self.args, self.spec, params, remaining)
 
-    def _prepare_ledger(self, body: dict[str, Any]) -> None:
+    def _context_limit_response(self, body: dict[str, Any]) -> dict[str, Any]:
+        self.context_limit_hits += 1
+        prompt_tokens = len(self.ledger.tokens) if self.ledger is not None else 0
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": str(body.get("model") or "agent-env-policy"),
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": 0,
+                "total_tokens": prompt_tokens,
+                "agent_env_context_limit_reached": True,
+            },
+        }
+
+    def _prepare_ledger(self, body: dict[str, Any]) -> bool:
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ValueError("messages must be a non-empty list")
@@ -196,7 +231,7 @@ class PolicySession:
             self.sample.response_length = 0
             self.sample.loss_mask = []
             self.sample.rollout_log_probs = None
-            return
+            return True
 
         prefix = _prefix_len(self.ledger.messages, normalized_messages)
         if prefix < 0:
@@ -206,38 +241,26 @@ class PolicySession:
             )
         new_messages = normalized_messages[prefix:]
         if new_messages:
+            fits, _total = self.ledger.can_append_environment_messages(
+                new_messages,
+                add_generation_prompt=True,
+            )
+            if not fits:
+                return False
             self.ledger.append_environment_messages(
                 turn=self.turn_count,
                 messages=new_messages,
                 add_generation_prompt=True,
             )
+        return True
 
     async def _chat_completion_async(self, body: dict[str, Any]) -> dict[str, Any]:
-        self._prepare_ledger(body)
+        if not self._prepare_ledger(body):
+            return self._context_limit_response(body)
         assert self.ledger is not None
         params = self._request_sampling_params(body)
         if int(params.get("max_new_tokens", 0) or 0) <= 0:
-            self.context_limit_hits += 1
-            prompt_tokens = len(self.ledger.tokens)
-            return {
-                "id": f"chatcmpl-{uuid.uuid4().hex}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": str(body.get("model") or "agent-env-policy"),
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": ""},
-                        "finish_reason": "length",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": 0,
-                    "total_tokens": prompt_tokens,
-                    "agent_env_context_limit_reached": True,
-                },
-            }
+            return self._context_limit_response(body)
 
         response_text, token_ids, log_probs, finish_type = await call_policy(
             self.args,
@@ -262,13 +285,17 @@ class PolicySession:
         if interaction_mode(self.args, self.spec) == "tool_call" and self.tools:
             parser_name = infer_tool_call_parser_name(self.tok)
             action, format_valid, parse_mode = parse_standard_tool_call(parser_text, self.tools, parser_name)
+            if not format_valid and not parser_text:
+                action, format_valid, parse_mode = parse_standard_tool_call(raw_response_text, self.tools, parser_name)
             if format_valid and isinstance(action, dict):
                 assistant_message = _openai_tool_call_message(action, str(action.get("content") or ""))
             else:
-                content = visible_assistant_text(parser_text or raw_response_text)
+                content = visible_assistant_text(parser_text)
                 assistant_message = {"role": "assistant", "content": content}
         else:
-            content = visible_assistant_text(parser_text or raw_response_text)
+            content = visible_assistant_text(parser_text)
+            if not content:
+                content = _recover_text_action_content(self.args, raw_response_text)
             assistant_message = {"role": "assistant", "content": content}
 
         self.parse_modes.append(parse_mode)
@@ -454,6 +481,18 @@ def _status_from_episode(result: dict[str, Any]) -> Sample.Status:
     return Sample.Status.COMPLETED if bool(result.get("done", True)) else Sample.Status.TRUNCATED
 
 
+def _requested_task_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in ("env", "data_source", "domain", "task_set", "dataset_name", "split", "task_id", "task_index", "seed"):
+        value = payload.get(key)
+        if value not in (None, "", []):
+            metadata[key] = value
+    task_ref = payload.get("task_ref")
+    if isinstance(task_ref, dict):
+        metadata["task_ref"] = copy.deepcopy(task_ref)
+    return metadata
+
+
 async def generate_server_episode_rollout(
     args: Any,
     sample: Sample,
@@ -475,11 +514,15 @@ async def generate_server_episode_rollout(
     split = sample_metadata.get("split") or cfg_path(args, "task.split", spec.default_split)
 
     try:
+        request_task_payload = task_payload(sample, spec)
+        requested_task = _requested_task_metadata(request_task_payload)
+        if requested_task:
+            sample_metadata["requested_task"] = requested_task
         response_max_tokens = arg(args, "rollout_max_response_len", None)
         if response_max_tokens is None:
             response_max_tokens = spec.default_response_max_tokens
         payload = {
-            **task_payload(sample, spec),
+            **request_task_payload,
             **(episode_payload or {}),
             "split": split,
             "task_key": task_key(sample, spec),
@@ -550,12 +593,14 @@ async def generate_server_episode_rollout(
             }
         )
         env_meta = {
-            "task_index": result.get("task_index", task_payload(sample, spec).get("task_index", 0)),
-            "task_id": info.get("task_id"),
+            "task_index": result.get("task_index", request_task_payload.get("task_index", 0)),
+            "task_id": result.get("task_id") or info.get("task_id"),
             "split": result.get("split", split),
             "lease_id": result.get("lease_id"),
             "server_url": env_server_url(args, spec),
         }
+        if requested_task.get("task_id") not in (None, "", []):
+            env_meta["requested_task_id"] = requested_task["task_id"]
         for key in ("game_file", "domain", "task_set", "data_source", "task_ref", "num_tasks"):
             if result.get(key) not in (None, "", []):
                 env_meta[key] = result.get(key)

@@ -83,15 +83,32 @@ def _candidate_game_roots(data_dir: Path, split: str) -> list[Path]:
     return roots
 
 
-def _available_task_rows(data_dir: Path, split: str) -> list[dict[str, Any]]:
+def _wrapper_game_files(data_dir: Path, split: str, config_path: Path | None) -> list[str]:
+    if config_path is None:
+        raise ValueError("ALFWorld prompt data requires --config so task order can match ALFWorld wrapper.game_files")
+    os.environ["AGENT_ENV_DATA_DIR"] = str(data_dir)
+    from alfworld.agents.environment import get_environment
+
+    from examples.agent_env.alfworld.server import _alfworld_backend_split, _load_configs
+
+    alfworld_config, _, _ = _load_configs(str(config_path))
+    env_type = alfworld_config.get("env", {}).get("type", "AlfredTWEnv")
+    env_cls = get_environment(env_type)
+    wrapper = env_cls(alfworld_config, train_eval=_alfworld_backend_split(split))
+    game_files = [str(item) for item in list(getattr(wrapper, "game_files", None) or [])]
+    if not game_files:
+        raise RuntimeError(f"ALFWorld wrapper reported no game files for split={split} config={config_path}")
+    return game_files
+
+
+def _available_task_rows(data_dir: Path, split: str, config_path: Path | None) -> list[dict[str, Any]]:
     task_rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for root in _candidate_game_roots(data_dir, split):
-        for game_file in sorted(root.rglob("game.tw-pddl")):
-            task_id = normalize_alfworld_task_id(str(game_file))
-            if task_id and task_id not in seen:
-                seen.add(task_id)
-                task_rows.append({"task_id": task_id, "game_file": str(game_file)})
+    for game_file in _wrapper_game_files(data_dir, split, config_path):
+        task_id = normalize_alfworld_task_id(str(game_file))
+        if task_id and task_id not in seen:
+            seen.add(task_id)
+            task_rows.append({"task_id": task_id, "game_file": str(game_file)})
     return task_rows
 
 
@@ -100,12 +117,12 @@ def _default_data_dir() -> Path | None:
     return Path(os.path.expandvars(raw)).expanduser() if raw else None
 
 
-def _filter_available_task_rows(task_rows: list[dict[str, Any]], data_dir: Path | None, split: str) -> list[dict[str, Any]]:
+def _filter_available_task_rows(task_rows: list[dict[str, Any]], data_dir: Path | None, split: str, config_path: Path | None) -> list[dict[str, Any]]:
     if data_dir is None:
         raise ValueError("ALFWorld prompt data requires AGENT_ENV_DATA_DIR, ALFWORLD_DATA, or --alfworld-data-dir")
     if not data_dir.exists():
         raise FileNotFoundError(f"ALFWorld data dir does not exist: {data_dir}")
-    available_rows = _available_task_rows(data_dir, split)
+    available_rows = _available_task_rows(data_dir, split, config_path)
     if not available_rows:
         raise RuntimeError(f"No ALFWorld game.tw-pddl files found for split={split} under {data_dir}")
     available = {str(row["task_id"]) for row in available_rows}
@@ -121,12 +138,12 @@ def _filter_available_task_rows(task_rows: list[dict[str, Any]], data_dir: Path 
     return selected
 
 
-def _local_task_rows(data_dir: Path | None, split: str) -> list[dict[str, Any]]:
+def _local_task_rows(data_dir: Path | None, split: str, config_path: Path | None) -> list[dict[str, Any]]:
     if data_dir is None:
         raise ValueError("ALFWorld prompt data requires AGENT_ENV_DATA_DIR, ALFWORLD_DATA, or --alfworld-data-dir")
     if not data_dir.exists():
         raise FileNotFoundError(f"ALFWorld data dir does not exist: {data_dir}")
-    task_rows = _available_task_rows(data_dir, split)
+    task_rows = _available_task_rows(data_dir, split, config_path)
     if not task_rows:
         raise RuntimeError(f"No ALFWorld game.tw-pddl files found for split={split} under {data_dir}")
     return task_rows
@@ -181,6 +198,7 @@ def main():
         help="Splits used with --output-dir.",
     )
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument("--config", help="ALFWorld env_config.yaml; required to preserve wrapper.game_files task order.")
     parser.add_argument("--task-id-file", help="JSONL teacher/prompt file containing task_id-compatible fields.")
     parser.add_argument(
         "--alfworld-data-dir",
@@ -193,18 +211,23 @@ def main():
         parser.error("Specify exactly one of --output or --output-dir.")
 
     data_dir = Path(os.path.expandvars(args.alfworld_data_dir)).expanduser() if args.alfworld_data_dir else _default_data_dir()
+    config_path = Path(os.path.expandvars(args.config)).expanduser() if args.config else None
     task_rows = _read_task_rows(Path(args.task_id_file)) if args.task_id_file else None
     if args.output:
         if task_rows is not None:
-            task_rows = _filter_available_task_rows(task_rows, data_dir, args.split)
+            task_rows = _filter_available_task_rows(task_rows, data_dir, args.split, config_path)
         else:
-            task_rows = _local_task_rows(data_dir, args.split)
+            task_rows = _local_task_rows(data_dir, args.split, config_path)
         write_split(Path(args.output), args.split, args.num_tasks, args.prompt, args.start_task, task_rows=task_rows)
         return
 
     output_dir = Path(args.output_dir)
     for split in args.splits:
-        split_task_rows = _filter_available_task_rows(task_rows, data_dir, split) if task_rows is not None else _local_task_rows(data_dir, split)
+        split_task_rows = (
+            _filter_available_task_rows(task_rows, data_dir, split, config_path)
+            if task_rows is not None
+            else _local_task_rows(data_dir, split, config_path)
+        )
         suffix = args.num_tasks if args.num_tasks is not None else len(split_task_rows or [])
         write_split(
             output_dir / f"{split}_{suffix}.jsonl",

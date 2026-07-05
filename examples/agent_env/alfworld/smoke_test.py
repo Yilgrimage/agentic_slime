@@ -82,8 +82,10 @@ class FakeALFWorldEpisodeServer(BaseHTTPRequestHandler):
                 "done": True,
                 "score": 1.0,
                 "success": True,
-                "info": {"won": [True], "task_id": "pick_and_place/apple"},
+                "info": {"won": [True], "task_id": payload.get("task_id")},
                 "game_file": "/tmp/game.tw-pddl",
+                "task_id": payload.get("task_id"),
+                "requested_task_id": payload.get("task_id"),
                 "task_index": payload.get("task_index", 0),
                 "metadata": {
                     "turn_count": 1,
@@ -134,7 +136,7 @@ async def main():
             router_policy=None,
             hf_checkpoint="fake",
         )
-        sample = Sample(prompt=DEFAULT_PROMPT, metadata={"task_index": 0})
+        sample = Sample(prompt=DEFAULT_PROMPT, metadata={"task_index": 0, "split": "train", "task_id": "train/fake"})
         result = await alf_gen.generate(args, sample, sampling_params={})
 
         assert result.status == Sample.Status.COMPLETED

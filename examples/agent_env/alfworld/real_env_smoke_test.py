@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 from slime.utils.types import Sample
@@ -14,6 +15,7 @@ from slime.utils.types import Sample
 import examples.agent_env.alfworld.rollout as alf_gen
 import examples.agent_env.episode as episode
 from examples.agent_env.alfworld.prompt import DEFAULT_PROMPT
+from examples.agent_env.alfworld.task_ids import normalize_alfworld_task_id
 
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -145,9 +147,15 @@ async def run(data_dir: str):
     )
 
     try:
+        task_ids = [
+            normalize_alfworld_task_id(str(path))
+            for path in sorted((Path(data_dir) / "json_2.1.1" / "train").rglob("game.tw-pddl"))[:2]
+        ]
+        if any(not task_id for task_id in task_ids) or len(task_ids) < 2:
+            raise RuntimeError(f"ALFWorld smoke could not find two train task ids under {data_dir}")
         results = []
-        for task_index in range(2):
-            sample = Sample(prompt=DEFAULT_PROMPT, metadata={"task_index": task_index, "split": "train"})
+        for task_index, task_id in enumerate(task_ids):
+            sample = Sample(prompt=DEFAULT_PROMPT, metadata={"task_index": task_index, "split": "train", "task_id": task_id})
             result = await alf_gen.generate(args, sample, sampling_params={})
             results.append(result)
 

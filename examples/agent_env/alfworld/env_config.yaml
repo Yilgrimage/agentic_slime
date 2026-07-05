@@ -10,6 +10,10 @@ timeouts:
 
 interaction:
   mode: text_action
+  enable_thinking: true
+  reasoning:
+    parser: qwen3-thinking
+    fallback_to_raw: false
   text_action:
     tag: action
 
@@ -62,3 +66,4 @@ env_server:
   prewarm_splits:
     - train
   honor_direct_game_file: true
+  require_task_id: true
