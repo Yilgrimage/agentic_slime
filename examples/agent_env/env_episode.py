@@ -235,7 +235,12 @@ def extract_tool_action(message: dict[str, Any]) -> tuple[dict[str, Any], bool, 
         name = str(fn.get("name") or calls[0].get("name") or "").strip()
         arguments = _json_object(fn.get("arguments"))
         if name:
-            return {"type": "tool_call", "name": name, "arguments": arguments}, True, "tool_call"
+            return {
+                "type": "tool_call",
+                "name": name,
+                "arguments": arguments,
+                "tool_call_id": str(calls[0].get("id") or ""),
+            }, True, "tool_call"
         return {"type": "assistant_message", "content": str(message.get("content") or "")}, False, "empty_tool_name"
     return {"type": "assistant_message", "content": str(message.get("content") or "")}, False, "assistant_message"
 
@@ -283,6 +288,22 @@ def tool_result_message(assistant_message: dict[str, Any], observation: str) -> 
     return {"role": "tool", "tool_call_id": str(call_id), "content": str(observation)}
 
 
+def _align_tool_result_ids(messages: list[dict[str, Any]], assistant_message: dict[str, Any]) -> list[dict[str, Any]]:
+    calls = assistant_message.get("tool_calls") or []
+    call_ids = [str(call.get("id") or "") for call in calls if isinstance(call, dict) and call.get("id")]
+    if not call_ids:
+        return messages
+    output = []
+    tool_index = 0
+    for message in messages:
+        item = dict(message)
+        if item.get("role") == "tool" and tool_index < len(call_ids):
+            item["tool_call_id"] = call_ids[tool_index]
+            tool_index += 1
+        output.append(item)
+    return output
+
+
 def environment_messages_from_step(
     *,
     mode: str,
@@ -296,7 +317,7 @@ def environment_messages_from_step(
     updates = valid_message_updates(info.get("message_updates"))
     if updates:
         if updates[0].get("role") == "assistant":
-            return updates[1:]
+            return _align_tool_result_ids(updates[1:], assistant_message)
         return updates
     if mode == "tool_call" and isinstance(action, dict) and action.get("type") == "tool_call":
         return [tool_result_message(assistant_message, observation)]

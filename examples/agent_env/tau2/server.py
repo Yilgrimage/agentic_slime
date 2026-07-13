@@ -20,7 +20,6 @@ import yaml
 from examples.agent_env.env_episode import (
     call_policy_chat,
     choose_tool_action,
-    environment_messages_from_step,
     extract_tool_action,
     finish_reason_is_length,
     mark_assistant_messages_untrained,
@@ -429,6 +428,7 @@ class Tau2Backend:
         self.user_state: Any | None = None
         self.user_model_call_index = _worker_route_seed(worker_id)
         self.user_model_endpoint: dict[str, str] | None = None
+        self.initial_agent_openai_message_count = 0
 
     @property
     def runtime(self) -> dict[str, Any]:
@@ -564,26 +564,21 @@ class Tau2Backend:
             return [str(tool) for tool in tools]
         return []
 
-    def _format_tools(self, names: list[str]) -> str:
-        if not names:
-            return ""
-        return "\nAvailable tool names:\n" + "\n".join(f"- {name}" for name in names) + "\n"
+    def _agent_messages_for_policy(self) -> list[dict[str, Any]]:
+        agent_messages = self._agent_openai_messages()
+        initial_count = max(0, min(self.initial_agent_openai_message_count, len(agent_messages)))
+        if not initial_count:
+            return agent_messages
+        return mark_assistant_messages_untrained(agent_messages[:initial_count]) + agent_messages[initial_count:]
 
-    def _observation_text(self, observation: str, info: dict[str, Any]) -> str:
-        text = f"Observation:\n{str(observation).strip()}\n"
-        observation_cfg = self.runtime.get("observation") if isinstance(self.runtime.get("observation"), dict) else {}
-        if bool(observation_cfg.get("include_actions", True)):
-            text += self._format_tools(self._available_tool_names(info))
-        return text
-
-    def _initial_messages(self, observation: str, info: dict[str, Any], prompt: str) -> list[dict[str, Any]]:
+    def _policy_messages(self, observation: str, info: dict[str, Any], prompt: str) -> list[dict[str, Any]]:
         policy = str(info.get("policy") or "").strip()
         messages: list[dict[str, Any]] = []
         if policy:
             messages.append({"role": "system", "content": policy})
-        agent_messages = valid_message_updates(info.get("agent_messages") or info.get("initial_messages"))
+        agent_messages = self._agent_messages_for_policy()
         if agent_messages:
-            messages.extend(mark_assistant_messages_untrained(agent_messages))
+            messages.extend(agent_messages)
             return messages
         if str(observation).strip():
             messages.append({"role": "user", "content": str(observation).strip()})
@@ -1048,6 +1043,7 @@ class Tau2Backend:
         self.env = self._build_env_for_task(self.domain, task_context)
         self._apply_initial_state()
         self.messages = self._initial_message_history()
+        self.initial_agent_openai_message_count = 0
         self.user_model_endpoint = self._select_user_model_endpoint() if self.user_sim_enabled else None
         self._reset_user_simulator()
         self.reset_count += 1
@@ -1068,6 +1064,7 @@ class Tau2Backend:
             "user_model_endpoint": self._user_model_endpoint_info(),
         }
         observation = self._prime_user_simulator(self.last_info)
+        self.initial_agent_openai_message_count = len(self._agent_openai_messages())
         self.last_info["agent_messages"] = self._agent_openai_messages()
         return {
             "observation": observation,
@@ -1079,10 +1076,17 @@ class Tau2Backend:
             "step_count": self.step_count,
         }
 
-    def _record_tool_call(self, name: str, arguments: dict[str, Any], result: Any, error: bool = False) -> list[dict[str, Any]]:
+    def _record_tool_call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        result: Any,
+        error: bool = False,
+        call_id: str = "",
+    ) -> list[dict[str, Any]]:
         from tau2.data_model.message import AssistantMessage, ToolCall, ToolMessage
 
-        call_id = f"call-{uuid.uuid4().hex[:12]}"
+        call_id = str(call_id or "").strip() or f"call-{uuid.uuid4().hex[:12]}"
         delta = [
             AssistantMessage.text("", tool_calls=[ToolCall(id=call_id, name=name, arguments=arguments, requestor="assistant")]),
             ToolMessage(id=call_id, role="tool", content=_json_text(result), requestor="assistant", error=error),
@@ -1122,7 +1126,9 @@ class Tau2Backend:
 
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         assert self.env is not None and self.task is not None
-        name, arguments, structured = _tool_action(payload.get("action"))
+        raw_action = payload.get("action")
+        name, arguments, structured = _tool_action(raw_action)
+        call_id = str(raw_action.get("tool_call_id") or "") if isinstance(raw_action, dict) else ""
         self.step_count += 1
         info = dict(self.last_info)
         for transient_key in ("tool_error",):
@@ -1169,11 +1175,11 @@ class Tau2Backend:
 
         try:
             result = self.env.use_tool(name, **arguments)
-            info["message_updates"] = self._record_tool_call(name, arguments, result, error=False)
+            info["message_updates"] = self._record_tool_call(name, arguments, result, error=False, call_id=call_id)
             observation = f"Tool result for {name}:\n{_json_text(result)}"
         except Exception as exc:
             result = {"error": f"{type(exc).__name__}: {exc}"}
-            info["message_updates"] = self._record_tool_call(name, arguments, result, error=True)
+            info["message_updates"] = self._record_tool_call(name, arguments, result, error=True, call_id=call_id)
             observation = f"Tool call failed for {name}:\n{_json_text(result)}"
             info["tool_error"] = result["error"]
         info["done"] = self.done
@@ -1188,10 +1194,10 @@ class Tau2Backend:
         reset = self.reset(payload)
         observation = str(reset.get("observation", ""))
         info = reset.get("info") if isinstance(reset.get("info"), dict) else {}
-        messages = self._initial_messages(observation, info, str(payload.get("prompt") or ""))
         tools = self._episode_tool_schemas(info)
         runtime = self.runtime
         action_cfg = runtime.get("action") if isinstance(runtime.get("action"), dict) else {}
+        prompt = str(payload.get("prompt") or "")
         metadata: dict[str, Any] = {
             "actions": [],
             "action_parse_modes": [],
@@ -1202,7 +1208,7 @@ class Tau2Backend:
         }
         include_trace = bool(payload.get("include_trace", False))
         if include_trace:
-            metadata["messages"] = messages
+            metadata["messages"] = self._policy_messages(observation, info, prompt)
             metadata["turns"] = []
 
         max_turns = int(payload.get("max_turns") or runtime.get("max_turns") or self.config.get("max_turns") or 20)
@@ -1217,6 +1223,7 @@ class Tau2Backend:
 
         for turn in range(max_turns):
             turn_trace: dict[str, Any] = {"turn": turn} if include_trace else {}
+            messages = self._policy_messages(observation, info, prompt)
             reply = call_policy_chat(
                 policy=policy,
                 messages=messages,
@@ -1226,7 +1233,6 @@ class Tau2Backend:
                 timeout_s=timeout_s,
             )
             assistant_message = reply.message
-            messages.append(assistant_message)
             metadata["policy_usage"].append(reply.usage)
             if policy_context_limit_reached(reply):
                 metadata["context_limit_hits"] = int(metadata.get("context_limit_hits", 0) or 0) + 1
@@ -1274,16 +1280,7 @@ class Tau2Backend:
                 status = "failed"
                 truncated_reason = ""
                 break
-            env_messages = environment_messages_from_step(
-                mode="tool_call",
-                action=action,
-                assistant_message=assistant_message,
-                observation=observation,
-                info=info,
-                done=done,
-                env_text=self._observation_text(observation, info),
-            )
-            messages.extend(env_messages)
+            env_messages = valid_message_updates(info.get("message_updates"))
             if include_trace:
                 turn_trace.update(
                     {
@@ -1304,6 +1301,8 @@ class Tau2Backend:
 
         metadata["turn_count"] = len(metadata["actions"])
         metadata["format_ok"] = int(metadata.get("format_errors", 0) or 0) == 0
+        if include_trace:
+            metadata["messages"] = self._policy_messages(observation, info, prompt)
         if truncated_reason:
             metadata["truncated_reason"] = truncated_reason
         return {
@@ -1354,6 +1353,7 @@ class Tau2Backend:
         self.env = None
         self.task = None
         self.messages = []
+        self.initial_agent_openai_message_count = 0
         self.user_simulator = None
         self.user_state = None
         return {}
