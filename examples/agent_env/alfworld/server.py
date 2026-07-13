@@ -403,8 +403,10 @@ class ALFWorldBackend:
             "turn_count": 0,
         }
         include_trace = bool(payload.get("include_trace", False))
-        if include_trace:
+        include_messages = bool(payload.get("include_messages", False)) or include_trace
+        if include_messages:
             metadata["messages"] = messages
+        if include_trace:
             metadata["turns"] = []
 
         max_turns = int(payload.get("max_turns") or runtime.get("max_turns") or 30)
@@ -486,6 +488,8 @@ class ALFWorldBackend:
 
         metadata["turn_count"] = len(metadata["actions"])
         metadata["format_ok"] = int(metadata.get("format_errors", 0) or 0) == 0
+        if include_messages:
+            metadata["messages"] = messages
         if truncated_reason:
             metadata["truncated_reason"] = truncated_reason
         return {

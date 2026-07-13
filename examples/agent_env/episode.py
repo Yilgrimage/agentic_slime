@@ -623,6 +623,7 @@ async def generate_server_episode_rollout(
             "task_key": task_key(sample, spec),
             "request_id": lease_request_id(sample),
             "release_on_done": True,
+            "include_messages": True,
             "include_trace": _sample_case_dump_enabled(args),
             "prompt": require_prompt(sample.prompt, env_name=spec.name, source="sample.prompt"),
             "max_turns": int(cfg_path(args, "max_turns", spec.default_max_turns)),
