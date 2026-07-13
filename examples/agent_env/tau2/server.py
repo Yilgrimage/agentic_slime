@@ -20,11 +20,11 @@ import yaml
 from examples.agent_env.env_episode import (
     call_policy_chat,
     choose_tool_action,
+    environment_messages_from_step,
     extract_tool_action,
     finish_reason_is_length,
     mark_assistant_messages_untrained,
     policy_context_limit_reached,
-    valid_message_updates,
 )
 from examples.agent_env.server import serve_process_pool
 
@@ -1083,12 +1083,16 @@ class Tau2Backend:
         result: Any,
         error: bool = False,
         call_id: str = "",
+        assistant_content: str = "",
     ) -> list[dict[str, Any]]:
         from tau2.data_model.message import AssistantMessage, ToolCall, ToolMessage
 
         call_id = str(call_id or "").strip() or f"call-{uuid.uuid4().hex[:12]}"
         delta = [
-            AssistantMessage.text("", tool_calls=[ToolCall(id=call_id, name=name, arguments=arguments, requestor="assistant")]),
+            AssistantMessage.text(
+                assistant_content,
+                tool_calls=[ToolCall(id=call_id, name=name, arguments=arguments, requestor="assistant")],
+            ),
             ToolMessage(id=call_id, role="tool", content=_json_text(result), requestor="assistant", error=error),
         ]
         self.messages.extend(delta)
@@ -1129,6 +1133,7 @@ class Tau2Backend:
         raw_action = payload.get("action")
         name, arguments, structured = _tool_action(raw_action)
         call_id = str(raw_action.get("tool_call_id") or "") if isinstance(raw_action, dict) else ""
+        assistant_content = str(raw_action.get("content") or "") if isinstance(raw_action, dict) else ""
         self.step_count += 1
         info = dict(self.last_info)
         for transient_key in ("tool_error",):
@@ -1175,11 +1180,25 @@ class Tau2Backend:
 
         try:
             result = self.env.use_tool(name, **arguments)
-            info["message_updates"] = self._record_tool_call(name, arguments, result, error=False, call_id=call_id)
+            info["message_updates"] = self._record_tool_call(
+                name,
+                arguments,
+                result,
+                error=False,
+                call_id=call_id,
+                assistant_content=assistant_content,
+            )
             observation = f"Tool result for {name}:\n{_json_text(result)}"
         except Exception as exc:
             result = {"error": f"{type(exc).__name__}: {exc}"}
-            info["message_updates"] = self._record_tool_call(name, arguments, result, error=True, call_id=call_id)
+            info["message_updates"] = self._record_tool_call(
+                name,
+                arguments,
+                result,
+                error=True,
+                call_id=call_id,
+                assistant_content=assistant_content,
+            )
             observation = f"Tool call failed for {name}:\n{_json_text(result)}"
             info["tool_error"] = result["error"]
         info["done"] = self.done
@@ -1207,8 +1226,9 @@ class Tau2Backend:
             "turn_count": 0,
         }
         include_trace = bool(payload.get("include_trace", False))
+        policy_messages = self._policy_messages(observation, info, prompt)
         if include_trace:
-            metadata["messages"] = self._policy_messages(observation, info, prompt)
+            metadata["messages"] = list(policy_messages)
             metadata["turns"] = []
 
         max_turns = int(payload.get("max_turns") or runtime.get("max_turns") or self.config.get("max_turns") or 20)
@@ -1223,10 +1243,9 @@ class Tau2Backend:
 
         for turn in range(max_turns):
             turn_trace: dict[str, Any] = {"turn": turn} if include_trace else {}
-            messages = self._policy_messages(observation, info, prompt)
             reply = call_policy_chat(
                 policy=policy,
-                messages=messages,
+                messages=policy_messages,
                 tools=tools,
                 sampling_params=sampling_params,
                 max_tokens=max_tokens,
@@ -1266,6 +1285,7 @@ class Tau2Backend:
                 metadata=metadata,
             )
             metadata["actions"].append(action)
+            policy_messages.append(assistant_message)
             step = self.step({"action": action})
             last_step = step
             observation = str(step.get("observation", ""))
@@ -1274,13 +1294,23 @@ class Tau2Backend:
             done = bool(step.get("done", False))
             success = bool(step.get("success", final_score >= 1.0))
             discard_reason = info.get("discard_reason") if isinstance(info, dict) else None
+            mode = "tool_call" if isinstance(action, dict) and action.get("type") == "tool_call" else "assistant_message"
+            env_messages = environment_messages_from_step(
+                mode=mode,
+                action=action,
+                assistant_message=assistant_message,
+                observation=observation,
+                info=info,
+                done=done,
+                env_text=observation,
+            )
+            policy_messages.extend(env_messages)
             if bool(info.get("discard_sample", False)):
                 metadata["discard_sample"] = True
                 metadata["discard_reason"] = discard_reason or "tau2_env_discard"
                 status = "failed"
                 truncated_reason = ""
                 break
-            env_messages = valid_message_updates(info.get("message_updates"))
             if include_trace:
                 turn_trace.update(
                     {
@@ -1302,7 +1332,7 @@ class Tau2Backend:
         metadata["turn_count"] = len(metadata["actions"])
         metadata["format_ok"] = int(metadata.get("format_errors", 0) or 0) == 0
         if include_trace:
-            metadata["messages"] = self._policy_messages(observation, info, prompt)
+            metadata["messages"] = policy_messages
         if truncated_reason:
             metadata["truncated_reason"] = truncated_reason
         return {

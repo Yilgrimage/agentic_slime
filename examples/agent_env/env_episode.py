@@ -240,6 +240,7 @@ def extract_tool_action(message: dict[str, Any]) -> tuple[dict[str, Any], bool, 
                 "name": name,
                 "arguments": arguments,
                 "tool_call_id": str(calls[0].get("id") or ""),
+                "content": str(message.get("content") or ""),
             }, True, "tool_call"
         return {"type": "assistant_message", "content": str(message.get("content") or "")}, False, "empty_tool_name"
     return {"type": "assistant_message", "content": str(message.get("content") or "")}, False, "assistant_message"
