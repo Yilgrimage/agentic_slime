@@ -157,7 +157,10 @@ def call_policy_chat(
     }
     if tools:
         payload["tools"] = copy.deepcopy(tools)
-    data = json.dumps(_strip_none(payload), ensure_ascii=False).encode("utf-8")
+    # Keep message/tool-call payloads byte-for-byte semantic. Tool arguments may
+    # legitimately contain JSON nulls; recursively stripping None mutates the
+    # policy history and breaks the gateway's append-only ledger check.
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         _chat_completions_url(policy),
         data=data,

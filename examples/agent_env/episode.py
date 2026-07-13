@@ -226,6 +226,7 @@ class PolicySession:
     parse_modes: list[str] = field(default_factory=list)
     response_texts: list[str] = field(default_factory=list)
     context_limit_hits: int = 0
+    last_sync_delta_mode: str | None = None
 
     def _request_sampling_params(self, body: dict[str, Any]) -> dict[str, Any]:
         params = copy.deepcopy(self.sampling_params)
@@ -309,6 +310,38 @@ class PolicySession:
                 add_generation_prompt=True,
             )
         return True
+
+    def sync_message_history(self, messages: Any, *, add_generation_prompt: bool) -> tuple[bool, int | None]:
+        """Append env-side messages that arrived after the final policy call."""
+
+        if self.ledger is None or not isinstance(messages, list) or not messages:
+            return True, None
+        normalized_messages = messages_for_chat_template(messages)
+        prefix = _prefix_len(self.ledger.messages, normalized_messages)
+        if prefix < 0:
+            debug = _prefix_mismatch_debug(self.ledger.messages, normalized_messages)
+            raise ValueError(
+                "episode returned a message history that is not an append-only extension "
+                f"of the recorded policy session: {json.dumps(debug, ensure_ascii=False)}"
+            )
+        new_messages = normalized_messages[prefix:]
+        if not new_messages:
+            return True, None
+        fits, total = self.ledger.can_append_environment_messages(
+            new_messages,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if not fits:
+            return False, total
+        _delta_len, delta_mode = self.ledger.append_environment_messages(
+            turn=self.turn_count,
+            messages=new_messages,
+            add_generation_prompt=add_generation_prompt,
+        )
+        # Keep this in the same metadata slot as direct rollout so A/B dumps can
+        # compare tokenization paths without special-casing server episodes.
+        self.last_sync_delta_mode = delta_mode
+        return True, total
 
     async def _chat_completion_async(self, body: dict[str, Any]) -> dict[str, Any]:
         if not self._prepare_ledger(body):
@@ -612,6 +645,19 @@ async def generate_server_episode_rollout(
         episode_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
         final_score = float(result.get("score", 0.0) or 0.0)
         success = bool(result.get("success", final_score > 0))
+        done = bool(result.get("done", True))
+        final_messages_fit, final_messages_token_count = session.sync_message_history(
+            episode_metadata.get("messages"),
+            add_generation_prompt=not done,
+        )
+        if final_messages_fit:
+            delta_mode = session.last_sync_delta_mode
+            if delta_mode:
+                sample_metadata.setdefault("message_delta_modes", []).append(delta_mode)
+        elif not done:
+            sample.status = Sample.Status.TRUNCATED
+            sample_metadata["truncated_reason"] = "context_limit_after_observation"
+            sample_metadata["context_limit_token_count"] = final_messages_token_count
         session.materialize(sample, sample_metadata)
         for key in (
             "actions",
@@ -643,6 +689,8 @@ async def generate_server_episode_rollout(
         if bool(sample_metadata.get("discard_sample", False)):
             sample.status = Sample.Status.FAILED
             sample.reward = 0.0
+        elif sample_metadata.get("truncated_reason") == "context_limit_after_observation":
+            sample.status = Sample.Status.TRUNCATED
         else:
             sample.status = _status_from_episode(result)
         sample_metadata.update(
