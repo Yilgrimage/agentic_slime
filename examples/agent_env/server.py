@@ -150,6 +150,7 @@ class ProcessPoolEnvServer:
         self.idempotency_ttl_s = float(self.server_config["idempotency_ttl_s"])
         self.worker_start_timeout_s = float(self.server_config["worker_start_timeout_s"])
         self.worker_request_timeout_s = float(self.server_config["worker_request_timeout_s"])
+        self.worker_episode_timeout_s = float(self.server_config["worker_episode_timeout_s"])
         self.reuse_workers = bool(self.server_config["reuse_workers"])
         self.reset_on_release = bool(self.server_config["reset_on_release"])
         self.shared_pool = bool(self.server_config["shared_pool"])
@@ -226,13 +227,21 @@ class ProcessPoolEnvServer:
         self.available[pool_key] = q
         self.created[pool_key] = workers
 
-    def _worker_request(self, worker: Worker, cmd: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _worker_request(
+        self,
+        worker: Worker,
+        cmd: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        timeout = self.worker_request_timeout_s if timeout_s is None else float(timeout_s)
         with worker.lock:
             if worker.dead or not worker.process.is_alive():
                 worker.dead = True
                 raise RuntimeError(f"{self.env_name} worker {worker.worker_id} pid={worker.process.pid} is not alive")
             worker.conn.send({"cmd": cmd, "payload": payload or {}})
-            if not worker.conn.poll(self.worker_request_timeout_s):
+            if not worker.conn.poll(timeout):
                 self._discard_worker(worker)
                 raise TimeoutError(f"{self.env_name} worker {worker.worker_id} timed out on {cmd}")
             result = worker.conn.recv()
@@ -348,7 +357,12 @@ class ProcessPoolEnvServer:
         forwarded["lease_id"] = lease.lease_id
         forwarded["session_id"] = lease.lease_id
         try:
-            result = self._worker_request(lease.worker, "run_episode", forwarded)
+            result = self._worker_request(
+                lease.worker,
+                "run_episode",
+                forwarded,
+                timeout_s=self.worker_episode_timeout_s,
+            )
         except Exception:
             lease.worker.dead = True
             with self.lock:
@@ -400,6 +414,7 @@ class ProcessPoolEnvServer:
             "splits": worker_splits,
             "lease_ttl_s": self.lease_ttl_s,
             "worker_request_timeout_s": self.worker_request_timeout_s,
+            "worker_episode_timeout_s": self.worker_episode_timeout_s,
         }
         if num_tasks is not None:
             payload["num_tasks"] = num_tasks
@@ -455,6 +470,7 @@ def normalize_server_config(raw: dict[str, Any]) -> dict[str, Any]:
         "idempotency_ttl_s": float(raw.get("idempotency_ttl_s", 300.0)),
         "worker_start_timeout_s": float(raw.get("worker_start_timeout_s", 300.0)),
         "worker_request_timeout_s": float(raw.get("worker_request_timeout_s", 180.0)),
+        "worker_episode_timeout_s": float(raw.get("worker_episode_timeout_s", raw.get("worker_request_timeout_s", 180.0))),
         "prewarm_splits": list(raw.get("prewarm_splits", ["train"])),
         "reuse_workers": bool(raw.get("reuse_workers", True)),
         "reset_on_release": bool(raw.get("reset_on_release", False)),

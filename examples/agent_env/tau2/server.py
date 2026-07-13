@@ -52,6 +52,7 @@ def _server_config(raw: dict) -> dict:
         "idempotency_ttl_s": float(_deep_get(raw, "env_server", "idempotency_ttl_s", 300.0)),
         "worker_start_timeout_s": float(_deep_get(raw, "env_server", "worker_start_timeout_s", 300.0)),
         "worker_request_timeout_s": float(_deep_get(raw, "env_server", "worker_request_timeout_s", 180.0)),
+        "worker_episode_timeout_s": float(_deep_get(raw, "env_server", "worker_episode_timeout_s", _deep_get(raw, "env_server", "worker_request_timeout_s", 180.0))),
         "prewarm_splits": list(_deep_get(raw, "env_server", "prewarm_splits", ["train"])),
         "reuse_workers": bool(_deep_get(raw, "env_server", "reuse_workers", True)),
         "reset_on_release": bool(_deep_get(raw, "env_server", "reset_on_release", False)),

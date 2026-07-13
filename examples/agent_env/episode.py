@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -146,6 +147,59 @@ def _prefix_len(expected_prefix: list[dict[str, Any]], full: list[dict[str, Any]
     return len(expected_prefix)
 
 
+def _message_debug_summary(message: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(message, dict):
+        return {"type": type(message).__name__}
+    summary: dict[str, Any] = {
+        "role": message.get("role"),
+        "content": str(message.get("content") or "")[:200],
+    }
+    if "step_loss_mask" in message:
+        summary["step_loss_mask"] = message.get("step_loss_mask")
+    calls = message.get("tool_calls")
+    if isinstance(calls, list):
+        summary["tool_calls"] = [
+            {
+                "id": call.get("id") if isinstance(call, dict) else None,
+                "name": ((call.get("function") or {}).get("name") if isinstance(call, dict) else None),
+                "arguments": str(((call.get("function") or {}).get("arguments") if isinstance(call, dict) else ""))[:200],
+            }
+            for call in calls[:2]
+        ]
+    if message.get("role") == "tool":
+        summary["tool_call_id"] = message.get("tool_call_id")
+    return summary
+
+
+def _canonical_debug_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _canonical_debug_hash(value: Any) -> str:
+    return hashlib.sha256(_canonical_debug_json(value).encode("utf-8")).hexdigest()[:16]
+
+
+def _prefix_mismatch_debug(expected_prefix: list[dict[str, Any]], full: list[dict[str, Any]]) -> dict[str, Any]:
+    common = 0
+    for expected, got in zip(expected_prefix, full):
+        if expected != got:
+            break
+        common += 1
+    expected_item = expected_prefix[common] if common < len(expected_prefix) else None
+    got_item = full[common] if common < len(full) else None
+    return {
+        "expected_len": len(expected_prefix),
+        "received_len": len(full),
+        "first_diff": common,
+        "expected_hash": _canonical_debug_hash(expected_item),
+        "received_hash": _canonical_debug_hash(got_item),
+        "expected": _message_debug_summary(expected_item),
+        "received": _message_debug_summary(got_item),
+        "expected_full": expected_item,
+        "received_full": got_item,
+    }
+
+
 def _finish_reason(finish_type: str, assistant_message: dict[str, Any]) -> str:
     if finish_type == "length":
         return "length"
@@ -236,9 +290,10 @@ class PolicySession:
 
         prefix = _prefix_len(self.ledger.messages, normalized_messages)
         if prefix < 0:
+            debug = _prefix_mismatch_debug(self.ledger.messages, normalized_messages)
             raise ValueError(
                 "policy gateway received a message history that is not an append-only extension "
-                "of the recorded session"
+                f"of the recorded session: {json.dumps(debug, ensure_ascii=False)}"
             )
         new_messages = normalized_messages[prefix:]
         if new_messages:
@@ -288,7 +343,13 @@ class PolicySession:
             action, format_valid, parse_mode = parse_standard_tool_call(parser_text, self.tools, parser_name)
             if not format_valid and not parser_text:
                 action, format_valid, parse_mode = parse_standard_tool_call(raw_response_text, self.tools, parser_name)
-            if format_valid and isinstance(action, dict):
+            if not format_valid and parse_mode == "no_standard_tool_call" and self.spec.allow_assistant_message:
+                content = visible_assistant_text(parser_text)
+                if content:
+                    action = {"type": "assistant_message", "content": content}
+                    format_valid = True
+                    parse_mode = "assistant_message"
+            if format_valid and isinstance(action, dict) and action.get("type") == "tool_call":
                 assistant_message = _openai_tool_call_message(action, str(action.get("content") or ""))
             else:
                 content = visible_assistant_text(parser_text)
