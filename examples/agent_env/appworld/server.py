@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,6 @@ import yaml
 from examples.agent_env.env_episode import (
     call_policy_chat,
     finish_reason_is_length,
-    parse_text_action,
     policy_context_limit_reached,
 )
 from examples.agent_env.prompting import require_prompt
@@ -58,11 +59,13 @@ def _env_path(value: Any, envvar: str) -> str:
 
 def _environment_config(raw: dict) -> dict:
     root = _env_path(_deep_get(raw, "appworld", "root", os.environ.get("APPWORLD_ROOT", "")), "APPWORLD_ROOT")
+    prompt_cfg = raw.get("prompt") if isinstance(raw.get("prompt"), dict) else {}
     interaction = raw.get("interaction") if isinstance(raw.get("interaction"), dict) else {}
     text_action = interaction.get("text_action") if isinstance(interaction.get("text_action"), dict) else {}
     action = raw.get("action") if isinstance(raw.get("action"), dict) else {}
     return {
         "root": root,
+        "prompt_style": str(prompt_cfg.get("style") or _deep_get(raw, "appworld", "prompt_style", "official_react")),
         "max_turns": int(raw.get("max_turns") or _deep_get(raw, "appworld", "max_interactions", 40)),
         "text_action_tag": str(text_action.get("tag") or "code"),
         "legacy_text_as_code": bool(action.get("legacy_text_as_code", False)),
@@ -95,9 +98,80 @@ def _tool_action(payload: Any) -> tuple[str, dict[str, Any], bool]:
     return str(payload), {}, False
 
 
+def _role_prompt_to_messages(text: str) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    last_start = 0
+    for match in re.finditer(r"(USER|ASSISTANT|SYSTEM):\n", text, flags=re.IGNORECASE):
+        last_end = match.span()[0]
+        if not messages:
+            if text[:last_end].strip():
+                raise ValueError("AppWorld official react prompt must start with USER:, ASSISTANT:, or SYSTEM:")
+        else:
+            messages[-1]["content"] = text[last_start:last_end]
+        messages.append({"role": match.group(1).lower(), "content": ""})
+        last_start = match.span()[1]
+    if not messages:
+        raise ValueError("AppWorld official react prompt did not contain USER:/ASSISTANT: chat markers")
+    messages[-1]["content"] = text[last_start:]
+    for idx, message in enumerate(messages):
+        if not str(message.get("content") or "").strip():
+            raise ValueError(f"AppWorld official react prompt rendered an empty message at index {idx}")
+    return messages
+
+
+def _code_from_markdown_fence(text: str) -> tuple[str, bool, str]:
+    match = re.search(r"```\s*(?:python|py)?\s*\n(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        code = match.group(1).strip()
+        if code:
+            return code, True, "python_code_fence"
+        return "", False, "empty_python_code_fence"
+    partial = re.search(r"```\s*(?:python|py)?\s*\n(.*)", text, flags=re.IGNORECASE | re.DOTALL)
+    if partial:
+        code = partial.group(1).strip()
+        if code:
+            return code, False, "unterminated_python_code_fence"
+        return "", False, "empty_unterminated_python_code_fence"
+    return "", False, "no_python_code_fence"
+
+
+def _code_from_xml_tag(text: str, tag: str) -> tuple[str, bool, str]:
+    escaped_tag = re.escape(tag)
+    match = re.search(rf"<{escaped_tag}>\s*(.*?)\s*</{escaped_tag}>", text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        code = match.group(1).strip()
+        if code:
+            return code, True, f"{tag}_tag"
+        return "", False, f"empty_{tag}_tag"
+    partial = re.search(rf"<{escaped_tag}>\s*(.*)", text, flags=re.IGNORECASE | re.DOTALL)
+    if partial:
+        code = partial.group(1).strip()
+        if code:
+            return code, False, f"unterminated_{tag}_tag"
+        return "", False, f"empty_unterminated_{tag}_tag"
+    return "", False, f"no_{tag}_tag"
+
+
+def _parse_policy_code(text: str, *, style: str, tag: str) -> tuple[str, bool, str]:
+    if style == "official_react":
+        return _code_from_markdown_fence(text)
+    code, valid, mode = _code_from_xml_tag(text, tag)
+    if code or mode != f"no_{tag}_tag":
+        return code, valid, mode
+    return _code_from_markdown_fence(text)
+
+
+def _field(value: Any, name: str) -> str:
+    if isinstance(value, dict):
+        return str(value.get(name, ""))
+    return str(getattr(value, name, ""))
+
+
 def _split_dataset(config: dict[str, Any], split: str) -> str:
-    if split in {"eval", "validation", "val", "dev", "test"}:
-        return str(config.get("eval_dataset_name") or ("dev" if split in {"eval", "validation", "val"} else split))
+    if split in {"eval", "validation", "val", "dev"}:
+        return str(config.get("eval_dataset_name") or "dev")
+    if split in {"test", "test_normal", "test_challenge"}:
+        return "test_normal" if split == "test" else split
     return str(config.get("dataset_name") or split)
 
 
@@ -182,18 +256,63 @@ class AppWorldBackend:
         )
         return "\n\n".join(parts)
 
+    def _prompt_style(self) -> str:
+        style = str(self.config.get("prompt_style") or "official_react").strip().lower().replace("-", "_")
+        if style not in {"official_react", "system_user"}:
+            raise ValueError(f"Unsupported AppWorld prompt.style={style!r}; expected official_react or system_user")
+        return style
+
+    def _official_react_messages(self, prompt: str) -> list[dict[str, str]]:
+        assert self.world is not None
+        app_descriptions = json.dumps(
+            [{"name": key, "description": value} for key, value in self.world.task.app_descriptions.items()],
+            indent=1,
+        )
+        main_user = self.world.task.supervisor
+        replacements = {
+            "{{ instruction }}": str(getattr(self.world.task, "instruction", "")),
+            "{{ app_descriptions }}": app_descriptions,
+            "{{ main_user.first_name }}": _field(main_user, "first_name"),
+            "{{ main_user.last_name }}": _field(main_user, "last_name"),
+            "{{ main_user.email }}": _field(main_user, "email"),
+            "{{ main_user.phone_number }}": _field(main_user, "phone_number"),
+        }
+        rendered = prompt
+        for needle, value in replacements.items():
+            rendered = rendered.replace(needle, value)
+        unresolved = sorted(set(re.findall(r"{{\s*[^{}]+\s*}}", rendered)))
+        if unresolved:
+            raise ValueError(f"AppWorld official react prompt has unresolved template fields: {unresolved}")
+        return _role_prompt_to_messages(rendered)
+
     def _initial_messages(self, prompt: str, observation: str, info: dict[str, Any]) -> list[dict[str, str]]:
-        system_prompt = require_prompt(prompt, env_name="AppWorld", source="run_episode.prompt")
+        prompt_text = require_prompt(prompt, env_name="AppWorld", source="run_episode.prompt")
+        if self._prompt_style() == "official_react":
+            return self._official_react_messages(prompt_text)
         user_prompt = self._observation_text(observation, info).strip()
         if not user_prompt:
             raise ValueError("AppWorld initial user prompt is empty after reset")
         return [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": prompt_text},
             {"role": "user", "content": user_prompt},
         ]
 
     def _observation_text(self, observation: str, info: dict[str, Any]) -> str:
+        if self._prompt_style() == "official_react":
+            content = observation.strip()
+            maybe_newline = "\n" if content and not content.endswith("\n") else ""
+            return f"Output:\n```\n{content}{maybe_newline}```\n\n"
         return f"Observation:\n{observation.strip()}\n"
+
+    def _format_error_observation(self) -> str:
+        if self._prompt_style() == "official_react":
+            return "Invalid response format. Respond with exactly one markdown Python code block."
+        return "Invalid response format. Respond with exactly one <code>...</code> block containing Python code to execute."
+
+    def _unknown_tool_observation(self, name: str) -> str:
+        if self._prompt_style() == "official_react":
+            return f"Unknown AppWorld tool `{name}`. Respond with a markdown Python code block that calls AppWorld APIs."
+        return f"Unknown AppWorld tool `{name}`. Respond with a <code>...</code> block that calls AppWorld APIs."
 
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         split = str(payload.get("split") or self.split)
@@ -286,13 +405,10 @@ class AppWorldBackend:
             observation = self._finish(arguments)
             self.done = True
         elif name in {"format_error", "invalid_format"}:
-            observation = (
-                "Invalid response format. Respond with exactly one <code>...</code> block "
-                "containing Python code to execute."
-            )
+            observation = self._format_error_observation()
             info["format_error"] = True
         else:
-            observation = f"Unknown AppWorld tool `{name}`. Respond with a <code>...</code> block that calls AppWorld APIs."
+            observation = self._unknown_tool_observation(name)
             info["tool_error"] = observation
 
         if not self.done:
@@ -335,6 +451,7 @@ class AppWorldBackend:
         timeout_s = float((payload.get("timeouts") or {}).get("policy_s") or 120)
         tag = str(runtime.get("text_action_tag") or "code")
         legacy_text_as_code = bool(runtime.get("legacy_text_as_code", False))
+        prompt_style = self._prompt_style()
         status = "truncated"
         truncated_reason = "max_turns"
         final_score = 0.0
@@ -372,7 +489,7 @@ class AppWorldBackend:
                 metadata["max_response_tokens_hits"] = int(metadata.get("max_response_tokens_hits", 0) or 0) + 1
 
             content = str(assistant_message.get("content") or "")
-            code, valid, parse_mode = parse_text_action(content, tag=tag)
+            code, valid, parse_mode = _parse_policy_code(content, style=prompt_style, tag=tag)
             metadata["action_parse_modes"].append(parse_mode)
             metadata["format_checks"].append({"turn": turn, "valid": bool(valid), "parse_mode": parse_mode})
             if not valid:

@@ -43,6 +43,12 @@ def _parse_header(values: list[str]) -> dict[str, str]:
     return headers
 
 
+def _read_secret(path: str) -> str:
+    if not path:
+        return ""
+    return Path(os.path.expandvars(path)).expanduser().read_text(encoding="utf-8").strip()
+
+
 def _metadata(row: dict[str, Any]) -> dict[str, Any]:
     metadata = row.get("metadata")
     return dict(metadata) if isinstance(metadata, dict) else {}
@@ -196,6 +202,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-base-url", required=True, help="OpenAI-compatible policy base URL.")
     parser.add_argument("--policy-chat-path", default="/v1/chat/completions")
     parser.add_argument("--policy-api-key", default=os.environ.get("OPENAI_API_KEY", ""))
+    parser.add_argument("--policy-api-key-path", default=os.environ.get("OPENAI_API_KEY_PATH", ""))
     parser.add_argument("--policy-model", default=os.environ.get("OPENAI_MODEL", "agent-env-policy"))
     parser.add_argument("--policy-header", action="append", default=[], help="Extra policy header as KEY=VALUE.")
     parser.add_argument("--split", default="train")
@@ -220,6 +227,8 @@ def main() -> None:
     args = parse_args()
     if args.concurrency < 1:
         raise ValueError("--concurrency must be positive")
+    if not args.policy_api_key and args.policy_api_key_path:
+        args.policy_api_key = _read_secret(args.policy_api_key_path)
     rows = _select_rows(_jsonl_rows(Path(args.prompt_data)), args)
     if not rows:
         raise RuntimeError("No prompt rows selected.")

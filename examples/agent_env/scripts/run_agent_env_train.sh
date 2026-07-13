@@ -234,6 +234,17 @@ export WANDB_INIT_TIMEOUT=${WANDB_INIT_TIMEOUT:-300}
 export NUM_STEPS=${NUM_STEPS:-${TOTAL_NUM_STEPS:-100}}
 export NUM_ROLLOUT=${NUM_ROLLOUT:-${TOTAL_NUM_STEPS:-${NUM_STEPS}}}
 export SAVE_INTERVAL=${SAVE_INTERVAL:-${TOTAL_NUM_STEPS:-${NUM_STEPS}}}
+if [ "${NUM_ROLLOUT}" = "0" ] && [ -n "${EVAL_INTERVAL:-}" ] && [ -z "${LR_DECAY_ITERS:-}" ]; then
+  # Eval-only still initializes the Megatron actor so dist checkpoints can be
+  # loaded and synced into rollout engines. Megatron's scheduler requires a
+  # positive decay step count even though no training step will run.
+  export LR_DECAY_ITERS=1
+fi
+if [ "${NUM_ROLLOUT}" = "0" ] && [ -n "${EVAL_INTERVAL:-}" ]; then
+  # Slime's eval rollout path asserts that group RM is disabled. Eval metrics
+  # come from the env rollout result, not from training-time group RM.
+  export GROUP_RM=0
+fi
 export AGENT_ENV_ROLLOUT_DUMP_N=${AGENT_ENV_ROLLOUT_DUMP_N:-${ROLLOUT_CASE_DUMP_N:-0}}
 export AGENT_ENV_ROLLOUT_DUMP_DISCARD_N=${AGENT_ENV_ROLLOUT_DUMP_DISCARD_N:-${ROLLOUT_CASE_DUMP_DISCARD_N:-${AGENT_ENV_ROLLOUT_DUMP_N}}}
 export AGENT_ENV_ROLLOUT_DUMP_FORMAT_N=${AGENT_ENV_ROLLOUT_DUMP_FORMAT_N:-${ROLLOUT_CASE_DUMP_FORMAT_N:-0}}
@@ -288,6 +299,15 @@ if not path.exists():
     raise SystemExit(f"prompt data does not exist: {path}")
 
 rows = 0
+def prompt_text(prompt):
+    if isinstance(prompt, str):
+        return prompt.strip()
+    if isinstance(prompt, list) and len(prompt) == 1 and isinstance(prompt[0], dict):
+        content = prompt[0].get("content")
+        if isinstance(content, str):
+            return content.strip()
+    return ""
+
 with path.open(encoding="utf-8") as f:
     for line_no, line in enumerate(f, 1):
         line = line.strip()
@@ -296,8 +316,8 @@ with path.open(encoding="utf-8") as f:
         rows += 1
         row = json.loads(line)
         prompt = row.get("prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise SystemExit(f"{path}:{line_no} has empty/non-string prompt")
+        if not prompt_text(prompt):
+            raise SystemExit(f"{path}:{line_no} has empty/invalid prompt")
         metadata = row.get("metadata")
         if not isinstance(metadata, dict):
             raise SystemExit(f"{path}:{line_no} has missing metadata object")

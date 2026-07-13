@@ -9,7 +9,9 @@ eval:
     top_k: -1
   datasets:
     - name: webshop-valid
-      path: ${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}/data/webshop/valid_100.jsonl
+      # Formal eval must use the full generated split JSONL, not a lightweight
+      # subset. Generate it with prompt_data.py using the intended full count.
+      path: ${oc.env:WEBSHOP_VALID_PROMPT_DATA}
       custom_generate_function_path: examples.agent_env.webshop.rollout.generate
       metadata_overrides:
         split: valid

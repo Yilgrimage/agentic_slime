@@ -50,15 +50,14 @@ Create prompt data. Each row is one ALFWorld task id; slime duplicates each row
 
 ```bash
 python examples/agent_env/alfworld/prompt_data.py \
-  --output ${ROOT_DIR}/data/alfworld/train.jsonl \
-  --num-tasks 100 \
-  --split train
-
-python examples/agent_env/alfworld/prompt_data.py \
   --output-dir ${ROOT_DIR}/data/alfworld \
-  --num-tasks 100 \
+  --config examples/agent_env/alfworld/env_config.yaml \
   --splits train valid_seen valid_unseen
 ```
+
+Do not pass `--num-tasks` for formal eval or run comparisons. It is acceptable
+only for smoke/debug launches where the run name and notes make the subset
+explicit.
 
 ## Runtime Design
 

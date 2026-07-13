@@ -9,12 +9,14 @@ eval:
     top_k: -1
   datasets:
     - name: alfworld-valid-seen
-      path: ${oc.env:LOCAL_RUNTIME_DIR,/tmp/server-ops-runtime}/data/alfworld/valid_seen_100.jsonl
+      # Formal eval must use the full generated split JSONL, not a lightweight
+      # small subset. Generate it with prompt_data.py without --num-tasks.
+      path: ${oc.env:ALFWORLD_VALID_SEEN_PROMPT_DATA}
       custom_generate_function_path: examples.agent_env.alfworld.rollout.generate
       metadata_overrides:
         split: valid_seen
     - name: alfworld-valid-unseen
-      path: ${oc.env:LOCAL_RUNTIME_DIR,/tmp/server-ops-runtime}/data/alfworld/valid_unseen_100.jsonl
+      path: ${oc.env:ALFWORLD_VALID_UNSEEN_PROMPT_DATA}
       custom_generate_function_path: examples.agent_env.alfworld.rollout.generate
       metadata_overrides:
         split: valid_unseen

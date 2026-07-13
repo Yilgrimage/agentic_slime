@@ -28,8 +28,10 @@ def _load_config(path: str) -> dict[str, Any]:
 
 def _split_dataset(config: dict[str, Any], split: str) -> str:
     appworld = config.get("appworld") if isinstance(config.get("appworld"), dict) else {}
-    if split in {"eval", "validation", "val", "dev", "test"}:
-        return str(appworld.get("eval_dataset_name") or ("dev" if split in {"eval", "validation", "val"} else split))
+    if split in {"eval", "validation", "val", "dev"}:
+        return str(appworld.get("eval_dataset_name") or "dev")
+    if split in {"test", "test_normal", "test_challenge"}:
+        return "test_normal" if split == "test" else split
     return str(appworld.get("dataset_name") or split)
 
 

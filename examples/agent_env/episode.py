@@ -16,6 +16,7 @@ from typing import Any
 
 from slime.utils.types import Sample
 
+from examples.agent_env.prompting import require_prompt
 from examples.agent_env.rollout import (
     AgentEnvSpec,
     AgentTokenLedger,
@@ -529,7 +530,7 @@ async def generate_server_episode_rollout(
             "request_id": lease_request_id(sample),
             "release_on_done": True,
             "include_trace": _sample_case_dump_enabled(args),
-            "prompt": sample.prompt if isinstance(sample.prompt, str) else "",
+            "prompt": require_prompt(sample.prompt, env_name=spec.name, source="sample.prompt"),
             "max_turns": int(cfg_path(args, "max_turns", spec.default_max_turns)),
             "max_response_tokens": int(response_max_tokens),
             "sampling_params": copy.deepcopy(sampling_params),

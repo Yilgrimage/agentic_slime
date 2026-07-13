@@ -11,11 +11,13 @@ from typing import Any
 
 from examples.agent_env.tau2.prompt import DEFAULT_PROMPT
 
-def _prompt() -> str:
+def _prompt() -> list[dict[str, str]]:
     # The tau2 server builds the task-specific system policy after env reset.
     # The dataset prompt remains explicit so missing prompt data never falls
-    # through to a hidden server fallback.
-    return DEFAULT_PROMPT
+    # through to a hidden server fallback. Qwen3.5 checkpoints expose a
+    # processor, so Slime's dataset loader requires conversation-format prompt
+    # data even for text-only rows.
+    return [{"role": "system", "content": DEFAULT_PROMPT}]
 
 
 def _split_csv(value: str | None, default: Sequence[str]) -> list[str]:

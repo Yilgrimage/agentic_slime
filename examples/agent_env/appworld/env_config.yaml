@@ -2,6 +2,9 @@ task:
   split: train
 max_turns: 50
 
+prompt:
+  style: official_react
+
 timeouts:
   policy_s: 120
   env_request_s: 900
