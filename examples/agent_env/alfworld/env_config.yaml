@@ -35,6 +35,9 @@ reward:
   ropd:
     join_key: task_id
     allow_online_rubric: true
+    concurrency: 8
+    rubric_concurrency: 0
+    judge_concurrency: 0
     teacher_answer_keys:
       - teacher_response
       - teacher_answer

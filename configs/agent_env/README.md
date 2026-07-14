@@ -19,7 +19,16 @@ Environment semantics belong in `examples/agent_env/<env>/env_config.yaml`.
 Reward implementation and task-specific reward data also belong under the
 selected env config's `reward:` section. Use `reward.impl` and
 `reward.judge_mode` for the active RM path, and keep ROPD teacher/rubric files
-or Valleydance process-reward weights out of generic train profiles.
+or Valleydance process-reward weights out of generic train profiles. ROPD
+reward concurrency is configured under `reward.ropd.concurrency`; optional
+`reward.ropd.rubric_concurrency` and `reward.ropd.judge_concurrency` override
+per-stage limits, with `0` meaning "follow the global ROPD concurrency".
+ROPD training semantics such as `answer_mode`, `reward_mode`,
+`reward_group_reference`, and `luffy_*` also belong under `reward.ropd.*`.
+The verifier always scores teacher and student answers anonymously in the same
+batch; `reward_group_reference` only controls whether teacher scores enter the
+group baseline. The default V0 path is answer-only LLM rubric/judge reward;
+teacher-anchored baselines are explicit opt-in knobs.
 Durable reward variants should select a dedicated env config, such as
 `examples/agent_env/alfworld/env_config_ropd.yaml`, instead of overriding
 `AGENT_ENV_RM_IMPL` or `AGENT_ENV_JUDGE_MODE` from a run profile.

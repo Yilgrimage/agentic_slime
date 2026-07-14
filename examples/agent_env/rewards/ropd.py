@@ -14,6 +14,7 @@ from slime.utils.types import Sample
 from .config import resolve_path, reward_cfg_path
 from . import naive
 from .extractors import (
+    bool_value,
     float_value,
     int_value,
     metadata,
@@ -184,10 +185,35 @@ criterion 内部没有部分分。每条 criterion 只能是 true 或 false。
 """
 
 _DUMP_COUNTS: dict[str, int] = {}
+_STAGE_SEMAPHORES: dict[tuple[int, str, int], asyncio.Semaphore] = {}
 
 
 def _cfg(args: Any, name: str, default: Any = None) -> Any:
     return reward_cfg_path(args, f"ropd.{name}", default)
+
+
+def _env_cfg(args: Any, env_name: str, cfg_name: str, default: Any = None) -> Any:
+    value = runtime_env(args, env_name, "").strip()
+    if value != "":
+        return value
+    return _cfg(args, cfg_name, default)
+
+
+def _cfg_bool(args: Any, env_name: str, cfg_name: str, default: bool) -> bool:
+    return bool_value(_env_cfg(args, env_name, cfg_name, default), default)
+
+
+def _cfg_float(args: Any, env_name: str, cfg_name: str, default: float) -> float:
+    return float_value(_env_cfg(args, env_name, cfg_name, default), default)
+
+
+def _cfg_int(args: Any, env_name: str, cfg_name: str, default: int) -> int:
+    return int_value(_env_cfg(args, env_name, cfg_name, default), default)
+
+
+def _cfg_choice(args: Any, env_name: str, cfg_name: str, default: str, choices: set[str]) -> str:
+    value = str(_env_cfg(args, env_name, cfg_name, default) or default).strip().lower()
+    return value if value in choices else default
 
 
 def _list_value(value: Any, default: tuple[str, ...] = ()) -> list[str]:
@@ -271,6 +297,56 @@ def _role_endpoint(args: Any, role: str) -> dict[str, str]:
     return values
 
 
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _base_concurrency(args: Any) -> int:
+    raw = runtime_env(args, "AGENT_ENV_ROPD_CONCURRENCY", "").strip()
+    if raw == "":
+        raw = runtime_env(args, "AGENT_ENV_REWARD_CONCURRENCY", "").strip()
+    if raw == "":
+        raw = _cfg(args, "concurrency", reward_cfg_path(args, "concurrency", 8))
+    return _positive_int(raw, 8)
+
+
+def _stage_concurrency(args: Any, stage: str) -> int:
+    base = _base_concurrency(args)
+    stage = stage.lower()
+    env_keys = {
+        "rubric": ("AGENT_ENV_ROPD_RUBRIC_CONCURRENCY",),
+        "judge": ("AGENT_ENV_ROPD_JUDGE_CONCURRENCY",),
+    }.get(stage, ())
+    raw: Any = ""
+    for key in env_keys:
+        raw = runtime_env(args, key, "").strip()
+        if raw != "":
+            break
+    if raw == "":
+        raw = _cfg(args, f"{stage}_concurrency", 0)
+    return _positive_int(raw, base)
+
+
+def _stage_semaphore(args: Any, stage: str) -> asyncio.Semaphore:
+    limit = _stage_concurrency(args, stage)
+    loop_id = id(asyncio.get_running_loop())
+    key = (loop_id, stage, limit)
+    semaphore = _STAGE_SEMAPHORES.get(key)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(limit)
+        _STAGE_SEMAPHORES[key] = semaphore
+    return semaphore
+
+
+async def _with_stage_limit(args: Any, stage: str, func: Any, *func_args: Any, **func_kwargs: Any) -> Any:
+    async with _stage_semaphore(args, stage):
+        return await func(*func_args, **func_kwargs)
+
+
 def _cache_key(sample: Sample) -> str:
     sample_metadata = metadata(sample)
     raw = {
@@ -315,6 +391,13 @@ def _render_answer_block(label: str, answers: str | list[str] | tuple[str, ...],
     )
 
 
+def _limit_text(text: Any, max_chars: int) -> str:
+    value = str(text or "")
+    if max_chars <= 0:
+        return value
+    return truncate(value, max_chars)
+
+
 def _trim_answer_for_judge(answer: Any) -> str:
     answer_text = str(answer or "")
     if "</think>" not in answer_text:
@@ -338,6 +421,92 @@ def _sanitize_teacher_answer_for_anonymous_verifier(answer: Any) -> str:
     return text
 
 
+def _message_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return str(value)
+
+
+def _strip_tool_response_text(text: str) -> str:
+    if not text:
+        return ""
+    lines: list[str] = []
+    skip_block = False
+    for line in text.splitlines():
+        normalized = line.strip().lower()
+        if normalized.startswith("[observation") or normalized.startswith("observation after action"):
+            skip_block = True
+            continue
+        if skip_block and (normalized.startswith("[assistant") or normalized.startswith("[action") or normalized.startswith("step ")):
+            skip_block = False
+        if not skip_block:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _trace_text(sample: Sample, *, omit_tool_responses: bool = False) -> str:
+    sample_metadata = metadata(sample)
+    turns = sample_metadata.get("turns")
+    if isinstance(turns, list) and turns:
+        lines: list[str] = []
+        for idx, turn in enumerate(turns, start=1):
+            if not isinstance(turn, dict):
+                lines.append(f"Step {idx}:\n{_message_text(turn)}")
+                continue
+            response_text = turn.get("parser_text") or turn.get("response_text") or ""
+            action = turn.get("action")
+            observation = turn.get("observation")
+            parts = [f"Step {idx}:"]
+            if response_text:
+                parts.append(f"Response:\n{_message_text(response_text)}")
+            if action not in (None, "", []):
+                parts.append(f"Action:\n{_message_text(action)}")
+            if not omit_tool_responses and observation not in (None, "", []):
+                parts.append(f"Observation after action:\n{_message_text(observation)}")
+            lines.append("\n".join(parts))
+        return "\n\n".join(lines)
+    trace_value = _metadata_value(sample, ["trace", "trajectory", "rollout_trace", "student_trace"])
+    trace_text = _message_text(trace_value) if trace_value not in (None, "", []) else str(getattr(sample, "response", "") or "")
+    return _strip_tool_response_text(trace_text) if omit_tool_responses else trace_text
+
+
+def _combine_final_and_trace(prediction: str, trace: str, *, trace_label: str) -> str:
+    prediction = prediction.strip()
+    trace = trace.strip()
+    if prediction and trace and prediction != trace:
+        return f"[Final Answer]\n{prediction}\n\n[{trace_label}]\n{trace}"
+    return prediction or trace
+
+
+def _answer_mode(args: Any) -> str:
+    return str(_env_cfg(args, "AGENT_ENV_ROPD_ANSWER_MODE", "answer_mode", "full") or "full").strip().lower()
+
+
+def _answer_for_judge(args: Any, sample: Sample) -> str:
+    prediction = _trim_answer_for_judge(prediction_text(sample))
+    mode = _answer_mode(args)
+    if mode == "final":
+        return prediction
+    if mode in {"trace", "full_trace"}:
+        return _trim_answer_for_judge(_trace_text(sample))
+    if mode in {
+        "final_without_tool_response",
+        "final_without_tool_responses",
+        "final_with_no_tool_trace",
+        "final_with_no_tool_response_trace",
+        "final_with_trace_no_tool_response",
+    }:
+        trace = _trace_text(sample, omit_tool_responses=True)
+        return _trim_answer_for_judge(_combine_final_and_trace(prediction, trace, trace_label="Rollout Trace Without Tool Responses"))
+    if mode in {"trace_without_tool_response", "trace_without_tool_responses", "no_tool_trace", "no_tool_response_trace", "trace_no_tool_response"}:
+        return _trim_answer_for_judge(_trace_text(sample, omit_tool_responses=True) or prediction)
+    return _trim_answer_for_judge(_combine_final_and_trace(prediction, _trace_text(sample), trace_label="Rollout Trace"))
+
+
 def _student_answer(args: Any, sample: Sample) -> str:
     value = _metadata_value(
         sample,
@@ -348,29 +517,7 @@ def _student_answer(args: Any, sample: Sample) -> str:
     )
     if value not in (None, "", []):
         return _trim_answer_for_judge(value)
-
-    sample_metadata = metadata(sample)
-    turns = sample_metadata.get("turns")
-    if isinstance(turns, list) and turns:
-        lines: list[str] = []
-        for idx, turn in enumerate(turns, start=1):
-            if not isinstance(turn, dict):
-                continue
-            response_text = turn.get("parser_text") or turn.get("response_text") or ""
-            action = turn.get("action")
-            observation = turn.get("observation")
-            parts = [f"Step {idx}:"]
-            if response_text:
-                parts.append(f"Response:\n{response_text}")
-            if action not in (None, "", []):
-                parts.append(f"Action: {action}")
-            if observation not in (None, "", []):
-                parts.append(f"Observation after action:\n{observation}")
-            lines.append("\n".join(parts))
-        if lines:
-            return _trim_answer_for_judge("\n\n".join(lines))
-
-    return _trim_answer_for_judge(prediction_text(sample))
+    return _answer_for_judge(args, sample)
 
 
 def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
@@ -488,14 +635,20 @@ def _render_template(template: str, replacements: dict[str, str]) -> str:
 
 
 def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: tuple[str, ...]) -> str:
+    question_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_QUESTION_MAX_CHARS", "question_max_chars", 8000)
+    student_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_STUDENT_RUBRIC_MAX_CHARS", "student_rubric_max_chars", 6000)
+    reference_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_REFERENCE_MAX_CHARS", "reference_max_chars", 0)
     return _render_template(
         RUBRICATOR_PROMPT_TEMPLATE,
         {
-            "question": truncate(task_prompt(samples[0]), 8000),
-            "teacher_response": _render_answer_block("Reference", teacher_answers),
+            "question": _limit_text(task_prompt(samples[0]), question_max_chars),
+            "teacher_response": _render_answer_block(
+                "Reference",
+                [_limit_text(answer, reference_max_chars) for answer in teacher_answers],
+            ),
             "student_response": _render_answer_block(
                 "Student",
-                [truncate(_student_answer(args, sample), 6000) for sample in samples],
+                [_limit_text(_student_answer(args, sample), student_max_chars) for sample in samples],
                 start_index=0,
                 force_labels=True,
             ),
@@ -511,14 +664,16 @@ def _build_verifier_prompt(
     rubric: dict[str, Any],
     answers: tuple[str, ...],
 ) -> str:
+    question_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_QUESTION_MAX_CHARS", "question_max_chars", 8000)
+    answer_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_VERIFIER_ANSWER_MAX_CHARS", "verifier_answer_max_chars", 6000)
     return _render_template(
         VERIFIER_PROMPT_TEMPLATE,
         {
-            "question": truncate(task_prompt(sample), 8000),
+            "question": _limit_text(task_prompt(sample), question_max_chars),
             "rubrics": json.dumps(rubric["rubrics"], ensure_ascii=False, indent=2),
             "answers": _render_answer_block(
                 "Answer",
-                [truncate(answer, 6000) for answer in answers],
+                [_limit_text(answer, answer_max_chars) for answer in answers],
                 start_index=1,
                 force_labels=True,
             ),
@@ -534,17 +689,20 @@ def _answer_shuffle_key(bucket_key: str, source: str, source_index: int, text: s
 
 def _anonymous_answer_items(
     *,
+    args: Any,
     bucket_key: str,
     teacher_answers: tuple[str, ...],
     student_answers: tuple[str, ...],
 ) -> tuple[dict[str, Any], ...]:
+    del args
     items = [
         {"source": "teacher", "source_index": idx, "text": answer}
         for idx, answer in enumerate(teacher_answers)
-    ] + [
+    ]
+    items.extend([
         {"source": "student", "source_index": idx, "text": answer}
         for idx, answer in enumerate(student_answers)
-    ]
+    ])
     return tuple(
         sorted(
             items,
@@ -615,6 +773,103 @@ def _weight(args: Any) -> float:
     return float_value(raw, 10.0)
 
 
+def _clip(args: Any, score: float) -> float:
+    lo = float_value(_cfg(args, "clip_min", -3.0), -3.0)
+    hi = float_value(_cfg(args, "clip_max", 3.0), 3.0)
+    return max(lo, min(hi, float(score)))
+
+
+def _sample_std(values: list[float], mean: float) -> float:
+    if len(values) <= 1:
+        return 0.0
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return max(variance, 0.0) ** 0.5
+
+
+def _score_list_stats(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {"values": [], "mean": 0.0, "std": 0.0, "count": 0}
+    mean = sum(values) / len(values)
+    return {
+        "values": values,
+        "mean": mean,
+        "std": _sample_std(values, mean),
+        "count": len(values),
+    }
+
+
+def _luffy_mode(args: Any) -> str:
+    return _cfg_choice(args, "AGENT_ENV_ROPD_LUFFY_MODE", "luffy_mode", "off", {"off", "reward_anchor", "token_loss"})
+
+
+def _luffy_enabled(args: Any) -> bool:
+    return _cfg_bool(args, "AGENT_ENV_ROPD_LUFFY_ENABLE", "luffy_enable", False)
+
+
+def _reward_group_reference(args: Any) -> str:
+    default_reference = "teacher_plus_students" if _luffy_enabled(args) and _luffy_mode(args) == "reward_anchor" else "students"
+    return _cfg_choice(
+        args,
+        "AGENT_ENV_ROPD_REWARD_GROUP_REFERENCE",
+        "reward_group_reference",
+        default_reference,
+        {"students", "teacher_plus_students"},
+    )
+
+
+def _reward_mode(args: Any) -> str:
+    return _cfg_choice(
+        args,
+        "AGENT_ENV_ROPD_REWARD_MODE",
+        "reward_mode",
+        "answer_only",
+        {"answer_only", "group_centered", "group_zscore"},
+    )
+
+
+def _validate_reward_config(args: Any) -> None:
+    if _luffy_enabled(args) and _luffy_mode(args) == "token_loss":
+        raise RuntimeError(
+            "AGENT_ENV_ROPD_LUFFY_MODE=token_loss requires actor-side off-policy teacher-token loss integration. "
+            "The agentic Slime ROPD reward module can only provide scalar rewards."
+        )
+
+
+def _group_stats(args: Any, student_scores: list[float], teacher_scores: tuple[float, ...]) -> dict[str, Any]:
+    reference_values_for_stats = list(student_scores)
+    reference = _reward_group_reference(args)
+    if reference == "teacher_plus_students":
+        reference_values_for_stats = [float(score) for score in teacher_scores] + reference_values_for_stats
+    stats = _score_list_stats(reference_values_for_stats)
+    stats.update(
+        {
+            "student_scores": list(student_scores),
+            "teacher_scores": [float(score) for score in teacher_scores],
+            "reference": reference,
+        }
+    )
+    return stats
+
+
+def _select_train_score(
+    args: Any,
+    *,
+    answer_score: float,
+    group_stats: dict[str, Any],
+) -> tuple[float, str]:
+    reward_mode = _reward_mode(args)
+    if _luffy_enabled(args) and _luffy_mode(args) == "reward_anchor" and reward_mode == "answer_only":
+        reward_mode = "group_centered"
+    if reward_mode == "group_centered":
+        return _clip(args, answer_score - float(group_stats.get("mean", 0.0))), reward_mode
+    if reward_mode == "group_zscore":
+        std = float(group_stats.get("std", 0.0))
+        if std <= 0:
+            return 0.0, reward_mode
+        return _clip(args, (answer_score - float(group_stats.get("mean", 0.0))) / (std + 1e-6)), reward_mode
+    return _clip(args, answer_score), "answer_only"
+
+
 async def _rubric_for_bucket(
     args: Any,
     samples: list[Sample],
@@ -645,6 +900,11 @@ async def _rubric_for_bucket(
             api_key_path=_role_api_key_path(args, "rubric"),
             **_role_endpoint(args, "rubric"),
         )
+        call_metadata = {
+            **call_metadata,
+            "role": "rubric",
+            "concurrency_limit": _stage_concurrency(args, "rubric"),
+        }
     except Exception as exc:
         _dump_artifact(
             args,
@@ -709,12 +969,14 @@ def _fallback_result(
 def _result(
     args: Any,
     *,
+    sample: Sample,
     rubric: Any,
     rubric_source: str,
     rubric_call: dict[str, Any] | None,
     judge_call: dict[str, Any] | None,
     maximum_score: float,
     teacher_scores: tuple[float, ...],
+    group_stats: dict[str, Any],
     student_score: float,
     student_item: dict[str, Any],
     student_position: int,
@@ -724,7 +986,12 @@ def _result(
         bounded = 0.0
     else:
         bounded = max(0.0, min(1.0, float(student_score) / maximum_score))
-    weighted = bounded * _weight(args)
+    train_score, effective_reward_mode = _select_train_score(
+        args,
+        answer_score=bounded,
+        group_stats=group_stats,
+    )
+    weighted = train_score * _weight(args)
     raw = {
         "rubric": rubric,
         "rubric_hash": _rubric_hash(rubric),
@@ -733,9 +1000,20 @@ def _result(
         "student_score": float(student_score),
         "teacher_scores": [float(score) for score in teacher_scores],
         "maximum_score": float(maximum_score),
-        "reward_score": bounded,
+        "reward_score": float(train_score),
+        "answer_score": float(bounded),
         "student_answer_position": int(student_position),
         "teacher_below_student": bool(teacher_below_student),
+        "ropd_group_reference": group_stats.get("reference", "students"),
+        "ropd_group_reference_mean": float(group_stats.get("mean", 0.0)),
+        "ropd_group_reference_std": float(group_stats.get("std", 0.0)),
+        "ropd_student_group_scores": group_stats.get("student_scores", []),
+        "ropd_teacher_scores": group_stats.get("teacher_scores", []),
+        "ropd_train_reward_mode": effective_reward_mode,
+        "ropd_reward_mode_requested": _reward_mode(args),
+        "ropd_luffy_enabled": bool(_luffy_enabled(args)),
+        "ropd_luffy_mode": _luffy_mode(args),
+        "answer_mode": _answer_mode(args),
     }
     if rubric_call is not None:
         raw["rubric_call"] = rubric_call
@@ -743,7 +1021,7 @@ def _result(
         raw["judge_call"] = judge_call
     return RewardResult(
         score=weighted,
-        components={"rubric_task_success": weighted},
+        components={"rubric_task_success": weighted, "ropd_answer_score": bounded},
         raw=raw,
         reason="",
         returns_total=True,
@@ -763,6 +1041,7 @@ async def _score_bucket(
 ) -> list[RewardResult]:
     student_answers = tuple(_student_answer(args, sample) for sample in samples)
     answer_items = _anonymous_answer_items(
+        args=args,
         bucket_key=bucket_key,
         teacher_answers=teacher_answers,
         student_answers=student_answers,
@@ -786,6 +1065,11 @@ async def _score_bucket(
             api_key_path=_role_api_key_path(args, "judge"),
             **_role_endpoint(args, "judge"),
         )
+        judge_call = {
+            **judge_call,
+            "role": "judge",
+            "concurrency_limit": _stage_concurrency(args, "judge"),
+        }
         scored_items = _parse_batch_scores(payload, rubric=rubric, expected=len(answer_items))
     except Exception as exc:
         details = {"stage": "verifier", "type": type(exc).__name__, "message": str(exc)}
@@ -821,6 +1105,14 @@ async def _score_bucket(
 
     teacher_scores = tuple(float(score) for score in teacher_scores_by_index if score is not None)
     maximum_score = _maximum_score(rubric)
+    student_answer_scores = [
+        max(0.0, min(1.0, float(item[0]) / maximum_score)) if item is not None and maximum_score > 0 else 0.0
+        for item in student_scores_by_index
+    ]
+    teacher_answer_scores = tuple(
+        max(0.0, min(1.0, float(score) / maximum_score)) for score in teacher_scores
+    ) if maximum_score > 0 else ()
+    group_stats = _group_stats(args, student_answer_scores, teacher_answer_scores)
     teacher_below_student = bool(teacher_scores and min(teacher_scores) < max(item[0] for item in student_scores_by_index if item is not None))
     _dump_artifact(
         args,
@@ -838,6 +1130,7 @@ async def _score_bucket(
             "teacher_scores": teacher_scores,
             "student_scores": [None if item is None else item[0] for item in student_scores_by_index],
             "maximum_score": maximum_score,
+            "group_stats": group_stats,
             "teacher_below_student": teacher_below_student,
             "call": judge_call,
         },
@@ -854,12 +1147,14 @@ async def _score_bucket(
         results.append(
             _result(
                 args,
+                sample=samples[idx],
                 rubric=rubric,
                 rubric_source=rubric_source,
                 rubric_call=rubric_call if idx == 0 else None,
                 judge_call=judge_call if idx == 0 else None,
                 maximum_score=maximum_score,
                 teacher_scores=teacher_scores,
+                group_stats=group_stats,
                 student_score=student_score,
                 student_item=student_item,
                 student_position=student_position,
@@ -875,6 +1170,7 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
         for result in fallback_results:
             result.reward_version = "ropd_v1_fallback_naive"
         return fallback_results
+    _validate_reward_config(args)
 
     buckets: dict[str, list[int]] = {}
     for idx, sample in enumerate(samples):
@@ -883,11 +1179,15 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
     results: list[RewardResult | None] = [None] * len(samples)
     bucket_items = list(buckets.items())
     rubric_infos = await asyncio.gather(
-        *[_rubric_for_bucket(args, [samples[idx] for idx in indices]) for _, indices in bucket_items]
+        *[
+            _with_stage_limit(args, "rubric", _rubric_for_bucket, args, [samples[idx] for idx in indices])
+            for _, indices in bucket_items
+        ]
     )
 
-    judge_tasks = []
-    judge_task_keys: list[list[int]] = []
+    judge_tasks: list[
+        tuple[list[int], str, list[Sample], dict[str, Any], str, dict[str, Any] | None, tuple[str, ...]]
+    ] = []
     for (bucket_key, indices), (rubric, rubric_source, rubric_call, teacher_answers) in zip(
         bucket_items, rubric_infos, strict=True
     ):
@@ -895,21 +1195,35 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
             for idx in indices:
                 results[idx] = _fallback_result(args, samples[idx], "missing_rubric", rubric_source)
             continue
-        judge_task_keys.append(indices)
         judge_tasks.append(
-            _score_bucket(
-                args,
+            (
+                indices,
+                bucket_key,
                 [samples[idx] for idx in indices],
+                rubric,
+                rubric_source,
+                rubric_call,
+                teacher_answers,
+            )
+        )
+
+    if judge_tasks:
+        limited_judge_tasks = [
+            _with_stage_limit(
+                args,
+                "judge",
+                _score_bucket,
+                args,
+                bucket_samples,
                 bucket_key=bucket_key,
                 rubric=rubric,
                 rubric_source=rubric_source,
                 rubric_call=rubric_call,
                 teacher_answers=teacher_answers,
             )
-        )
-
-    if judge_tasks:
-        for indices, bucket_results in zip(judge_task_keys, await asyncio.gather(*judge_tasks), strict=True):
+            for _indices, bucket_key, bucket_samples, rubric, rubric_source, rubric_call, teacher_answers in judge_tasks
+        ]
+        for (indices, *_), bucket_results in zip(judge_tasks, await asyncio.gather(*limited_judge_tasks), strict=True):
             for idx, result in zip(indices, bucket_results, strict=True):
                 results[idx] = result
     return [

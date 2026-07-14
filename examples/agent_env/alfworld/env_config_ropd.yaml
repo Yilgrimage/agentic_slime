@@ -31,6 +31,14 @@ reward:
   ropd:
     join_key: task_id
     allow_online_rubric: true
+    concurrency: 8
+    rubric_concurrency: 0
+    judge_concurrency: 0
+    answer_mode: full
+    reward_mode: answer_only
+    reward_group_reference: students
+    luffy_enable: false
+    luffy_mode: off
     teacher_answer_keys:
       - teacher_response
       - teacher_answer
