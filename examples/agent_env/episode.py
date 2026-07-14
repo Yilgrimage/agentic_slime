@@ -208,11 +208,11 @@ def _finish_reason(finish_type: str, assistant_message: dict[str, Any]) -> str:
     return "stop"
 
 
-def _assistant_message_text(parser_text: str, raw_response_text: str) -> str:
+def _assistant_message_text(parser_text: str, raw_response_text: str) -> tuple[str, bool]:
     content = visible_assistant_text(parser_text)
     if content:
-        return content
-    return visible_assistant_text(raw_response_text)
+        return content, False
+    return visible_assistant_text(raw_response_text), True
 
 
 @dataclass
@@ -234,6 +234,7 @@ class PolicySession:
     response_texts: list[str] = field(default_factory=list)
     context_limit_hits: int = 0
     last_sync_delta_mode: str | None = None
+    raw_assistant_text_fallbacks: int = 0
 
     def _request_sampling_params(self, body: dict[str, Any]) -> dict[str, Any]:
         params = copy.deepcopy(self.sampling_params)
@@ -384,15 +385,19 @@ class PolicySession:
             if not format_valid and not parser_text:
                 action, format_valid, parse_mode = parse_standard_tool_call(raw_response_text, self.tools, parser_name)
             if not format_valid and parse_mode == "no_standard_tool_call" and self.spec.allow_assistant_message:
-                content = _assistant_message_text(parser_text, raw_response_text)
+                content, used_raw = _assistant_message_text(parser_text, raw_response_text)
                 if content:
                     action = {"type": "assistant_message", "content": content}
                     format_valid = True
-                    parse_mode = "assistant_message"
+                    parse_mode = "assistant_message_raw_text" if used_raw else "assistant_message"
+                    self.raw_assistant_text_fallbacks += int(used_raw)
             if format_valid and isinstance(action, dict) and action.get("type") == "tool_call":
                 assistant_message = _openai_tool_call_message(action, str(action.get("content") or ""))
             else:
-                content = _assistant_message_text(parser_text, raw_response_text)
+                content, used_raw = _assistant_message_text(parser_text, raw_response_text)
+                if used_raw and format_valid and parse_mode == "assistant_message":
+                    parse_mode = "assistant_message_raw_text"
+                    self.raw_assistant_text_fallbacks += 1
                 assistant_message = {"role": "assistant", "content": content}
         else:
             content = visible_assistant_text(parser_text)
@@ -454,6 +459,9 @@ class PolicySession:
         sample_metadata["format_errors"] = self.format_errors
         sample_metadata["format_ok"] = self.format_errors == 0
         sample_metadata["action_parse_modes"] = list(self.parse_modes)
+        sample_metadata["policy_gateway_action_parse_modes"] = list(self.parse_modes)
+        if self.raw_assistant_text_fallbacks:
+            sample_metadata["policy_gateway_raw_assistant_text_fallbacks"] = self.raw_assistant_text_fallbacks
         if self.max_response_tokens_hits:
             sample_metadata["max_response_tokens_hits"] = self.max_response_tokens_hits
         if self.context_limit_hits:

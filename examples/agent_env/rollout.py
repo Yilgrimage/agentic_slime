@@ -369,6 +369,10 @@ def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, to
             "actions": sample_metadata.get("actions"),
             "turns": _json_safe(sample_metadata.get("turns")),
             "action_parse_modes": sample_metadata.get("action_parse_modes"),
+            "policy_gateway_action_parse_modes": sample_metadata.get("policy_gateway_action_parse_modes"),
+            "policy_gateway_raw_assistant_text_fallbacks": sample_metadata.get(
+                "policy_gateway_raw_assistant_text_fallbacks"
+            ),
             "dump_trace_mode": trace_mode,
             "token_audit": sample_metadata.get("token_audit"),
             "env_evaluate": sample_metadata.get("env_evaluate"),
