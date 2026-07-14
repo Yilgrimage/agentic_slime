@@ -208,6 +208,13 @@ def _finish_reason(finish_type: str, assistant_message: dict[str, Any]) -> str:
     return "stop"
 
 
+def _assistant_message_text(parser_text: str, raw_response_text: str) -> str:
+    content = visible_assistant_text(parser_text)
+    if content:
+        return content
+    return visible_assistant_text(raw_response_text)
+
+
 @dataclass
 class PolicySession:
     session_id: str
@@ -377,7 +384,7 @@ class PolicySession:
             if not format_valid and not parser_text:
                 action, format_valid, parse_mode = parse_standard_tool_call(raw_response_text, self.tools, parser_name)
             if not format_valid and parse_mode == "no_standard_tool_call" and self.spec.allow_assistant_message:
-                content = visible_assistant_text(parser_text)
+                content = _assistant_message_text(parser_text, raw_response_text)
                 if content:
                     action = {"type": "assistant_message", "content": content}
                     format_valid = True
@@ -385,7 +392,7 @@ class PolicySession:
             if format_valid and isinstance(action, dict) and action.get("type") == "tool_call":
                 assistant_message = _openai_tool_call_message(action, str(action.get("content") or ""))
             else:
-                content = visible_assistant_text(parser_text)
+                content = _assistant_message_text(parser_text, raw_response_text)
                 assistant_message = {"role": "assistant", "content": content}
         else:
             content = visible_assistant_text(parser_text)
