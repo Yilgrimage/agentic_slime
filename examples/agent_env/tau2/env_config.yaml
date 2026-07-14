@@ -14,7 +14,6 @@ observation:
   include_actions: true
 action:
   restrict_to_available: false
-  invalid_fallback: assistant_message
 reward:
   impl: legacy
   judge_mode: none

@@ -369,10 +369,6 @@ def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, to
             "actions": sample_metadata.get("actions"),
             "turns": _json_safe(sample_metadata.get("turns")),
             "action_parse_modes": sample_metadata.get("action_parse_modes"),
-            "policy_gateway_action_parse_modes": sample_metadata.get("policy_gateway_action_parse_modes"),
-            "policy_gateway_raw_assistant_text_fallbacks": sample_metadata.get(
-                "policy_gateway_raw_assistant_text_fallbacks"
-            ),
             "dump_trace_mode": trace_mode,
             "token_audit": sample_metadata.get("token_audit"),
             "env_evaluate": sample_metadata.get("env_evaluate"),
@@ -614,10 +610,8 @@ def environment_messages_from_step(
 ) -> list[dict[str, Any]]:
     updates = valid_message_updates(info.get("message_updates"))
     if updates:
-        # Env servers may return the full step delta, including the policy
-        # assistant message we already appended from raw generation tokens.
         if updates[0].get("role") == "assistant":
-            return updates[1:]
+            raise ValueError("env message_updates must contain only environment-side messages")
         return updates
     if mode == "tool_call" and isinstance(action, dict) and action.get("type") == "tool_call":
         return [tool_result_message(assistant_message, observation)]
@@ -1220,6 +1214,7 @@ def parse_text_action(response_text: str, tag: str = "action") -> tuple[Any, boo
         line = line.lstrip("-*0123456789. ").strip()
         if line:
             return line, False, "legacy"
+    # Keep text-action envs executable, but preserve the invalid parse signal.
     return "look", False, "fallback"
 
 
@@ -1239,22 +1234,42 @@ def parse_standard_tool_call(response_text: str, tools: list[dict[str, Any]], pa
         from sglang.srt.managers.io_struct import Tool as SglTool
     from sglang.srt.function_call.function_call_parser import FunctionCallParser
 
+    sgl_tools = [
+        SglTool(type=tool["type"], function=SglFunction(**tool["function"]))
+        for tool in tools
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+    ]
+    known_tool_names = {
+        str(tool.get("function", {}).get("name") or "")
+        for tool in tools
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+    }
+    known_tool_names.discard("")
+    parser = FunctionCallParser(sgl_tools, parser_name)
+
     try:
-        sgl_tools = [
-            SglTool(type=tool["type"], function=SglFunction(**tool["function"]))
-            for tool in tools
-            if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
-        ]
-        parser = FunctionCallParser(sgl_tools, parser_name)
         if not parser.has_tool_call(response_text):
             return "", False, "no_standard_tool_call"
-        normal_text, calls = parser.parse_non_stream(response_text)
     except Exception as exc:
-        logger.debug("standard tool-call parser failed", exc_info=True)
-        return "", False, f"tool_parser_error:{type(exc).__name__}"
+        logger.debug("standard tool-call intent parser failed", exc_info=True)
+        return "", False, f"tool_intent_parser_error:{type(exc).__name__}"
+
+    previous_forward_unknown = os.environ.get("SGLANG_FORWARD_UNKNOWN_TOOLS")
+    os.environ["SGLANG_FORWARD_UNKNOWN_TOOLS"] = "1"
+    try:
+        try:
+            normal_text, calls = parser.parse_non_stream(response_text)
+        except Exception as exc:
+            logger.debug("standard tool-call parser failed", exc_info=True)
+            return "", False, f"malformed_standard_tool_call:{type(exc).__name__}"
+    finally:
+        if previous_forward_unknown is None:
+            os.environ.pop("SGLANG_FORWARD_UNKNOWN_TOOLS", None)
+        else:
+            os.environ["SGLANG_FORWARD_UNKNOWN_TOOLS"] = previous_forward_unknown
 
     if not calls:
-        return "", False, "empty_standard_tool_call"
+        return "", False, "malformed_standard_tool_call_no_calls"
     call = calls[0]
     name = str(getattr(call, "name", "") or "")
     parameters = getattr(call, "parameters", {}) or {}
@@ -1264,7 +1279,15 @@ def parse_standard_tool_call(response_text: str, tools: list[dict[str, Any]], pa
     if not isinstance(parameters, dict):
         parameters = {}
     if not name:
-        return "", False, "empty_standard_tool_name"
+        return "", False, "malformed_standard_tool_call_empty_name"
+    action = {
+        "type": "tool_call",
+        "name": name,
+        "arguments": parameters,
+        "content": strip_chat_boundary_tokens(str(normal_text or "")),
+    }
+    if name not in known_tool_names:
+        return action, False, f"unknown_standard_tool_call:{name}"
     return {
         "type": "tool_call",
         "name": name,

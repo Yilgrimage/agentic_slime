@@ -208,13 +208,6 @@ def _finish_reason(finish_type: str, assistant_message: dict[str, Any]) -> str:
     return "stop"
 
 
-def _assistant_message_text(parser_text: str, raw_response_text: str) -> tuple[str, bool]:
-    content = visible_assistant_text(parser_text)
-    if content:
-        return content, False
-    return visible_assistant_text(raw_response_text), True
-
-
 @dataclass
 class PolicySession:
     session_id: str
@@ -234,7 +227,6 @@ class PolicySession:
     response_texts: list[str] = field(default_factory=list)
     context_limit_hits: int = 0
     last_sync_delta_mode: str | None = None
-    raw_assistant_text_fallbacks: int = 0
 
     def _request_sampling_params(self, body: dict[str, Any]) -> dict[str, Any]:
         params = copy.deepcopy(self.sampling_params)
@@ -376,29 +368,34 @@ class PolicySession:
         raw_response_text = response_text or decoded_raw
         text_view = parse_policy_text_view(self.args, self.spec, raw_response_text)
         parser_text = text_view.content_text
+        raw_visible_content = visible_assistant_text(raw_response_text)
         assistant_message: dict[str, Any]
         parse_mode = "assistant_message"
         format_valid = True
         if interaction_mode(self.args, self.spec) == "tool_call" and self.tools:
-            parser_name = infer_tool_call_parser_name(self.tok)
-            action, format_valid, parse_mode = parse_standard_tool_call(parser_text, self.tools, parser_name)
-            if not format_valid and not parser_text:
-                action, format_valid, parse_mode = parse_standard_tool_call(raw_response_text, self.tools, parser_name)
-            if not format_valid and parse_mode == "no_standard_tool_call" and self.spec.allow_assistant_message:
-                content, used_raw = _assistant_message_text(parser_text, raw_response_text)
-                if content:
-                    action = {"type": "assistant_message", "content": content}
-                    format_valid = True
-                    parse_mode = "assistant_message_raw_text" if used_raw else "assistant_message"
-                    self.raw_assistant_text_fallbacks += int(used_raw)
-            if format_valid and isinstance(action, dict) and action.get("type") == "tool_call":
-                assistant_message = _openai_tool_call_message(action, str(action.get("content") or ""))
+            content = visible_assistant_text(parser_text)
+            if not text_view.reasoning_ok:
+                format_valid = False
+                parse_mode = f"reasoning_parser_error:{text_view.reasoning_parser or 'unknown'}"
+                assistant_message = {"role": "assistant", "content": raw_visible_content or raw_response_text}
             else:
-                content, used_raw = _assistant_message_text(parser_text, raw_response_text)
-                if used_raw and format_valid and parse_mode == "assistant_message":
-                    parse_mode = "assistant_message_raw_text"
-                    self.raw_assistant_text_fallbacks += 1
-                assistant_message = {"role": "assistant", "content": content}
+                parser_name = infer_tool_call_parser_name(self.tok)
+                action, format_valid, parse_mode = parse_standard_tool_call(content, self.tools, parser_name)
+                if not format_valid and parse_mode == "no_standard_tool_call":
+                    if self.spec.allow_assistant_message and (content or raw_visible_content):
+                        action = {"type": "assistant_message", "content": content or raw_visible_content}
+                        format_valid = True
+                        parse_mode = "assistant_message"
+                    else:
+                        parse_mode = "empty_assistant_message"
+                if isinstance(action, dict) and action.get("type") == "tool_call":
+                    assistant_message = _openai_tool_call_message(action, str(action.get("content") or ""))
+                elif isinstance(action, dict) and action.get("type") == "assistant_message":
+                    assistant_message = {"role": "assistant", "content": str(action.get("content") or "")}
+                elif not format_valid:
+                    assistant_message = {"role": "assistant", "content": raw_visible_content or content or raw_response_text}
+                else:
+                    assistant_message = {"role": "assistant", "content": content}
         else:
             content = visible_assistant_text(parser_text)
             if not content:
@@ -459,9 +456,6 @@ class PolicySession:
         sample_metadata["format_errors"] = self.format_errors
         sample_metadata["format_ok"] = self.format_errors == 0
         sample_metadata["action_parse_modes"] = list(self.parse_modes)
-        sample_metadata["policy_gateway_action_parse_modes"] = list(self.parse_modes)
-        if self.raw_assistant_text_fallbacks:
-            sample_metadata["policy_gateway_raw_assistant_text_fallbacks"] = self.raw_assistant_text_fallbacks
         if self.max_response_tokens_hits:
             sample_metadata["max_response_tokens_hits"] = self.max_response_tokens_hits
         if self.context_limit_hits:
@@ -675,6 +669,13 @@ async def generate_server_episode_rollout(
             sample_metadata["truncated_reason"] = "context_limit_after_observation"
             sample_metadata["context_limit_token_count"] = final_messages_token_count
         session.materialize(sample, sample_metadata)
+        policy_owned_format = interaction_mode(args, spec) == "tool_call"
+        policy_format_keys = {
+            "action_parse_modes",
+            "format_checks",
+            "format_errors",
+            "format_ok",
+        }
         for key in (
             "actions",
             "action_parse_modes",
@@ -691,8 +692,10 @@ async def generate_server_episode_rollout(
             "turns",
         ):
             if key in episode_metadata:
+                if policy_owned_format and key in policy_format_keys:
+                    continue
                 sample_metadata[key] = episode_metadata[key]
-        if isinstance(sample_metadata.get("format_checks"), list):
+        if not policy_owned_format and isinstance(sample_metadata.get("format_checks"), list):
             checks = [item for item in sample_metadata["format_checks"] if isinstance(item, dict)]
             sample_metadata["format_errors"] = sum(1 for item in checks if not bool(item.get("valid", False)))
             sample_metadata["format_ok"] = sample_metadata["format_errors"] == 0

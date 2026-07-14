@@ -200,7 +200,7 @@ def _strip_model_artifacts(text: str) -> str:
 
 
 def _visible_model_text(text: str) -> str:
-    """Best-effort fallback for APIs that do not return reasoning_content."""
+    """Strip chat boundary artifacts from text visible to the user simulator."""
     return _strip_model_artifacts(str(text or ""))
 
 
@@ -1097,7 +1097,7 @@ class Tau2Backend:
             ToolMessage(id=call_id, role="tool", content=_json_text(result), requestor="assistant", error=error),
         ]
         self.messages.extend(delta)
-        return self._agent_openai_messages(delta)
+        return self._agent_openai_messages(delta[1:])
 
     def _finish(self, message: str, termination_reason: Any | None = None) -> tuple[float, dict[str, Any]]:
         from tau2.data_model.message import AssistantMessage
@@ -1152,7 +1152,10 @@ class Tau2Backend:
                     observation = f"User response:\n{user_message}"
                     info.update(user_info)
                     info["done"] = self.done
-                    info["message_updates"] = self._agent_openai_messages(self.messages[before:])
+                    updates = self._agent_openai_messages(self.messages[before:])
+                    if updates and updates[0].get("role") == "assistant":
+                        updates = updates[1:]
+                    info["message_updates"] = updates
                     if self.done and not bool(info.get("discard_sample", False)):
                         from tau2.data_model.simulation import TerminationReason
 
@@ -1220,9 +1223,6 @@ class Tau2Backend:
         prompt = str(payload.get("prompt") or "")
         metadata: dict[str, Any] = {
             "actions": [],
-            "action_parse_modes": [],
-            "format_checks": [],
-            "format_errors": 0,
             "policy_usage": [],
             "turn_count": 0,
         }
@@ -1263,8 +1263,6 @@ class Tau2Backend:
                     turn_trace.update(
                         {
                             "assistant_message": assistant_message,
-                            "format_valid": False,
-                            "parse_mode": "context_limit",
                             "finish_reason": reply.finish_reason,
                             "truncated_reason": truncated_reason,
                         }
@@ -1273,14 +1271,7 @@ class Tau2Backend:
                 break
             if finish_reason_is_length(reply):
                 metadata["max_response_tokens_hits"] = int(metadata.get("max_response_tokens_hits", 0) or 0) + 1
-            action, valid, parse_mode = extract_tool_action(assistant_message)
-            if action.get("type") == "assistant_message" and str(action.get("content") or "").strip():
-                valid = True
-                parse_mode = "assistant_message"
-            metadata["action_parse_modes"].append(parse_mode)
-            metadata["format_checks"].append({"turn": turn, "valid": bool(valid), "parse_mode": parse_mode})
-            if not valid:
-                metadata["format_errors"] = int(metadata.get("format_errors", 0) or 0) + 1
+            action, _, _ = extract_tool_action(assistant_message)
             action = choose_tool_action(
                 action,
                 self._available_tool_names(info),
@@ -1319,8 +1310,6 @@ class Tau2Backend:
                     {
                         "assistant_message": assistant_message,
                         "action": action,
-                        "format_valid": bool(valid),
-                        "parse_mode": parse_mode,
                         "finish_reason": reply.finish_reason,
                         "env_step": step,
                         "env_messages": env_messages,
@@ -1333,7 +1322,6 @@ class Tau2Backend:
                 break
 
         metadata["turn_count"] = len(metadata["actions"])
-        metadata["format_ok"] = int(metadata.get("format_errors", 0) or 0) == 0
         if include_messages:
             metadata["messages"] = policy_messages
         if truncated_reason:
