@@ -541,7 +541,18 @@ pkill -f '[r]aylet|[g]cs_server|[p]lasma_store|[d]ashboard_agent|[d]ashboard.py'
 if [ "${RESET_TRAIN_RUNTIME_ON_START}" = "force" ]; then
 pkill -f '[r]ay::' 2>/dev/null || true
 fi
+sleep 2
+if ! pgrep -u "\$(id -u)" -f '[r]aylet|[g]cs_server|[p]lasma_store|[d]ashboard_agent|[d]ashboard.py|[r]ay.scripts.scripts start' >/dev/null 2>&1; then
+  find /tmp/ray -maxdepth 1 -mindepth 1 \( -name 'session_*' -o -name 'session_latest' \) -exec rm -rf -- {} + 2>/dev/null || true
+fi
 EOF
+}
+
+cleanup_ray_tmp_after_stop() {
+  sleep 2
+  if ! pgrep -u "$(id -u)" -f '[r]aylet|[g]cs_server|[p]lasma_store|[d]ashboard_agent|[d]ashboard.py|[r]ay.scripts.scripts start' >/dev/null 2>&1; then
+    find /tmp/ray -maxdepth 1 -mindepth 1 \( -name 'session_*' -o -name 'session_latest' \) -exec rm -rf -- {} + 2>/dev/null || true
+  fi
 }
 
 reset_runtime_on_nodes() {
@@ -687,6 +698,7 @@ start_ray_head() {
   for attempt in $(seq 1 "${RAY_START_MAX_ATTEMPTS}"); do
     echo "Starting Ray head attempt ${attempt}/${RAY_START_MAX_ATTEMPTS}"
     [ "${DRY_RUN}" = "1" ] || "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force || true
+    [ "${DRY_RUN}" = "1" ] || cleanup_ray_tmp_after_stop
     tmux_start_local agent_env_ray_head "${script}" "${LOG_DIR}/ray_head.log"
     if wait_ray_head_ready; then
       return 0
@@ -703,6 +715,7 @@ start_ray_worker() {
   local node_ip
   node_ip=$(hostname -I | tr ' ' '\n' | grep -m1 .)
   [ "${DRY_RUN}" = "1" ] || "${SLIME_PYTHON}" -m ray.scripts.scripts stop --force || true
+  [ "${DRY_RUN}" = "1" ] || cleanup_ray_tmp_after_stop
   local script
   script=$(ray_start_script worker "${node_ip}" "${head_addr}")
   tmux_start_local agent_env_ray_worker "${script}" "$(role_log_path "ray_worker.log")"

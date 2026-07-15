@@ -277,7 +277,6 @@ LOG_DIR=${LOG_DIR:-${RUN_ROOT}/logs}
 WANDB_DIR=${WANDB_DIR:-${RUN_ROOT}/wandb}
 RUN_USER=${USER:-$(id -un 2>/dev/null || echo unknown)}
 export USER=${USER:-${RUN_USER}}
-RAY_TEMP_DIR=${RAY_TEMP_DIR:-${LOCAL_RUNTIME_DIR}/ray/${ENV_NAME}_${RUN_USER}}
 DATA_DIR=${DATA_DIR:-${LOCAL_RUNTIME_DIR}/data/${ENV_NAME}}
 PROMPT_NUM_TASKS=${PROMPT_NUM_TASKS:-}
 DATA_PATH=${DATA_PATH:-}
@@ -354,7 +353,7 @@ export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-${LOCAL_RUNTIME_DIR}/cache/t
 export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-${LOCAL_RUNTIME_DIR}/cache/triton}
 export CUDA_CACHE_PATH=${CUDA_CACHE_PATH:-${LOCAL_RUNTIME_DIR}/cache/cuda}
 
-mkdir -p "${LOCAL_RUNTIME_DIR}/logs" "${DATA_DIR}" "${SAVE_DIR}" "${LOG_DIR}" "${WANDB_DIR}" "${RAY_TEMP_DIR}" "${TMPDIR}" \
+mkdir -p "${LOCAL_RUNTIME_DIR}/logs" "${DATA_DIR}" "${SAVE_DIR}" "${LOG_DIR}" "${WANDB_DIR}" "${TMPDIR}" \
   "${XDG_CACHE_HOME}" "${HF_HOME}" "${TRANSFORMERS_CACHE}" "${TORCH_EXTENSIONS_DIR}" "${TRITON_CACHE_DIR}" "${CUDA_CACHE_PATH}"
 
 if [ -z "${PROMPT_NUM_TASKS}" ] && [ "${PROMPT_USE_SERVER_NUM_TASKS}" = "1" ]; then
@@ -690,7 +689,6 @@ MISC_ARGS=(
    --num-steps "${NUM_STEPS:-100}"
    --log-interval 1
    --seed "${SEED:-42}"
-   --ray-temp-dir "${RAY_TEMP_DIR}"
    --actor-num-nodes "${ACTOR_NUM_NODES:-2}"
    --actor-num-gpus-per-node "${ACTOR_GPUS:-4}"
    --rollout-num-gpus "${ROLLOUT_GPUS:-8}"

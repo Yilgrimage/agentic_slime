@@ -500,7 +500,8 @@ class PolicyGatewayHandler(BaseHTTPRequestHandler):
             _json_response(self, 500, {"ok": False, "error": _format_error(exc)})
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        logger.info("%s - %s", self.address_string(), fmt % args)
+        if os.environ.get("AGENT_ENV_POLICY_GATEWAY_ACCESS_LOG", "0") in {"1", "true", "TRUE", "yes", "YES", "on", "ON"}:
+            logger.info("%s - %s", self.address_string(), fmt % args)
 
 
 class PolicyGateway:
