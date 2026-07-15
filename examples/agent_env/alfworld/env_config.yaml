@@ -24,29 +24,6 @@ action:
   restrict_to_available: false
   invalid_fallback: model
 
-reward:
-  impl: legacy
-  judge_mode: none
-  source: won
-  outcome: 10.0
-  format:
-    valid: 0.0
-    invalid: -0.1
-  ropd:
-    join_key: task_id
-    allow_online_rubric: true
-    concurrency: 8
-    rubric_concurrency: 0
-    judge_concurrency: 0
-    teacher_answer_keys:
-      - teacher_response
-      - teacher_answer
-      - teacher_final_answer
-    rubric_keys:
-      - ropd_rubric
-      - reward_rubric
-      - rubric
-
 alfworld:
   config_path: null
   data_dir: ${AGENT_ENV_DATA_DIR}

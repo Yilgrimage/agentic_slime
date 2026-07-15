@@ -5,8 +5,8 @@ agent-env backend. Keep it thin and auditable.
 
 ## Ownership
 
-- `runs/*.env`: selects env, env config, model profile, train profile, topology
-  profile, optional aux profile, and experiment naming.
+- `runs/*.env`: selects env, env config, reward profile, model profile, train
+  profile, topology profile, optional aux profile, and experiment naming.
 - `models/*.env`: model identity, model args, loss-mask family, dropout
   defaults, and model compatibility defaults.
 - `train/*.env`: env-specific training baseline, algorithm, sync/full-async
@@ -14,24 +14,26 @@ agent-env backend. Keep it thin and auditable.
   filtering, and Slime training flags.
 - `topology/*.env`: node indexes, visible GPUs, and ports only.
 - `aux/*.env`: optional auxiliary inference endpoint only.
+- `rewards/*.yaml`: reward composition, env score scale, format/truncation
+  penalties, LLM-as-judge method selection, and method-specific settings such
+  as ROPD rubric/verifier behavior.
 
 Environment semantics belong in `examples/agent_env/<env>/env_config.yaml`.
-Reward implementation and task-specific reward data also belong under the
-selected env config's `reward:` section. Use `reward.impl` and
-`reward.judge_mode` for the active RM path, and keep ROPD teacher/rubric files
-or Valleydance process-reward weights out of generic train profiles. ROPD
-reward concurrency is configured under `reward.ropd.concurrency`; optional
-`reward.ropd.rubric_concurrency` and `reward.ropd.judge_concurrency` override
-per-stage limits, with `0` meaning "follow the global ROPD concurrency".
+Reward semantics belong in the selected `REWARD_PROFILE`. Use `impl` and
+`judge_mode` for the active RM path, and keep ROPD teacher/rubric files or
+Valleydance process-reward weights out of generic train profiles. ROPD reward
+concurrency is configured under `ropd.concurrency`; optional
+`ropd.rubric_concurrency` and `ropd.judge_concurrency` override per-stage
+limits, with `0` meaning "follow the global ROPD concurrency".
 ROPD training semantics such as `answer_mode`, `reward_mode`,
-`reward_group_reference`, and `luffy_*` also belong under `reward.ropd.*`.
+`reward_group_reference`, and `luffy_*` also belong under `ropd.*`.
 The verifier always scores teacher and student answers anonymously in the same
 batch; `reward_group_reference` only controls whether teacher scores enter the
 group baseline. The default V0 path is answer-only LLM rubric/judge reward;
 teacher-anchored baselines are explicit opt-in knobs.
-Durable reward variants should select a dedicated env config, such as
-`examples/agent_env/alfworld/env_config_ropd.yaml`, instead of overriding
-`AGENT_ENV_RM_IMPL` or `AGENT_ENV_JUDGE_MODE` from a run profile.
+Durable reward variants should select a dedicated reward profile, such as
+`configs/agent_env/rewards/alfworld_ropd_seed.yaml`, instead of copying a full
+env config or exporting semantic reward environment variables.
 
 ## Rules
 

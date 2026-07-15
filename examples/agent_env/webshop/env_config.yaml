@@ -22,15 +22,6 @@ action:
   restrict_to_available: false
   invalid_fallback: model
 
-reward:
-  impl: legacy
-  judge_mode: none
-  source: score
-  outcome: 10.0
-  format:
-    valid: 0.0
-    invalid: -0.1
-
 webshop:
   env_id: WebAgentTextEnv-v0
   observation_mode: text

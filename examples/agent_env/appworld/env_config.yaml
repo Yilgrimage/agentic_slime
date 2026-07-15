@@ -24,15 +24,6 @@ observation:
 action:
   legacy_text_as_code: false
 
-reward:
-  impl: legacy
-  judge_mode: none
-  source: score
-  outcome: 10.0
-  format:
-    valid: 0.0
-    invalid: -0.1
-
 env_server:
   pool_size: 48
   prewarm_splits: ["train"]

@@ -12,7 +12,6 @@ from typing import Any
 from slime.utils.types import Sample
 
 from .config import resolve_path, reward_cfg_path
-from . import naive
 from .extractors import (
     bool_value,
     float_value,
@@ -192,27 +191,16 @@ def _cfg(args: Any, name: str, default: Any = None) -> Any:
     return reward_cfg_path(args, f"ropd.{name}", default)
 
 
-def _env_cfg(args: Any, env_name: str, cfg_name: str, default: Any = None) -> Any:
-    value = runtime_env(args, env_name, "").strip()
-    if value != "":
-        return value
-    return _cfg(args, cfg_name, default)
+def _cfg_bool(args: Any, cfg_name: str, default: bool) -> bool:
+    return bool_value(_cfg(args, cfg_name, default), default)
 
 
-def _cfg_bool(args: Any, env_name: str, cfg_name: str, default: bool) -> bool:
-    return bool_value(_env_cfg(args, env_name, cfg_name, default), default)
+def _cfg_int(args: Any, cfg_name: str, default: int) -> int:
+    return int_value(_cfg(args, cfg_name, default), default)
 
 
-def _cfg_float(args: Any, env_name: str, cfg_name: str, default: float) -> float:
-    return float_value(_env_cfg(args, env_name, cfg_name, default), default)
-
-
-def _cfg_int(args: Any, env_name: str, cfg_name: str, default: int) -> int:
-    return int_value(_env_cfg(args, env_name, cfg_name, default), default)
-
-
-def _cfg_choice(args: Any, env_name: str, cfg_name: str, default: str, choices: set[str]) -> str:
-    value = str(_env_cfg(args, env_name, cfg_name, default) or default).strip().lower()
+def _cfg_choice(args: Any, cfg_name: str, default: str, choices: set[str]) -> str:
+    value = str(_cfg(args, cfg_name, default) or default).strip().lower()
     return value if value in choices else default
 
 
@@ -306,28 +294,14 @@ def _positive_int(value: Any, default: int) -> int:
 
 
 def _base_concurrency(args: Any) -> int:
-    raw = runtime_env(args, "AGENT_ENV_ROPD_CONCURRENCY", "").strip()
-    if raw == "":
-        raw = runtime_env(args, "AGENT_ENV_REWARD_CONCURRENCY", "").strip()
-    if raw == "":
-        raw = _cfg(args, "concurrency", reward_cfg_path(args, "concurrency", 8))
+    raw = _cfg(args, "concurrency", reward_cfg_path(args, "concurrency", 8))
     return _positive_int(raw, 8)
 
 
 def _stage_concurrency(args: Any, stage: str) -> int:
     base = _base_concurrency(args)
     stage = stage.lower()
-    env_keys = {
-        "rubric": ("AGENT_ENV_ROPD_RUBRIC_CONCURRENCY",),
-        "judge": ("AGENT_ENV_ROPD_JUDGE_CONCURRENCY",),
-    }.get(stage, ())
-    raw: Any = ""
-    for key in env_keys:
-        raw = runtime_env(args, key, "").strip()
-        if raw != "":
-            break
-    if raw == "":
-        raw = _cfg(args, f"{stage}_concurrency", 0)
+    raw = _cfg(args, f"{stage}_concurrency", 0)
     return _positive_int(raw, base)
 
 
@@ -483,7 +457,7 @@ def _combine_final_and_trace(prediction: str, trace: str, *, trace_label: str) -
 
 
 def _answer_mode(args: Any) -> str:
-    return str(_env_cfg(args, "AGENT_ENV_ROPD_ANSWER_MODE", "answer_mode", "full") or "full").strip().lower()
+    return str(_cfg(args, "answer_mode", "full") or "full").strip().lower()
 
 
 def _answer_for_judge(args: Any, sample: Sample) -> str:
@@ -635,9 +609,9 @@ def _render_template(template: str, replacements: dict[str, str]) -> str:
 
 
 def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: tuple[str, ...]) -> str:
-    question_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_QUESTION_MAX_CHARS", "question_max_chars", 8000)
-    student_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_STUDENT_RUBRIC_MAX_CHARS", "student_rubric_max_chars", 6000)
-    reference_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_REFERENCE_MAX_CHARS", "reference_max_chars", 0)
+    question_max_chars = _cfg_int(args, "question_max_chars", 8000)
+    student_max_chars = _cfg_int(args, "student_rubric_max_chars", 6000)
+    reference_max_chars = _cfg_int(args, "reference_max_chars", 0)
     return _render_template(
         RUBRICATOR_PROMPT_TEMPLATE,
         {
@@ -664,8 +638,8 @@ def _build_verifier_prompt(
     rubric: dict[str, Any],
     answers: tuple[str, ...],
 ) -> str:
-    question_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_QUESTION_MAX_CHARS", "question_max_chars", 8000)
-    answer_max_chars = _cfg_int(args, "AGENT_ENV_ROPD_VERIFIER_ANSWER_MAX_CHARS", "verifier_answer_max_chars", 6000)
+    question_max_chars = _cfg_int(args, "question_max_chars", 8000)
+    answer_max_chars = _cfg_int(args, "verifier_answer_max_chars", 6000)
     return _render_template(
         VERIFIER_PROMPT_TEMPLATE,
         {
@@ -767,9 +741,7 @@ def _existing_rubric(args: Any, sample: Sample) -> Any:
 
 
 def _weight(args: Any) -> float:
-    raw = runtime_env(args, "AGENT_ENV_ROPD_TASK_SUCCESS_WEIGHT", "")
-    if raw == "":
-        raw = _cfg(args, "task_success_weight", reward_cfg_path(args, "outcome", 10.0))
+    raw = _cfg(args, "task_success_weight", reward_cfg_path(args, "outcome", 10.0))
     return float_value(raw, 10.0)
 
 
@@ -799,18 +771,17 @@ def _score_list_stats(values: list[float]) -> dict[str, Any]:
 
 
 def _luffy_mode(args: Any) -> str:
-    return _cfg_choice(args, "AGENT_ENV_ROPD_LUFFY_MODE", "luffy_mode", "off", {"off", "reward_anchor", "token_loss"})
+    return _cfg_choice(args, "luffy_mode", "off", {"off", "reward_anchor", "token_loss"})
 
 
 def _luffy_enabled(args: Any) -> bool:
-    return _cfg_bool(args, "AGENT_ENV_ROPD_LUFFY_ENABLE", "luffy_enable", False)
+    return _cfg_bool(args, "luffy_enable", False)
 
 
 def _reward_group_reference(args: Any) -> str:
     default_reference = "teacher_plus_students" if _luffy_enabled(args) and _luffy_mode(args) == "reward_anchor" else "students"
     return _cfg_choice(
         args,
-        "AGENT_ENV_ROPD_REWARD_GROUP_REFERENCE",
         "reward_group_reference",
         default_reference,
         {"students", "teacher_plus_students"},
@@ -820,7 +791,6 @@ def _reward_group_reference(args: Any) -> str:
 def _reward_mode(args: Any) -> str:
     return _cfg_choice(
         args,
-        "AGENT_ENV_ROPD_REWARD_MODE",
         "reward_mode",
         "answer_only",
         {"answer_only", "group_centered", "group_zscore"},
@@ -830,7 +800,7 @@ def _reward_mode(args: Any) -> str:
 def _validate_reward_config(args: Any) -> None:
     if _luffy_enabled(args) and _luffy_mode(args) == "token_loss":
         raise RuntimeError(
-            "AGENT_ENV_ROPD_LUFFY_MODE=token_loss requires actor-side off-policy teacher-token loss integration. "
+            "ropd.luffy_mode=token_loss requires actor-side off-policy teacher-token loss integration. "
             "The agentic Slime ROPD reward module can only provide scalar rewards."
         )
 
@@ -884,10 +854,7 @@ async def _rubric_for_bucket(
     if existing_rubric is not None:
         return existing_rubric, "teacher", None, teacher_answers
 
-    allow_online_raw = runtime_env(args, "AGENT_ENV_ROPD_ALLOW_ONLINE_RUBRIC", "")
-    if allow_online_raw == "":
-        allow_online_raw = _cfg(args, "allow_online_rubric", False)
-    allow_online = str(allow_online_raw).strip().lower() in {"1", "true", "yes", "on"}
+    allow_online = bool_value(_cfg(args, "allow_online_rubric", False), False)
     if not allow_online or judge_mode(args) != "aux":
         return None, "missing", None, teacher_answers
 
@@ -1166,10 +1133,7 @@ async def _score_bucket(
 
 async def score(args: Any, samples: list[Sample], *, single: bool = False) -> list[RewardResult]:
     if judge_mode(args) != "aux":
-        fallback_results = await naive.score(args, samples, single=single)
-        for result in fallback_results:
-            result.reward_version = "ropd_v1_fallback_naive"
-        return fallback_results
+        raise RuntimeError("reward.impl=ropd requires reward.judge_mode=aux")
     _validate_reward_config(args)
 
     buckets: dict[str, list[int]] = {}

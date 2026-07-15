@@ -14,15 +14,6 @@ observation:
   include_actions: true
 action:
   restrict_to_available: false
-reward:
-  impl: legacy
-  judge_mode: none
-  source: score
-  outcome: 10.0
-  truncated: -1.0
-  format:
-    valid: 0.0
-    invalid: -0.1
 env_server:
   pool_size: 128
   acquire_timeout_s: 600

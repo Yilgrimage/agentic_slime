@@ -12,7 +12,7 @@ Directory layout:
 - `rollout.py`: WebShop prompt/action/success spec for the server-episode adapter.
 - `server.py`: WebShop backend for the shared process-pool lease server.
 - `prompt_data.py`: WebShop prompt metadata generation.
-- `env_config.yaml`: WebShop data, reward, interaction, and env server config.
+- `env_config.yaml`: WebShop data, interaction, and env server config.
 
 Expected packs:
 

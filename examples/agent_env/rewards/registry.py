@@ -6,33 +6,17 @@ from slime.utils.types import Sample
 
 from . import legacy, naive, ropd
 from .config import reward_cfg_path
-from .extractors import record_reward_result, runtime_env
+from .extractors import record_reward_result
 from .types import RewardResult
 
 RewardFn = Callable[[Any, list[Sample]], Awaitable[list[RewardResult]]]
 
 
 def impl_name(args: Any) -> str:
-    name = runtime_env(args, "AGENT_ENV_RM_IMPL", "").strip().lower()
-    if not name:
-        name = runtime_env(args, "AGENT_ENV_REWARD_IMPL", "").strip().lower()
-    if not name:
-        name = str(
-            reward_cfg_path(args, "impl", "")
-            or reward_cfg_path(args, "rm_impl", "")
-            or reward_cfg_path(args, "type", "")
-        ).strip().lower()
+    name = str(reward_cfg_path(args, "impl", "")).strip().lower()
     if not name:
         return "legacy"
-    aliases = {
-        "none": "legacy",
-        "aux": "legacy",
-        "legacy_aux": "legacy",
-        "generic": "legacy",
-        "naive_judge": "naive",
-        "ropd_like": "ropd",
-    }
-    return aliases.get(name, name)
+    return name
 
 
 async def score(args: Any, samples: Sample | list[Sample], **_: Any) -> float | list[float]:
@@ -48,7 +32,7 @@ async def score(args: Any, samples: Sample | list[Sample], **_: Any) -> float | 
         "ropd": ropd.score,
     }.get(name)
     if impl is None:
-        raise ValueError("AGENT_ENV_RM_IMPL must be one of: legacy, naive, ropd")
+        raise ValueError("reward.impl must be one of: legacy, naive, ropd")
 
     results = await impl(args, sample_list, single=single)
     if len(results) != len(sample_list):

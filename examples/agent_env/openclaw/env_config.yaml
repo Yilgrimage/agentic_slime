@@ -20,16 +20,6 @@ action:
   restrict_to_available: false
   invalid_fallback: assistant_message
 
-reward:
-  impl: legacy
-  judge_mode: none
-  source: score
-  outcome: 10.0
-  truncated: -1.0
-  format:
-    valid: 0.0
-    invalid: -0.1
-
 env_server:
   pool_size: 2
   acquire_timeout_s: 600

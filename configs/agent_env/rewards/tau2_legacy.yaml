@@ -1,0 +1,8 @@
+impl: legacy
+judge_mode: none
+source: score
+outcome: 10.0
+truncated: -1.0
+format:
+  valid: 0.0
+  invalid: -0.1

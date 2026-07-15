@@ -191,6 +191,9 @@ PY
 configure_env_defaults
 CUSTOM_GENERATE_FUNCTION_PATH=${CUSTOM_GENERATE_FUNCTION_PATH:?Set CUSTOM_GENERATE_FUNCTION_PATH}
 CUSTOM_CONFIG_PATH=${CUSTOM_CONFIG_PATH:?Set CUSTOM_CONFIG_PATH}
+REWARD_PROFILE=${REWARD_PROFILE:?Set REWARD_PROFILE in resolved train profile}
+REWARD_PROFILE=$(resolve_repo_path "${REWARD_PROFILE}")
+[ -f "${REWARD_PROFILE}" ] || { echo "Missing reward profile: ${REWARD_PROFILE}" >&2; exit 1; }
 export DYNAMIC_SAMPLING_FILTER_PATH=${DYNAMIC_SAMPLING_FILTER_PATH:-}
 
 is_async_entrypoint() {
@@ -234,6 +237,7 @@ export WANDB_INIT_TIMEOUT=${WANDB_INIT_TIMEOUT:-300}
 export NUM_STEPS=${NUM_STEPS:-${TOTAL_NUM_STEPS:-100}}
 export NUM_ROLLOUT=${NUM_ROLLOUT:-${TOTAL_NUM_STEPS:-${NUM_STEPS}}}
 export SAVE_INTERVAL=${SAVE_INTERVAL:-${TOTAL_NUM_STEPS:-${NUM_STEPS}}}
+GROUP_RM=1
 if [ "${NUM_ROLLOUT}" = "0" ] && [ -n "${EVAL_INTERVAL:-}" ] && [ -z "${LR_DECAY_ITERS:-}" ]; then
   # Eval-only still initializes the Megatron actor so dist checkpoints can be
   # loaded and synced into rollout engines. Megatron's scheduler requires a
@@ -243,19 +247,13 @@ fi
 if [ "${NUM_ROLLOUT}" = "0" ] && [ -n "${EVAL_INTERVAL:-}" ]; then
   # Slime's eval rollout path asserts that group RM is disabled. Eval metrics
   # come from the env rollout result, not from training-time group RM.
-  export GROUP_RM=0
+  GROUP_RM=0
 fi
 export AGENT_ENV_ROLLOUT_DUMP_N=${AGENT_ENV_ROLLOUT_DUMP_N:-${ROLLOUT_CASE_DUMP_N:-0}}
 export AGENT_ENV_ROLLOUT_DUMP_DISCARD_N=${AGENT_ENV_ROLLOUT_DUMP_DISCARD_N:-${ROLLOUT_CASE_DUMP_DISCARD_N:-${AGENT_ENV_ROLLOUT_DUMP_N}}}
 export AGENT_ENV_ROLLOUT_DUMP_FORMAT_N=${AGENT_ENV_ROLLOUT_DUMP_FORMAT_N:-${ROLLOUT_CASE_DUMP_FORMAT_N:-0}}
 export AGENT_ENV_ROLLOUT_DUMP_TRACE=${AGENT_ENV_ROLLOUT_DUMP_TRACE:-${ROLLOUT_CASE_DUMP_TRACE:-both}}
-export CUSTOM_RM_PATH=${CUSTOM_RM_PATH:-examples.agent_env.group_rm.group_reward}
-export GROUP_RM=${GROUP_RM:-1}
-export RM_TYPE=${RM_TYPE:-}
-export RM_URL=${RM_URL:-}
-export REWARD_KEY=${REWARD_KEY:-}
-export EVAL_REWARD_KEY=${EVAL_REWARD_KEY:-}
-export LOG_REWARD_CATEGORY=${LOG_REWARD_CATEGORY:-}
+CUSTOM_RM_PATH=examples.agent_env.group_rm.group_reward
 
 ENV_ROUTER_URL=${ENV_ROUTER_URL_ARG}
 if [ -z "${ENV_ROUTER_URL}" ]; then
@@ -498,10 +496,11 @@ ROLLOUT_ARGS=(
    --env-server-url "${ENV_ROUTER_URL}"
    --rollout-function-path "${ROLLOUT_FUNCTION_PATH}"
    --custom-generate-function-path "${CUSTOM_GENERATE_FUNCTION_PATH}"
-   --custom-reward-post-process-path "${CUSTOM_REWARD_POST_PROCESS_PATH:-examples.agent_env.reward_post_process.post_process_rewards}"
+   --custom-reward-post-process-path examples.agent_env.reward_post_process.post_process_rewards
    --custom-rollout-log-function-path "${CUSTOM_GENERATE_FUNCTION_PATH%.*}.log_rollout_data"
    --custom-eval-rollout-log-function-path "${CUSTOM_GENERATE_FUNCTION_PATH%.*}.log_eval_rollout_data"
    --custom-config-path "${CUSTOM_CONFIG_PATH}"
+   --agent-env-reward-profile "${REWARD_PROFILE}"
    --prompt-data "${DATA_PATH}"
    --input-key prompt
    --metadata-key metadata
@@ -530,34 +529,10 @@ fi
 if [ -n "${ROLLOUT_SAMPLE_FILTER_PATH:-}" ]; then
   ROLLOUT_ARGS+=(--rollout-sample-filter-path "${ROLLOUT_SAMPLE_FILTER_PATH}")
 fi
-case "${GROUP_RM:-0}" in
-  1|true|TRUE|yes|YES|on|ON)
-    ROLLOUT_ARGS+=(--group-rm)
-    if [ -n "${CUSTOM_RM_PATH:-}" ]; then
-      ROLLOUT_ARGS+=(--custom-rm-path "${CUSTOM_RM_PATH}")
-    fi
-    ;;
-  *)
-    if [ -n "${CUSTOM_RM_PATH:-}" ]; then
-      ROLLOUT_ARGS+=(--custom-rm-path "${CUSTOM_RM_PATH}")
-    fi
-    ;;
-esac
-if [ -n "${RM_TYPE:-}" ]; then
-  ROLLOUT_ARGS+=(--rm-type "${RM_TYPE}")
+if [ "${GROUP_RM}" = "1" ]; then
+  ROLLOUT_ARGS+=(--group-rm)
 fi
-if [ -n "${RM_URL:-}" ]; then
-  ROLLOUT_ARGS+=(--rm-url "${RM_URL}")
-fi
-if [ -n "${REWARD_KEY:-}" ]; then
-  ROLLOUT_ARGS+=(--reward-key "${REWARD_KEY}")
-fi
-if [ -n "${EVAL_REWARD_KEY:-}" ]; then
-  ROLLOUT_ARGS+=(--eval-reward-key "${EVAL_REWARD_KEY}")
-fi
-if [ -n "${LOG_REWARD_CATEGORY:-}" ]; then
-  ROLLOUT_ARGS+=(--log-reward-category "${LOG_REWARD_CATEGORY}")
-fi
+ROLLOUT_ARGS+=(--custom-rm-path "${CUSTOM_RM_PATH}")
 
 EVAL_ARGS=()
 if [ -n "${EVAL_CONFIG:-}" ]; then
@@ -735,17 +710,7 @@ keys = [
     "AGENT_ENV_MAX_CHECKPOINTS",
     "AGENT_ENV_ASYNC_MAX_INFLIGHT_GROUPS",
     "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "AGENT_ENV_GLM_PADDING_MAX_SEEN_GROUPS",
-    "AGENT_ENV_JUDGE_MODE", "AGENT_ENV_RM_IMPL", "AGENT_ENV_REWARD_IMPL",
-    "AGENT_ENV_REWARD_CONCURRENCY", "AGENT_ENV_ROPD_CONCURRENCY",
-    "AGENT_ENV_ROPD_RUBRIC_CONCURRENCY", "AGENT_ENV_ROPD_JUDGE_CONCURRENCY",
-    "AGENT_ENV_ROPD_ALLOW_ONLINE_RUBRIC",
-    "AGENT_ENV_ROPD_ANSWER_MODE", "AGENT_ENV_ROPD_REWARD_MODE",
-    "AGENT_ENV_ROPD_REWARD_GROUP_REFERENCE",
-    "AGENT_ENV_ROPD_LUFFY_ENABLE", "AGENT_ENV_ROPD_LUFFY_MODE",
     "AGENT_ENV_ROPD_DUMP_N", "AGENT_ENV_ROPD_DUMP_DIR",
-    "AGENT_ENV_ROPD_TASK_SUCCESS_WEIGHT",
-    "AGENT_ENV_ROPD_QUESTION_MAX_CHARS", "AGENT_ENV_ROPD_REFERENCE_MAX_CHARS",
-    "AGENT_ENV_ROPD_STUDENT_RUBRIC_MAX_CHARS", "AGENT_ENV_ROPD_VERIFIER_ANSWER_MAX_CHARS",
     "SAVE_DEBUG_TRAIN_DATA",
     "AUX_ENDPOINT_PROVIDER", "AUX_ENDPOINT_MODEL", "AUX_ENDPOINT_BASE_URL", "AUX_ENDPOINT_API_KEY_PATH",
     "AUX_ENDPOINT_TIMEOUT_S", "AUX_ENDPOINT_MAX_TOKENS", "AUX_ENDPOINT_TEMPERATURE", "AUX_ENDPOINT_TOP_P",

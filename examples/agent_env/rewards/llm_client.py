@@ -16,15 +16,13 @@ DEFAULT_SYSTEM_PROMPT = (
 
 
 def judge_mode(args: Any) -> str:
-    mode = runtime_env(args, "AGENT_ENV_JUDGE_MODE", "").strip().lower()
-    if not mode:
-        mode = str(
-            reward_cfg_path(args, "judge_mode", "")
-            or reward_cfg_path(args, "judge.mode", "")
-            or "none"
-        ).strip().lower()
+    mode = str(
+        reward_cfg_path(args, "judge_mode", "")
+        or reward_cfg_path(args, "judge.mode", "")
+        or "none"
+    ).strip().lower()
     if mode not in {"none", "aux"}:
-        raise ValueError("AGENT_ENV_JUDGE_MODE must be one of: none, aux")
+        raise ValueError("reward.judge_mode must be one of: none, aux")
     return mode
 
 
@@ -134,7 +132,7 @@ async def call_json_judge_with_metadata(
     base_url = (base_url or runtime_env(args, "AUX_ENDPOINT_BASE_URL", "")).strip()
     model = (model or runtime_env(args, "AUX_ENDPOINT_MODEL", "")).strip()
     if not base_url or not model:
-        raise RuntimeError("AGENT_ENV_JUDGE_MODE=aux requires AUX_ENDPOINT_BASE_URL and AUX_ENDPOINT_MODEL")
+        raise RuntimeError("reward.judge_mode=aux requires AUX_ENDPOINT_BASE_URL and AUX_ENDPOINT_MODEL")
 
     api_key = (api_key or runtime_env(args, "AUX_ENDPOINT_API_KEY", "")).strip()
     api_key_path = (api_key_path or runtime_env(args, "AUX_ENDPOINT_API_KEY_PATH", "")).strip()

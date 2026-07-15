@@ -42,8 +42,8 @@ Important hooks:
 ## Config Ownership
 
 - `configs/agent_env/runs/*.env`: thin launch manifests. Select env, env config,
-  model profile, train profile, topology profile, optional aux profile, and
-  experiment naming.
+  reward profile, model profile, train profile, topology profile, optional aux
+  profile, and experiment naming.
 - `configs/agent_env/models/*.env`: model identity, model args, loss-mask
   family, dropout defaults, and model compatibility defaults.
 - `configs/agent_env/train/*.env`: env-specific training baseline, algorithm,
@@ -52,8 +52,10 @@ Important hooks:
 - `configs/agent_env/topology/*.env`: node indexes, visible GPUs, and ports.
   Keep algorithm, batch, model, and reward settings out of topology files.
 - `configs/agent_env/aux/*.env`: optional auxiliary inference endpoint.
+- `configs/agent_env/rewards/*.yaml`: reward composition, env-score scale,
+  format/truncation penalties, LLM-as-judge mode, and method-specific settings.
 - `examples/agent_env/<env>/env_config.yaml`: environment semantics, parser
-  settings, data/task settings, reward fields, and env-server settings.
+  settings, data/task settings, and env-server settings.
 
 Prefer changing the existing owner of a parameter over adding a wrapper,
 override layer, copied config, or one-off profile. If a new key matters for an

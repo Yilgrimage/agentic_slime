@@ -40,9 +40,9 @@ tokenizer state, rollout logprobs, loss masks, or Slime `Sample` construction.
 Those stay in Slime-side rollout code so training tokens and masks follow the
 same contract as the rest of Slime.
 
-The shared rollout layer should not know task data layout or environment reward
-semantics. Keep those in `<env>/env_config.yaml` and the env server/rollout
-adapter for that environment.
+The shared rollout layer should not know task data layout or reward semantics.
+Keep task/env semantics in `<env>/env_config.yaml`, and keep reward composition
+in the selected `configs/agent_env/rewards/*.yaml` profile.
 
 ## Boundaries
 

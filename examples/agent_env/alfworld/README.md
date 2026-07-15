@@ -180,8 +180,8 @@ PYTHONPATH=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}/data/alfworld/pythonlib
   token sequence returned by rollout. The current action is parsed from that
   generated turn, but invalid-format turns are not shortened or rewritten before
   being appended to context.
-- The default reward scale is `reward.outcome: 10.0` for success and
-  `reward.format.invalid: -0.1` for malformed action output.
+- The default reward scale lives in `configs/agent_env/rewards/alfworld_legacy.yaml`:
+  `outcome: 10.0` for success and `format.invalid: -0.1` for malformed action output.
 - Per-rollout metadata is intentionally small: `actions`, `turn_count`,
   `format_ok`, `format_errors`, `env_score`, `env_success`, `env_reward`, and an
   `alfworld` block for task/server identifiers.

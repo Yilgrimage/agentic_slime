@@ -2,28 +2,15 @@ from __future__ import annotations
 
 import os
 import re
-from copy import deepcopy
-from functools import lru_cache
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
-
-import yaml
 
 from examples.agent_env.rollout import cfg_path
 
 
 def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    output = deepcopy(base)
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(output.get(key), dict):
-            output[key] = _deep_merge(output[key], value)
-        else:
-            output[key] = deepcopy(value)
-    return output
+    return dict(value) if isinstance(value, Mapping) else {}
 
 
 def _runtime_vars(args: Any) -> dict[str, str]:
@@ -60,24 +47,12 @@ def resolve_path(args: Any, value: Any) -> Path:
     return Path.cwd() / path
 
 
-@lru_cache(maxsize=32)
-def _load_yaml(path_text: str) -> dict[str, Any]:
-    path = Path(path_text)
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"Reward config must be a mapping: {path}")
-    return raw
-
-
 def reward_config(args: Any) -> dict[str, Any]:
-    inline = _mapping(cfg_path(args, "reward", {}))
-    config_file = inline.get("config_file") or inline.get("profile")
-    if not config_file:
-        return inline
-
-    external = _load_yaml(str(resolve_path(args, config_file)))
-    inline_override = {key: value for key, value in inline.items() if key not in {"config_file", "profile"}}
-    return _deep_merge(external, inline_override)
+    config = _mapping(cfg_path(args, "reward", {}))
+    nested_profile = config.get("config_file") or config.get("profile")
+    if nested_profile:
+        raise ValueError("Nested reward config_file/profile is not supported; select REWARD_PROFILE in the run profile")
+    return config
 
 
 def reward_cfg_path(args: Any, path: str, default: Any = None) -> Any:

@@ -11,8 +11,11 @@ import logging
 import os
 import re
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
+import yaml
 from slime.backends.megatron_utils import arguments as megatron_arguments
 from slime.utils.arguments import parse_args
 
@@ -244,7 +247,63 @@ def add_agent_env_arguments(parser):
         default=None,
         help="Agent-env router URL consumed by custom rollout functions.",
     )
+    parser.add_argument(
+        "--agent-env-reward-profile",
+        type=str,
+        default=None,
+        help="YAML reward profile installed as args.reward after custom env config loading.",
+    )
     return parser
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _resolve_profile_path(args: Any, profile: str) -> Path:
+    path = Path(os.path.expandvars(profile)).expanduser()
+    if path.is_absolute():
+        return path
+
+    repo_dir = os.environ.get("REPO_DIR")
+    if repo_dir:
+        candidate = Path(repo_dir) / path
+        if candidate.exists():
+            return candidate
+
+    custom_config_path = str(getattr(args, "custom_config_path", "") or "").strip()
+    if custom_config_path:
+        candidate = Path(custom_config_path).expanduser().parent / path
+        if candidate.exists():
+            return candidate
+
+    return Path.cwd() / path
+
+
+def _load_reward_profile(path: Path) -> dict[str, Any]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"Reward profile must be a YAML mapping: {path}")
+    if "reward" in raw:
+        raise ValueError(f"Reward profile should define reward fields at the root, not under reward: {path}")
+    return raw
+
+
+def _install_reward_profile(args: Any) -> None:
+    profile = str(getattr(args, "agent_env_reward_profile", "") or "").strip()
+    if not profile:
+        raise ValueError("agent-env training requires --agent-env-reward-profile")
+    existing = _mapping(getattr(args, "reward", {}))
+    if existing:
+        raise ValueError(
+            "agent-env reward config must come from --agent-env-reward-profile; "
+            "remove reward fields from env/custom config to avoid dual sources"
+        )
+    path = _resolve_profile_path(args, profile)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing reward profile: {path}")
+    setattr(args, "reward", _load_reward_profile(path))
+    setattr(args, "agent_env_reward_profile_path", str(path))
 
 
 def main() -> None:
@@ -254,6 +313,7 @@ def main() -> None:
     args = parse_args(add_agent_env_arguments)
     if not getattr(args, "env_server_url", None):
         raise ValueError("agent-env training requires --env-server-url; do not rely on Ray env propagation.")
+    _install_reward_profile(args)
 
     if args.agent_env_train_loop == "sync":
         from train import train
