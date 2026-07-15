@@ -457,6 +457,9 @@ def messages_for_chat_template(messages: list[dict[str, Any]]) -> list[dict[str,
     """
     normalized = copy.deepcopy(messages)
     for message in normalized:
+        content = message.get("content")
+        if content not in (None, "") and not isinstance(content, str):
+            message["content"] = json.dumps(content, ensure_ascii=False, sort_keys=True)
         if message.get("role") == "tool":
             message.pop("tool_call_id", None)
         tool_calls = message.get("tool_calls")
@@ -1225,7 +1228,7 @@ def parse_tool_call_action(response_text: str) -> tuple[Any, bool, str]:
     return "", False, "no_tool_call"
 
 
-def parse_standard_tool_call(response_text: str, tools: list[dict[str, Any]], parser_name: str = "qwen") -> tuple[Any, bool, str]:
+def parse_standard_tool_calls(response_text: str, tools: list[dict[str, Any]], parser_name: str = "qwen") -> tuple[list[dict[str, Any]], bool, str]:
     try:
         from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
         from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
@@ -1249,10 +1252,10 @@ def parse_standard_tool_call(response_text: str, tools: list[dict[str, Any]], pa
 
     try:
         if not parser.has_tool_call(response_text):
-            return "", False, "no_standard_tool_call"
+            return [], False, "no_standard_tool_call"
     except Exception as exc:
         logger.debug("standard tool-call intent parser failed", exc_info=True)
-        return "", False, f"tool_intent_parser_error:{type(exc).__name__}"
+        return [], False, f"tool_intent_parser_error:{type(exc).__name__}"
 
     previous_forward_unknown = os.environ.get("SGLANG_FORWARD_UNKNOWN_TOOLS")
     os.environ["SGLANG_FORWARD_UNKNOWN_TOOLS"] = "1"
@@ -1261,7 +1264,7 @@ def parse_standard_tool_call(response_text: str, tools: list[dict[str, Any]], pa
             normal_text, calls = parser.parse_non_stream(response_text)
         except Exception as exc:
             logger.debug("standard tool-call parser failed", exc_info=True)
-            return "", False, f"malformed_standard_tool_call:{type(exc).__name__}"
+            return [], False, f"malformed_standard_tool_call:{type(exc).__name__}"
     finally:
         if previous_forward_unknown is None:
             os.environ.pop("SGLANG_FORWARD_UNKNOWN_TOOLS", None)
@@ -1269,31 +1272,40 @@ def parse_standard_tool_call(response_text: str, tools: list[dict[str, Any]], pa
             os.environ["SGLANG_FORWARD_UNKNOWN_TOOLS"] = previous_forward_unknown
 
     if not calls:
-        return "", False, "malformed_standard_tool_call_no_calls"
-    call = calls[0]
-    name = str(getattr(call, "name", "") or "")
-    parameters = getattr(call, "parameters", {}) or {}
-    if isinstance(parameters, str):
-        parsed_parameters = _parse_json_object(parameters)
-        parameters = parsed_parameters if parsed_parameters is not None else {}
-    if not isinstance(parameters, dict):
-        parameters = {}
-    if not name:
-        return "", False, "malformed_standard_tool_call_empty_name"
-    action = {
-        "type": "tool_call",
-        "name": name,
-        "arguments": parameters,
-        "content": strip_chat_boundary_tokens(str(normal_text or "")),
-    }
-    if name not in known_tool_names:
-        return action, False, f"unknown_standard_tool_call:{name}"
-    return {
-        "type": "tool_call",
-        "name": name,
-        "arguments": parameters,
-        "content": strip_chat_boundary_tokens(str(normal_text or "")),
-    }, True, f"standard_tool_call:{parser_name}"
+        return [], False, "malformed_standard_tool_call_no_calls"
+
+    actions = []
+    unknown_names = []
+    content = strip_chat_boundary_tokens(str(normal_text or ""))
+    for call in calls:
+        name = str(getattr(call, "name", "") or "")
+        parameters = getattr(call, "parameters", {}) or {}
+        if isinstance(parameters, str):
+            parsed_parameters = _parse_json_object(parameters)
+            parameters = parsed_parameters if parsed_parameters is not None else {}
+        if not isinstance(parameters, dict):
+            parameters = {}
+        if not name:
+            return [], False, "malformed_standard_tool_call_empty_name"
+        actions.append(
+            {
+                "type": "tool_call",
+                "name": name,
+                "arguments": parameters,
+                "content": content,
+            }
+        )
+        if name not in known_tool_names:
+            unknown_names.append(name)
+    if unknown_names:
+        return actions, False, "unknown_standard_tool_call:" + ",".join(unknown_names)
+    mode = f"standard_tool_call:{parser_name}" if len(actions) == 1 else f"standard_tool_calls:{parser_name}:n={len(actions)}"
+    return actions, True, mode
+
+
+def parse_standard_tool_call(response_text: str, tools: list[dict[str, Any]], parser_name: str = "qwen") -> tuple[Any, bool, str]:
+    actions, valid, mode = parse_standard_tool_calls(response_text, tools, parser_name)
+    return (actions[0] if actions else ""), valid, mode
 
 
 def action_parser(args: Any, spec: AgentEnvSpec) -> ParseFn:

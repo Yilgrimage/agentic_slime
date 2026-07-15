@@ -49,6 +49,17 @@ def _read_secret(path: str) -> str:
     return Path(os.path.expandvars(path)).expanduser().read_text(encoding="utf-8").strip()
 
 
+def _optional_bool(value: str | None) -> bool | None:
+    if value is None or value == "":
+        return None
+    lowered = value.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")
+
+
 def _metadata(row: dict[str, Any]) -> dict[str, Any]:
     metadata = row.get("metadata")
     return dict(metadata) if isinstance(metadata, dict) else {}
@@ -72,6 +83,12 @@ def _row_task_id(row: dict[str, Any]) -> str:
     return str(metadata.get("task_id") or row.get("task_id") or "")
 
 
+def _row_prompt(row: dict[str, Any]) -> Any:
+    if "prompt" not in row:
+        return ""
+    return row.get("prompt")
+
+
 def _build_payload(args: argparse.Namespace, row_index: int, row: dict[str, Any]) -> dict[str, Any]:
     metadata = _metadata(row)
     split = _row_split(row, args.split)
@@ -92,7 +109,7 @@ def _build_payload(args: argparse.Namespace, row_index: int, row: dict[str, Any]
         "request_id": request_id,
         "release_on_done": True,
         "include_trace": bool(args.include_trace),
-        "prompt": str(row.get("prompt") or ""),
+        "prompt": _row_prompt(row),
         "max_turns": args.max_turns,
         "max_response_tokens": args.max_response_tokens,
         "sampling_params": sampling_params,
@@ -112,9 +129,133 @@ def _build_payload(args: argparse.Namespace, row_index: int, row: dict[str, Any]
             "metadata": metadata,
         },
     }
+    parallel_tool_calls = _optional_bool(args.policy_parallel_tool_calls)
+    if parallel_tool_calls is not None:
+        payload["policy"]["parallel_tool_calls"] = parallel_tool_calls
     if task_id:
         payload["task_id"] = task_id
+    for key in ("task_ref", "domain", "task_set", "data_source", "dataset_name"):
+        value = metadata.get(key, row.get(key))
+        if value not in (None, "", []):
+            payload[key] = value
     return payload
+
+
+def _limit_text(value: Any, max_chars: int) -> str:
+    text = str(value or "")
+    if max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars] + "\n...[truncated]"
+    return text
+
+
+def _json_text(value: Any, max_chars: int = 0) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        text = str(value)
+    return _limit_text(text, max_chars)
+
+
+def _message_text(message: Any, max_chars: int) -> str:
+    if not isinstance(message, dict):
+        return _limit_text(message, max_chars)
+    chunks: list[str] = []
+    content = message.get("content")
+    if content not in (None, "", []):
+        chunks.append(f"content: {_limit_text(content, max_chars)}")
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        rendered = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                rendered.append(str(call))
+                continue
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            name = str(function.get("name") or call.get("name") or "")
+            arguments = function.get("arguments") if "arguments" in function else call.get("arguments")
+            rendered.append(f"{name}({_json_text(arguments, max_chars)})")
+        chunks.append("tool_calls: " + "; ".join(rendered))
+    if not chunks:
+        chunks.append(_json_text(message, max_chars))
+    return "\n".join(chunks)
+
+
+def _action_text(action: Any, max_chars: int) -> str:
+    if isinstance(action, dict):
+        if action.get("type") == "tool_call":
+            name = str(action.get("name") or "")
+            arguments = action.get("arguments")
+            return f"{name}({_json_text(arguments, max_chars)})"
+        if action.get("type") == "assistant_message":
+            return _limit_text(action.get("content"), max_chars)
+    return _json_text(action, max_chars)
+
+
+def _compact_teacher_response(record: dict[str, Any], max_chars: int) -> str:
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    lines = [
+        f"task_id: {record.get('task_id') or record.get('task_index')}",
+        f"split: {record.get('split')}",
+        f"status: {result.get('status')}",
+        f"score: {result.get('score')}",
+        f"success: {result.get('success')}",
+    ]
+    turns = metadata.get("turns")
+    if isinstance(turns, list) and turns:
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            lines.append(f"\nTurn {turn.get('turn')}:")
+            if "assistant_message" in turn:
+                lines.append("Assistant:")
+                lines.append(_message_text(turn.get("assistant_message"), max_chars))
+            if "action" in turn:
+                lines.append("Action:")
+                lines.append(_action_text(turn.get("action"), max_chars))
+            env_step = turn.get("env_step")
+            if isinstance(env_step, dict):
+                observation = env_step.get("observation")
+                if observation not in (None, "", []):
+                    lines.append("Observation:")
+                    lines.append(_limit_text(observation, max_chars))
+    else:
+        messages = metadata.get("messages")
+        if isinstance(messages, list) and messages:
+            for idx, message in enumerate(messages):
+                if not isinstance(message, dict):
+                    continue
+                lines.append(f"\nMessage {idx} role={message.get('role')}:")
+                lines.append(_message_text(message, max_chars))
+    return "\n".join(lines).strip()
+
+
+def _record_success(record: dict[str, Any]) -> bool:
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    return bool(result.get("success", False))
+
+
+def _teacher_row(record: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    input_row = record.get("input") if isinstance(record.get("input"), dict) else {}
+    input_metadata = _metadata(input_row)
+    task_id = str(record.get("task_id") or input_metadata.get("task_id") or "")
+    row: dict[str, Any] = {
+        "task_id": task_id,
+        "task_index": record.get("task_index"),
+        "split": record.get("split"),
+        "teacher_response": _compact_teacher_response(record, max_chars),
+        "teacher_success": _record_success(record),
+        "teacher_score": result.get("score"),
+        "teacher_status": result.get("status"),
+        "teacher_source": "collect_env_rollouts",
+        "teacher_request_id": record.get("request_id"),
+        "teacher_elapsed_s": record.get("elapsed_s"),
+    }
+    for key in ("env", "domain", "task_set", "task_ref", "dataset_name"):
+        if input_metadata.get(key) not in (None, "", []):
+            row[key] = input_metadata[key]
+    return row
 
 
 def _post_json(url: str, payload: dict[str, Any], timeout_s: float) -> tuple[int, dict[str, Any]]:
@@ -205,6 +346,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-api-key-path", default=os.environ.get("OPENAI_API_KEY_PATH", ""))
     parser.add_argument("--policy-model", default=os.environ.get("OPENAI_MODEL", "agent-env-policy"))
     parser.add_argument("--policy-header", action="append", default=[], help="Extra policy header as KEY=VALUE.")
+    parser.add_argument("--policy-parallel-tool-calls", default="")
     parser.add_argument("--split", default="train")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--offset", type=int, default=0)
@@ -220,6 +362,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stop", action="append", default=[])
     parser.add_argument("--include-trace", action="store_true")
     parser.add_argument("--append", action="store_true")
+    parser.add_argument(
+        "--teacher-jsonl",
+        default="",
+        help="Optional compact teacher JSONL path for ROPD/SFT prompt-data merging.",
+    )
+    parser.add_argument(
+        "--teacher-success-only",
+        action="store_true",
+        help="Only write successful episodes to --teacher-jsonl.",
+    )
+    parser.add_argument(
+        "--teacher-max-chars",
+        type=int,
+        default=0,
+        help="Per-field teacher text truncation limit. 0 keeps full trace text.",
+    )
     return parser.parse_args()
 
 
@@ -235,28 +393,42 @@ def main() -> None:
 
     output = Path(args.output_jsonl)
     output.parent.mkdir(parents=True, exist_ok=True)
+    teacher_output = Path(args.teacher_jsonl) if args.teacher_jsonl else None
+    if teacher_output is not None:
+        teacher_output.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if args.append else "w"
     completed = 0
     failed = 0
+    teachers = 0
     started = time.time()
     with output.open(mode, encoding="utf-8") as f:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-            future_to_row = {executor.submit(_run_one, args, idx, row): idx for idx, row in rows}
-            for future in concurrent.futures.as_completed(future_to_row):
-                record = future.result()
-                completed += 1
-                failed += int(not bool(record.get("ok", False)))
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                f.flush()
-                print(
-                    "rollout "
-                    f"{completed}/{len(rows)} ok={record.get('ok')} "
-                    f"task={record.get('task_id') or record.get('task_index')} "
-                    f"elapsed={float(record.get('elapsed_s') or 0.0):.1f}s",
-                    flush=True,
-                )
+        teacher_f = teacher_output.open(mode, encoding="utf-8") if teacher_output is not None else None
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+                future_to_row = {executor.submit(_run_one, args, idx, row): idx for idx, row in rows}
+                for future in concurrent.futures.as_completed(future_to_row):
+                    record = future.result()
+                    completed += 1
+                    failed += int(not bool(record.get("ok", False)))
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    f.flush()
+                    if teacher_f is not None and (not args.teacher_success_only or _record_success(record)):
+                        teacher_f.write(json.dumps(_teacher_row(record, args.teacher_max_chars), ensure_ascii=False) + "\n")
+                        teacher_f.flush()
+                        teachers += 1
+                    print(
+                        "rollout "
+                        f"{completed}/{len(rows)} ok={record.get('ok')} "
+                        f"task={record.get('task_id') or record.get('task_index')} "
+                        f"elapsed={float(record.get('elapsed_s') or 0.0):.1f}s",
+                        flush=True,
+                    )
+        finally:
+            if teacher_f is not None:
+                teacher_f.close()
     print(
-        f"wrote {completed} rows to {output} failed={failed} total_elapsed={time.time() - started:.1f}s",
+        f"wrote {completed} rows to {output} failed={failed} "
+        f"teacher_rows={teachers} total_elapsed={time.time() - started:.1f}s",
         flush=True,
     )
 

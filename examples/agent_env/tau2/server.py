@@ -22,6 +22,7 @@ from examples.agent_env.env_episode import (
     choose_tool_action,
     environment_messages_from_step,
     extract_tool_action,
+    extract_tool_actions,
     finish_reason_is_length,
     mark_assistant_messages_untrained,
     policy_context_limit_reached,
@@ -1099,6 +1100,55 @@ class Tau2Backend:
         self.messages.extend(delta)
         return self._agent_openai_messages(delta[1:])
 
+    def _execute_tool_actions(
+        self,
+        actions: list[dict[str, Any]],
+        assistant_message: dict[str, Any],
+        info: dict[str, Any],
+    ) -> dict[str, Any]:
+        from tau2.data_model.message import AssistantMessage, ToolCall, ToolMessage
+
+        self.step_count += 1
+        next_info = dict(info)
+        for transient_key in ("tool_error",):
+            next_info.pop(transient_key, None)
+        next_info["last_action"] = ",".join(str(action.get("name") or "") for action in actions)
+        next_info["structured_action"] = True
+
+        assistant_content = str(assistant_message.get("content") or "")
+        tool_calls = []
+        tool_messages = []
+        observations = []
+        tool_errors = []
+        for action in actions:
+            name = str(action.get("name") or "").strip()
+            arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
+            call_id = str(action.get("tool_call_id") or "").strip() or f"call-{uuid.uuid4().hex[:12]}"
+            try:
+                result = self.env.use_tool(name, **arguments)
+                error = False
+                observations.append(f"Tool result for {name}:\n{_json_text(result)}")
+            except Exception as exc:
+                result = {"error": f"{type(exc).__name__}: {exc}"}
+                error = True
+                tool_errors.append(result["error"])
+                observations.append(f"Tool call failed for {name}:\n{_json_text(result)}")
+            tool_calls.append(ToolCall(id=call_id, name=name, arguments=arguments, requestor="assistant"))
+            tool_messages.append(
+                ToolMessage(id=call_id, role="tool", content=_json_text(result), requestor="assistant", error=error)
+            )
+
+        self.messages.append(AssistantMessage.text(assistant_content, tool_calls=tool_calls))
+        self.messages.extend(tool_messages)
+        if tool_errors:
+            next_info["tool_error"] = "\n".join(tool_errors)
+        next_info["message_updates"] = self._agent_openai_messages(tool_messages)
+        observation = "\n\n".join(observations)
+        next_info["done"] = self.done
+        next_info["agent_messages"] = self._agent_openai_messages()
+        self.last_info = next_info
+        return self._result(observation, next_info)
+
     def _finish(self, message: str, termination_reason: Any | None = None) -> tuple[float, dict[str, Any]]:
         from tau2.data_model.message import AssistantMessage
         from tau2.data_model.simulation import SimulationRun, TerminationReason
@@ -1271,16 +1321,29 @@ class Tau2Backend:
                 break
             if finish_reason_is_length(reply):
                 metadata["max_response_tokens_hits"] = int(metadata.get("max_response_tokens_hits", 0) or 0) + 1
-            action, _, _ = extract_tool_action(assistant_message)
-            action = choose_tool_action(
-                action,
-                self._available_tool_names(info),
-                restrict_to_available=bool(action_cfg.get("restrict_to_available", False)),
-                metadata=metadata,
-            )
+            tool_actions = extract_tool_actions(assistant_message)
+            if tool_actions:
+                if bool(action_cfg.get("restrict_to_available", False)):
+                    available_names = set(self._available_tool_names(info))
+                    for item in tool_actions:
+                        name = str(item.get("name") or "")
+                        if available_names and name not in available_names:
+                            metadata.setdefault("invalid_actions", []).append(name)
+                action: Any = tool_actions[0] if len(tool_actions) == 1 else tool_actions
+            else:
+                action, _, _ = extract_tool_action(assistant_message)
+                action = choose_tool_action(
+                    action,
+                    self._available_tool_names(info),
+                    restrict_to_available=bool(action_cfg.get("restrict_to_available", False)),
+                    metadata=metadata,
+                )
             metadata["actions"].append(action)
             policy_messages.append(assistant_message)
-            step = self.step({"action": action})
+            if tool_actions:
+                step = self._execute_tool_actions(tool_actions, assistant_message, info)
+            else:
+                step = self.step({"action": action})
             last_step = step
             observation = str(step.get("observation", ""))
             info = step.get("info") if isinstance(step.get("info"), dict) else {}
@@ -1288,7 +1351,7 @@ class Tau2Backend:
             done = bool(step.get("done", False))
             success = bool(step.get("success", final_score >= 1.0))
             discard_reason = info.get("discard_reason") if isinstance(info, dict) else None
-            mode = "tool_call" if isinstance(action, dict) and action.get("type") == "tool_call" else "assistant_message"
+            mode = "tool_call" if tool_actions else "assistant_message"
             env_messages = environment_messages_from_step(
                 mode=mode,
                 action=action,

@@ -38,7 +38,7 @@ from examples.agent_env.rollout import (
     normalize_openai_tool,
     outcome_reward,
     parse_policy_text_view,
-    parse_standard_tool_call,
+    parse_standard_tool_calls,
     parse_text_action,
     post_env,
     record_env_metadata,
@@ -109,14 +109,13 @@ def _first_routable_host() -> str:
         return "127.0.0.1"
 
 
-def _openai_tool_call_message(action: dict[str, Any], content: str = "") -> dict[str, Any]:
-    arguments = action.get("arguments") or {}
-    if not isinstance(arguments, dict):
-        arguments = {}
-    return {
-        "role": "assistant",
-        "content": content,
-        "tool_calls": [
+def _openai_tool_calls_message(actions: list[dict[str, Any]], content: str = "") -> dict[str, Any]:
+    tool_calls = []
+    for action in actions:
+        arguments = action.get("arguments") or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        tool_calls.append(
             {
                 "id": f"call_{uuid.uuid4().hex[:24]}",
                 "type": "function",
@@ -125,7 +124,11 @@ def _openai_tool_call_message(action: dict[str, Any], content: str = "") -> dict
                     "arguments": json.dumps(arguments, ensure_ascii=False),
                 },
             }
-        ],
+        )
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": tool_calls,
     }
 
 
@@ -380,18 +383,18 @@ class PolicySession:
                 assistant_message = {"role": "assistant", "content": raw_visible_content or raw_response_text}
             else:
                 parser_name = infer_tool_call_parser_name(self.tok)
-                action, format_valid, parse_mode = parse_standard_tool_call(content, self.tools, parser_name)
+                actions, format_valid, parse_mode = parse_standard_tool_calls(content, self.tools, parser_name)
                 if not format_valid and parse_mode == "no_standard_tool_call":
                     if self.spec.allow_assistant_message and (content or raw_visible_content):
-                        action = {"type": "assistant_message", "content": content or raw_visible_content}
+                        actions = []
                         format_valid = True
                         parse_mode = "assistant_message"
                     else:
                         parse_mode = "empty_assistant_message"
-                if isinstance(action, dict) and action.get("type") == "tool_call":
-                    assistant_message = _openai_tool_call_message(action, str(action.get("content") or ""))
-                elif isinstance(action, dict) and action.get("type") == "assistant_message":
-                    assistant_message = {"role": "assistant", "content": str(action.get("content") or "")}
+                if actions:
+                    assistant_message = _openai_tool_calls_message(actions, str(actions[0].get("content") or ""))
+                elif format_valid and parse_mode == "assistant_message":
+                    assistant_message = {"role": "assistant", "content": content or raw_visible_content}
                 elif not format_valid:
                     assistant_message = {"role": "assistant", "content": raw_visible_content or content or raw_response_text}
                 else:

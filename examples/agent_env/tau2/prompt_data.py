@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -10,6 +11,27 @@ from pathlib import Path
 from typing import Any
 
 from examples.agent_env.tau2.prompt import DEFAULT_PROMPT
+
+TEACHER_METADATA_KEYS = (
+    "teacher_response",
+    "teacher_answer",
+    "teacher_final_answer",
+    "teacher_actions",
+    "teacher_success",
+    "teacher_score",
+    "teacher_status",
+    "teacher_request_id",
+    "teacher_elapsed_s",
+    "ropd_rubric",
+    "reward_rubric",
+    "rubric",
+)
+
+TEACHER_SOURCE_KEYS = {
+    "source": "teacher_source",
+    "teacher_source": "teacher_source",
+}
+
 
 def _prompt() -> list[dict[str, str]]:
     # The tau2 server builds the task-specific system policy after env reset.
@@ -181,6 +203,93 @@ def _infer_areal_domain(row: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _row_hash(row: dict[str, Any]) -> str:
+    text = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _teacher_task_id(row: dict[str, Any]) -> str:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    return str(row.get("task_id") or metadata.get("task_id") or "").strip()
+
+
+def _teacher_score(row: dict[str, Any]) -> float:
+    for key in ("teacher_score", "score"):
+        value = row.get(key)
+        if value not in (None, "", []):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0
+
+
+def _teacher_success(row: dict[str, Any]) -> bool:
+    value = row.get("teacher_success", row.get("success", False))
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "success"}
+
+
+def _teacher_metadata(row: dict[str, Any], task_id: str) -> dict[str, Any]:
+    raw_metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    metadata: dict[str, Any] = {
+        "teacher_task_id": task_id,
+        "teacher_row_hash": _row_hash(row),
+    }
+    for key in TEACHER_METADATA_KEYS:
+        value = row.get(key, raw_metadata.get(key))
+        if value not in (None, "", []):
+            metadata[key] = value
+    for source_key, metadata_key in TEACHER_SOURCE_KEYS.items():
+        value = row.get(source_key, raw_metadata.get(source_key))
+        if value not in (None, "", []):
+            metadata[metadata_key] = value
+    return metadata
+
+
+def _read_teacher_rows(path: Path) -> dict[str, dict[str, Any]]:
+    best: dict[str, dict[str, Any]] = {}
+    with path.open(encoding="utf-8") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"{path}:{line_no}: expected teacher row to be an object")
+            task_id = _teacher_task_id(row)
+            if not task_id:
+                raise ValueError(f"{path}:{line_no}: teacher row is missing task_id")
+            current = best.get(task_id)
+            if current is None:
+                best[task_id] = row
+                continue
+            current_rank = (_teacher_success(current), _teacher_score(current))
+            row_rank = (_teacher_success(row), _teacher_score(row))
+            if row_rank > current_rank:
+                best[task_id] = row
+    return best
+
+
+def _merge_teacher_rows(rows: list[dict[str, Any]], teacher_jsonl: str) -> list[dict[str, Any]]:
+    teacher_path = Path(os.path.expandvars(teacher_jsonl)).expanduser()
+    teachers = _read_teacher_rows(teacher_path)
+    merged = 0
+    for row in rows:
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        task_id = str(metadata.get("task_id") or row.get("task_id") or "").strip()
+        teacher = teachers.get(task_id)
+        if teacher is None:
+            continue
+        metadata.update(_teacher_metadata(teacher, task_id))
+        row["metadata"] = metadata
+        merged += 1
+    if not merged:
+        raise ValueError(f"No tau2 prompt rows matched teacher data from {teacher_path}")
+    return rows
+
+
 def _iter_jsonl(path: Path) -> list[dict[str, Any]]:
     rows = []
     with path.open(encoding="utf-8") as f:
@@ -315,9 +424,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=int(os.environ.get("SEED", "42")), help="Deterministic shuffle seed.")
     parser.add_argument("--num-tasks", type=int, default=None, help="Total output rows. If omitted, write each selected task once.")
     parser.add_argument("--max-tasks-per-domain", type=int, default=None, help="Cap loaded tasks per domain before mixing.")
+    parser.add_argument(
+        "--teacher-jsonl",
+        default=os.environ.get("TAU2_TEACHER_JSONL", ""),
+        help="Optional teacher rollout JSONL merged into metadata for ROPD/SFT use.",
+    )
     args = parser.parse_args()
 
     rows = build_rows(args)
+    if args.teacher_jsonl:
+        rows = _merge_teacher_rows(rows, args.teacher_jsonl)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as f:

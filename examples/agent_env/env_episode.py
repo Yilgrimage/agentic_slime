@@ -81,9 +81,12 @@ def _sampling_body(sampling_params: dict[str, Any], max_tokens: int | None) -> d
 
 
 def _normalize_message(message: dict[str, Any]) -> dict[str, Any]:
+    content = message.get("content") or ""
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False, sort_keys=True)
     item: dict[str, Any] = {
         "role": str(message.get("role") or "assistant"),
-        "content": message.get("content") or "",
+        "content": content,
     }
     if message.get("tool_calls"):
         calls = []
@@ -107,6 +110,20 @@ def _normalize_message(message: dict[str, Any]) -> dict[str, Any]:
         item["tool_call_id"] = str(message["tool_call_id"])
     if message.get("step_loss_mask") is not None:
         item["step_loss_mask"] = message["step_loss_mask"]
+    return item
+
+
+def _wire_message(message: dict[str, Any]) -> dict[str, Any]:
+    item = _normalize_message(message)
+    for raw_call in item.get("tool_calls") or []:
+        if not isinstance(raw_call, dict):
+            continue
+        fn = raw_call.get("function")
+        if not isinstance(fn, dict):
+            continue
+        arguments = fn.get("arguments")
+        if not isinstance(arguments, str):
+            fn["arguments"] = json.dumps(arguments if arguments is not None else {}, ensure_ascii=False, sort_keys=True)
     return item
 
 
@@ -144,11 +161,13 @@ def call_policy_chat(
     sampling_params = sampling_params or {}
     payload = {
         "model": str(policy.get("model") or "agent-env-policy"),
-        "messages": [_normalize_message(item) for item in messages],
+        "messages": [_wire_message(item) for item in messages],
         **_sampling_body(sampling_params, max_tokens),
     }
     if tools:
         payload["tools"] = copy.deepcopy(tools)
+    if policy.get("parallel_tool_calls") is not None:
+        payload["parallel_tool_calls"] = bool(policy.get("parallel_tool_calls"))
     # Keep message/tool-call payloads byte-for-byte semantic. Tool arguments may
     # legitimately contain JSON nulls; recursively stripping None mutates the
     # policy history and breaks the gateway's append-only ledger check.
@@ -224,20 +243,37 @@ def parse_text_action(response_text: str, tag: str = "action") -> tuple[str, boo
     return "look", False, "fallback"
 
 
+def _tool_action_from_call(message: dict[str, Any], raw_call: dict[str, Any]) -> dict[str, Any] | None:
+    fn = raw_call.get("function") or {}
+    name = str(fn.get("name") or raw_call.get("name") or "").strip()
+    if not name:
+        return None
+    return {
+        "type": "tool_call",
+        "name": name,
+        "arguments": _json_object(fn.get("arguments")),
+        "tool_call_id": str(raw_call.get("id") or ""),
+        "content": str(message.get("content") or ""),
+    }
+
+
+def extract_tool_actions(message: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = []
+    for raw_call in message.get("tool_calls") or []:
+        if not isinstance(raw_call, dict):
+            continue
+        action = _tool_action_from_call(message, raw_call)
+        if action is not None:
+            actions.append(action)
+    return actions
+
+
 def extract_tool_action(message: dict[str, Any]) -> tuple[dict[str, Any], bool, str]:
     calls = message.get("tool_calls") or []
-    if calls and isinstance(calls[0], dict):
-        fn = calls[0].get("function") or {}
-        name = str(fn.get("name") or calls[0].get("name") or "").strip()
-        arguments = _json_object(fn.get("arguments"))
-        if name:
-            return {
-                "type": "tool_call",
-                "name": name,
-                "arguments": arguments,
-                "tool_call_id": str(calls[0].get("id") or ""),
-                "content": str(message.get("content") or ""),
-            }, True, "tool_call"
+    if calls:
+        actions = extract_tool_actions(message)
+        if actions:
+            return actions[0], True, "tool_call"
         return {"type": "assistant_message", "content": str(message.get("content") or "")}, False, "empty_tool_name"
     return {"type": "assistant_message", "content": str(message.get("content") or "")}, False, "assistant_message"
 
