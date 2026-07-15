@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import atexit
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,7 @@ from examples.agent_env.prompting import require_prompt
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
+_FAST_DOWNWARD_PATCHED = False
 
 def _first(value: Any, default: Any = None) -> Any:
     if value is None:
@@ -203,8 +206,94 @@ def _alfworld_backend_split(split: str) -> str:
     }.get(split, split)
 
 
+def _configure_fast_downward_lib(downward_lib: Any, interface: Any) -> Any:
+    downward_lib.load_sas.argtypes = [interface.c_char_p]
+    downward_lib.load_sas.restype = None
+
+    downward_lib.load_sas_replan.argtypes = [interface.c_char_p]
+    downward_lib.load_sas_replan.restype = None
+
+    downward_lib.cleanup.argtypes = []
+    downward_lib.cleanup.restype = None
+
+    downward_lib.get_applicable_operators_count.argtypes = []
+    downward_lib.get_applicable_operators_count.restype = int
+    downward_lib.get_applicable_operators.argtypes = [interface.POINTER(interface.Operator)]
+    downward_lib.get_applicable_operators.restype = None
+
+    downward_lib.get_state_size.argtypes = []
+    downward_lib.get_state_size.restype = int
+    downward_lib.get_state.argtypes = [interface.POINTER(interface.Atom)]
+    downward_lib.get_state.restype = None
+
+    downward_lib.apply_operator.argtypes = [interface.c_int, interface.POINTER(interface.Atom)]
+    downward_lib.apply_operator.restype = int
+
+    downward_lib.check_goal.argtypes = []
+    downward_lib.check_goal.restype = bool
+
+    downward_lib.solve.argtypes = [interface.c_bool]
+    downward_lib.solve.restype = bool
+
+    downward_lib.solve_sas.argtypes = [interface.c_char_p, interface.c_bool]
+    downward_lib.solve_sas.restype = bool
+
+    downward_lib.replan.argtypes = [interface.c_bool]
+    downward_lib.replan.restype = bool
+
+    downward_lib.get_last_plan_length.argtypes = []
+    downward_lib.get_last_plan_length.restype = int
+
+    downward_lib.get_last_plan.argtypes = [interface.POINTER(interface.Operator)]
+    downward_lib.get_last_plan.restype = None
+
+    downward_lib.check_solution.argtypes = [interface.c_int, interface.POINTER(interface.Operator)]
+    downward_lib.check_solution.restype = bool
+    return downward_lib
+
+
+def _patch_fast_downward_loader() -> None:
+    global _FAST_DOWNWARD_PATCHED
+    if _FAST_DOWNWARD_PATCHED:
+        return
+
+    import fast_downward
+    import fast_downward.interface as interface
+
+    source_lib = Path(str(interface.DOWNWARD_LIB_PATH))
+    if not source_lib.is_file():
+        raise RuntimeError(f"Cannot find Fast Downward library: {source_lib}")
+
+    runtime_root = Path(os.environ.get("LOCAL_RUNTIME_DIR") or "/tmp/server-ops-runtime")
+    lib_dir = runtime_root / "alfworld" / "fast_downward" / str(os.getpid())
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    stable_lib = lib_dir / "libdownward.so"
+    if not stable_lib.exists() or stable_lib.stat().st_size != source_lib.stat().st_size:
+        tmp_lib = stable_lib.with_name(f"{stable_lib.name}.tmp")
+        shutil.copyfile(source_lib, tmp_lib)
+        os.replace(tmp_lib, stable_lib)
+
+    cached_lib: Any | None = None
+
+    def load_stable_lib() -> Any:
+        nonlocal cached_lib
+        if cached_lib is None:
+            cached_lib = _configure_fast_downward_lib(interface.cdll.LoadLibrary(str(stable_lib)), interface)
+        return cached_lib
+
+    def cleanup_stable_lib() -> None:
+        shutil.rmtree(lib_dir, ignore_errors=True)
+
+    fast_downward.load_lib = load_stable_lib
+    interface.load_lib = load_stable_lib
+    atexit.register(cleanup_stable_lib)
+    _FAST_DOWNWARD_PATCHED = True
+    logger.info("Patched Fast Downward lib loader to reuse %s", stable_lib)
+
+
 class ALFWorldBackend:
     def __init__(self, worker_id: str, split: str, config: dict[str, Any]) -> None:
+        _patch_fast_downward_loader()
         self.worker_id = worker_id
         self.split = split
         self.config = config["alfworld_config"]
