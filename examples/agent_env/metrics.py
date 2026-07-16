@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 _WANDB_REWARD_METRICS_DEFINED = False
+_GENERATED_ENV_PREFIX = "agent_env/generated/env/"
+_GENERATED_REWARD_PREFIX = "agent_env/generated/reward/"
 
 
 def _mean(values: list[float]) -> float:
@@ -168,6 +170,16 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     return metrics
 
 
+def _prefix_reward_metrics(metrics: dict[str, float], prefix: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key, value in metrics.items():
+        if key.startswith("reward/"):
+            out[f"{prefix}/{key.removeprefix('reward/')}"] = value
+        else:
+            out[f"{prefix}/{key}"] = value
+    return out
+
+
 def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     if not samples:
         return {}
@@ -249,6 +261,84 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     return metrics
 
 
+def _flatten_sample_groups(groups: list[Any]) -> list[Any]:
+    samples: list[Any] = []
+    for group in groups:
+        if group is None:
+            continue
+        if isinstance(group, list):
+            for item in group:
+                if isinstance(item, list):
+                    samples.extend(item)
+                else:
+                    samples.append(item)
+        else:
+            samples.append(group)
+    return samples
+
+
+def _strip_metric_prefix(metrics: dict[str, float], prefix: str) -> dict[str, float]:
+    return {key.removeprefix(prefix): value for key, value in metrics.items() if key.startswith(prefix)}
+
+
+def generated_train_scope_metrics(
+    *,
+    generated_groups: list[Any],
+    train_groups: list[Any],
+) -> dict[str, float]:
+    """Compute generated-vs-train scope metrics for dynamic filtering.
+
+    Dynamic sampling correctly removes all-correct/all-wrong groups from actor
+    training, but those generated episodes are still part of the rollout
+    distribution users need to monitor. Keep the full generated metrics in a
+    private namespace; `log_rollout_data_for_env` promotes them to canonical
+    W&B keys once it knows the environment prefix.
+    """
+
+    generated_samples = _flatten_sample_groups(generated_groups)
+    train_samples = _flatten_sample_groups(train_groups)
+    generated_group_count = float(len(generated_groups))
+    train_group_count = float(len(train_groups))
+    dropped_group_count = max(0.0, generated_group_count - train_group_count)
+
+    metrics: dict[str, float] = {
+        "agent_env/generated/group_count": generated_group_count,
+        "agent_env/generated/sample_count": float(len(generated_samples)),
+        "agent_env/train/group_count": train_group_count,
+        "agent_env/train/sample_count": float(len(train_samples)),
+        "rollout/dynamic_filter/generated_groups": generated_group_count,
+        "rollout/dynamic_filter/kept_groups": train_group_count,
+        "rollout/dynamic_filter/dropped_groups": dropped_group_count,
+        "rollout/dynamic_filter/drop_rate": dropped_group_count / generated_group_count
+        if generated_group_count
+        else 0.0,
+    }
+
+    env_generated = _strip_metric_prefix(environment_metrics(generated_samples, prefix="agent_env"), "agent_env/")
+    for key, value in env_generated.items():
+        metrics[f"{_GENERATED_ENV_PREFIX}{key}"] = value
+
+    reward_generated = reward_metrics(generated_samples)
+    for key, value in reward_generated.items():
+        metrics[f"{_GENERATED_REWARD_PREFIX}{key.removeprefix('reward/')}"] = value
+
+    return metrics
+
+
+def _pop_generated_scope_metrics(metrics: dict[str, Any]) -> tuple[dict[str, float], dict[str, float]]:
+    generated_env: dict[str, float] = {}
+    generated_reward: dict[str, float] = {}
+    for key in list(metrics.keys()):
+        value = metrics[key]
+        if key.startswith(_GENERATED_ENV_PREFIX):
+            generated_env[key.removeprefix(_GENERATED_ENV_PREFIX)] = float(value)
+            del metrics[key]
+        elif key.startswith(_GENERATED_REWARD_PREFIX):
+            generated_reward[key.removeprefix(_GENERATED_REWARD_PREFIX)] = float(value)
+            del metrics[key]
+    return generated_env, generated_reward
+
+
 def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:
     from slime.ray.rollout import compute_metrics_from_samples, compute_perf_metrics_from_samples
     from slime.utils import logging_utils
@@ -256,8 +346,22 @@ def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_ext
 
     _define_reward_wandb_metrics(args)
     log_dict = {**(rollout_extra_metrics or {})}
-    log_dict |= environment_metrics(samples, prefix=prefix)
-    log_dict |= reward_metrics(samples)
+    generated_env_metrics, generated_reward_metrics = _pop_generated_scope_metrics(log_dict)
+
+    if generated_env_metrics:
+        log_dict |= {f"{prefix}/{key}": value for key, value in generated_env_metrics.items()}
+        log_dict |= {f"{prefix}/generated/{key}": value for key, value in generated_env_metrics.items()}
+        log_dict |= environment_metrics(samples, prefix=f"{prefix}/train")
+    else:
+        log_dict |= environment_metrics(samples, prefix=prefix)
+
+    if generated_reward_metrics:
+        log_dict |= {f"reward/{key}": value for key, value in generated_reward_metrics.items()}
+        log_dict |= {f"reward/generated/{key}": value for key, value in generated_reward_metrics.items()}
+        log_dict |= _prefix_reward_metrics(reward_metrics(samples), "reward/train")
+    else:
+        log_dict |= reward_metrics(samples)
+
     log_dict |= {f"rollout/{k}": v for k, v in compute_metrics_from_samples(args, samples).items()}
     log_dict |= {f"perf/{k}": v for k, v in compute_perf_metrics_from_samples(args, samples, rollout_time).items()}
     log_dict["rollout/step"] = compute_rollout_step(args, rollout_id)

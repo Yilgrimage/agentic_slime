@@ -17,6 +17,8 @@ from slime.utils.http_utils import get_rollout_num_engines
 from slime.utils.misc import load_function
 from slime.utils.types import Sample
 
+from examples.agent_env.metrics import generated_train_scope_metrics
+
 logger = logging.getLogger("examples.agent_env.fully_async_rollout")
 
 _worker_lock = threading.Lock()
@@ -161,7 +163,9 @@ async def _generate_rollout_async(args: Any, rollout_id: int, data_buffer: Any) 
         time.time() - started,
         worker.queue_size(),
     )
-    return RolloutFnTrainOutput(samples=data, metrics=metric_gatherer.collect())
+    metrics = metric_gatherer.collect()
+    metrics.update(generated_train_scope_metrics(generated_groups=all_groups, train_groups=data))
+    return RolloutFnTrainOutput(samples=data, metrics=metrics)
 
 
 def generate_rollout_fully_async(args: Any, rollout_id: int, data_buffer: Any, evaluation: bool = False):
