@@ -69,8 +69,6 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         real_samples = samples
 
     rm_scores = []
-    reward_versions: dict[str, int] = {}
-    rm_impls: dict[str, int] = {}
     component_values: dict[str, list[float]] = {}
     fallback_reasons: dict[str, int] = {}
     rubric_sources: dict[str, int] = {}
@@ -86,16 +84,10 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
 
     for sample in real_samples:
         sample_metadata = getattr(sample, "metadata", None) or {}
-        impl = sample_metadata.get("rm_impl")
-        if impl:
-            rm_impls[str(impl)] = rm_impls.get(str(impl), 0) + 1
         rm_reward = _as_dict(sample_metadata.get("rm_reward"))
         score = _float_or_none(rm_reward.get("score"))
         if score is not None:
             rm_scores.append(score)
-        version = rm_reward.get("reward_version")
-        if version:
-            reward_versions[str(version)] = reward_versions.get(str(version), 0) + 1
         for key, value in _as_dict(rm_reward.get("components")).items():
             scalar = _float_or_none(value)
             if scalar is not None:
@@ -141,11 +133,9 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     if rm_scores:
         metrics["reward/rm_score_mean"] = _mean(rm_scores)
         metrics["reward/rm_score_nonzero_rate"] = sum(1 for value in rm_scores if value != 0.0) / len(rm_scores)
-    for impl, count in rm_impls.items():
-        metrics[f"reward/impl_{impl}_rate"] = count / total
-    for version, count in reward_versions.items():
-        metrics[f"reward/version_{version}_rate"] = count / total
     for name, values in component_values.items():
+        if name == "env_reward":
+            continue
         metrics[f"reward/component_{name}_mean"] = _mean(values)
     for reason, count in fallback_reasons.items():
         metrics[f"reward/fallback_{reason}_rate"] = count / total
@@ -302,13 +292,8 @@ def generated_train_scope_metrics(
     dropped_group_count = max(0.0, generated_group_count - train_group_count)
 
     metrics: dict[str, float] = {
-        "agent_env/generated/group_count": generated_group_count,
-        "agent_env/generated/sample_count": float(len(generated_samples)),
-        "agent_env/train/group_count": train_group_count,
-        "agent_env/train/sample_count": float(len(train_samples)),
         "rollout/dynamic_filter/generated_groups": generated_group_count,
         "rollout/dynamic_filter/kept_groups": train_group_count,
-        "rollout/dynamic_filter/dropped_groups": dropped_group_count,
         "rollout/dynamic_filter/drop_rate": dropped_group_count / generated_group_count
         if generated_group_count
         else 0.0,
@@ -350,14 +335,12 @@ def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_ext
 
     if generated_env_metrics:
         log_dict |= {f"{prefix}/{key}": value for key, value in generated_env_metrics.items()}
-        log_dict |= {f"{prefix}/generated/{key}": value for key, value in generated_env_metrics.items()}
         log_dict |= environment_metrics(samples, prefix=f"{prefix}/train")
     else:
         log_dict |= environment_metrics(samples, prefix=prefix)
 
     if generated_reward_metrics:
         log_dict |= {f"reward/{key}": value for key, value in generated_reward_metrics.items()}
-        log_dict |= {f"reward/generated/{key}": value for key, value in generated_reward_metrics.items()}
         log_dict |= _prefix_reward_metrics(reward_metrics(samples), "reward/train")
     else:
         log_dict |= reward_metrics(samples)
