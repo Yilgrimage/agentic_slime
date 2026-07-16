@@ -357,6 +357,8 @@ def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, to
             "env_score": sample_metadata.get("env_score"),
             "env_success": sample_metadata.get("env_success"),
             "env_reward": sample_metadata.get("env_reward"),
+            "user_model_call_count": sample_metadata.get("user_model_call_count"),
+            "user_model_usage_totals": sample_metadata.get("user_model_usage_totals"),
             "rm_impl": sample_metadata.get("rm_impl"),
             "rm_reward": sample_metadata.get("rm_reward"),
             "rm_reward_for_train": sample_metadata.get("rm_reward_for_train"),

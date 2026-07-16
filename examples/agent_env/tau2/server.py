@@ -94,6 +94,56 @@ def _csv_values(value: Any) -> list[str]:
     return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
+def _flatten_numeric_usage(usage: Any, prefix: str = "") -> dict[str, float]:
+    if not isinstance(usage, dict):
+        return {}
+    output: dict[str, float] = {}
+    for key, value in usage.items():
+        name = f"{prefix}_{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            output.update(_flatten_numeric_usage(value, name))
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            output[name] = output.get(name, 0.0) + float(value)
+    return output
+
+
+def _sum_usage(usages: list[dict[str, Any]]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for usage in usages:
+        for key, value in _flatten_numeric_usage(usage).items():
+            totals[key] = totals.get(key, 0.0) + value
+    return totals
+
+
+def _merge_user_model_usage(metadata: dict[str, Any], info: dict[str, Any]) -> None:
+    usages = info.get("user_model_usage")
+    if not isinstance(usages, list) or not usages:
+        return
+    cleaned = [usage for usage in usages if isinstance(usage, dict)]
+    if not cleaned:
+        return
+    metadata.setdefault("user_model_usage", []).extend(cleaned)
+    metadata["user_model_usage_totals"] = _sum_usage(metadata["user_model_usage"])
+    metadata["user_model_call_count"] = len(metadata["user_model_usage"])
+
+
+_USER_SIM_TRANSIENT_INFO_KEYS = (
+    "user_model_calls",
+    "user_model_latency_s",
+    "user_model_usage",
+    "user_model_usage_totals",
+    "user_sim_trace",
+)
+
+
+def _clear_user_sim_transient_info(info: dict[str, Any]) -> None:
+    for key in _USER_SIM_TRANSIENT_INFO_KEYS:
+        info.pop(key, None)
+
+
 def _stable_int(text: str) -> int:
     return int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "big")
 
@@ -910,6 +960,7 @@ class Tau2Backend:
         self.messages.append(assistant_message)
         valid_user_tool_names = self._tool_schema_names(self._user_tool_schemas())
         latencies: list[float] = []
+        usages: list[dict[str, Any]] = []
         trace_enabled = bool(self.config.get("user_sim_trace", False))
         user_sim_trace: list[dict[str, Any]] = []
         next_user_input: Any = assistant_message
@@ -917,6 +968,8 @@ class Tau2Backend:
             user_message, self.user_state = self.user_simulator.generate_next_message(next_user_input, self.user_state)
             if user_message.generation_time_seconds is not None:
                 latencies.append(float(user_message.generation_time_seconds))
+            if isinstance(getattr(user_message, "usage", None), dict):
+                usages.append(dict(user_message.usage))
             trace_entry: dict[str, Any] = {
                 "round": round_index,
                 "content": str(user_message.content or ""),
@@ -924,6 +977,8 @@ class Tau2Backend:
             }
             if user_message.generation_time_seconds is not None:
                 trace_entry["generation_time_s"] = float(user_message.generation_time_seconds)
+            if isinstance(getattr(user_message, "usage", None), dict):
+                trace_entry["usage"] = dict(user_message.usage)
             if user_message.tool_calls:
                 invalid_tool_names = []
                 for tool_call in user_message.tool_calls:
@@ -937,6 +992,8 @@ class Tau2Backend:
                     return f"User simulator produced invalid tool call: {', '.join(invalid_tool_names)}", True, {
                         "user_model_calls": len(latencies),
                         "user_model_latency_s": sum(latencies),
+                        "user_model_usage": list(usages),
+                        "user_model_usage_totals": _sum_usage(usages),
                         "user_invalid_tool_call": True,
                         "user_invalid_tool_names": invalid_tool_names,
                         "user_model_content": user_message.content,
@@ -981,6 +1038,8 @@ class Tau2Backend:
             return content, done, {
                 "user_model_calls": len(latencies),
                 "user_model_latency_s": sum(latencies),
+                "user_model_usage": list(usages),
+                "user_model_usage_totals": _sum_usage(usages),
                 **control_info,
                 **({"user_sim_trace": user_sim_trace} if trace_enabled else {}),
             }
@@ -988,6 +1047,8 @@ class Tau2Backend:
         return fallback, True, {
             "user_model_calls": len(latencies),
             "user_model_latency_s": sum(latencies),
+            "user_model_usage": list(usages),
+            "user_model_usage_totals": _sum_usage(usages),
             "user_tool_round_limit": True,
             "discard_sample": True,
             "discard_reason": "user_tool_round_limit",
@@ -1112,6 +1173,7 @@ class Tau2Backend:
         next_info = dict(info)
         for transient_key in ("tool_error",):
             next_info.pop(transient_key, None)
+        _clear_user_sim_transient_info(next_info)
         next_info["last_action"] = ",".join(str(action.get("name") or "") for action in actions)
         next_info["structured_action"] = True
 
@@ -1189,6 +1251,7 @@ class Tau2Backend:
         info = dict(self.last_info)
         for transient_key in ("tool_error",):
             info.pop(transient_key, None)
+        _clear_user_sim_transient_info(info)
         info["last_action"] = name
         info["structured_action"] = structured
 
@@ -1276,6 +1339,7 @@ class Tau2Backend:
             "policy_usage": [],
             "turn_count": 0,
         }
+        _merge_user_model_usage(metadata, info)
         include_trace = bool(payload.get("include_trace", False))
         include_messages = bool(payload.get("include_messages", False)) or include_trace
         policy_messages = self._policy_messages(observation, info, prompt)
@@ -1347,6 +1411,7 @@ class Tau2Backend:
             last_step = step
             observation = str(step.get("observation", ""))
             info = step.get("info") if isinstance(step.get("info"), dict) else {}
+            _merge_user_model_usage(metadata, info)
             final_score = float(step.get("score", 0.0) or 0.0)
             done = bool(step.get("done", False))
             success = bool(step.get("success", final_score >= 1.0))

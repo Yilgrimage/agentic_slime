@@ -694,6 +694,9 @@ async def generate_server_episode_rollout(
             "truncated_reason",
             "turn_count",
             "turns",
+            "user_model_call_count",
+            "user_model_usage",
+            "user_model_usage_totals",
         ):
             if key in episode_metadata:
                 if policy_owned_format and key in policy_format_keys:

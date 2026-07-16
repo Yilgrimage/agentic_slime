@@ -22,6 +22,16 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _sum_numeric_dicts(values: list[dict[str, Any]]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for item in values:
+        for key, value in item.items():
+            scalar = _float_or_none(value)
+            if scalar is not None:
+                totals[str(key)] = totals.get(str(key), 0.0) + scalar
+    return totals
+
+
 def _reward_call_metrics(
     metrics: dict[str, float],
     *,
@@ -175,6 +185,8 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     max_response_tokens_hit_counts = []
     success_count = 0
     env_rewards = []
+    user_model_call_counts = []
+    user_model_usage_totals: list[dict[str, Any]] = []
     truncated_reasons: dict[str, int] = {}
     discard_reasons: dict[str, int] = {}
 
@@ -189,6 +201,16 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         success_count += int(bool(metadata.get("env_success", False)))
         if "env_reward" in metadata:
             env_rewards.append(float(metadata["env_reward"]))
+        usage_totals = _as_dict(metadata.get("user_model_usage_totals"))
+        if usage_totals:
+            user_model_usage_totals.append(usage_totals)
+        call_count = _float_or_none(metadata.get("user_model_call_count"))
+        if call_count is None:
+            usage_list = metadata.get("user_model_usage")
+            if isinstance(usage_list, list):
+                call_count = float(len([item for item in usage_list if isinstance(item, dict)]))
+        if call_count is not None:
+            user_model_call_counts.append(call_count)
         reason = metadata.get("truncated_reason")
         if reason:
             truncated_reasons[str(reason)] = truncated_reasons.get(str(reason), 0) + 1
@@ -209,6 +231,17 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     }
     if env_rewards:
         metrics[f"{prefix}/env_reward_mean"] = sum(env_rewards) / len(env_rewards)
+    if user_model_call_counts:
+        total_calls = sum(user_model_call_counts)
+        metrics[f"{prefix}/usersim_call_count_total"] = total_calls
+        metrics[f"{prefix}/usersim_call_count_mean"] = total_calls / len(real_samples)
+    usage_sums = _sum_numeric_dicts(user_model_usage_totals)
+    for key, total_value in usage_sums.items():
+        metric_key = f"{prefix}/usersim_usage_{key}"
+        metrics[f"{metric_key}_total"] = total_value
+        metrics[f"{metric_key}_per_sample"] = total_value / len(real_samples)
+        if user_model_call_counts and sum(user_model_call_counts) > 0:
+            metrics[f"{metric_key}_per_call"] = total_value / sum(user_model_call_counts)
     for reason, count in truncated_reasons.items():
         metrics[f"{prefix}/truncated_{reason}_rate"] = count / total_turns if total_turns else 0.0
     for reason, count in discard_reasons.items():
