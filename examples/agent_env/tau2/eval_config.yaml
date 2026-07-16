@@ -1,0 +1,17 @@
+eval:
+  defaults:
+    input_key: prompt
+    metadata_key: metadata
+    n_samples_per_eval_prompt: 1
+    max_response_len: 8192
+    temperature: 0.0
+    top_p: 1.0
+    top_k: -1
+  datasets:
+    - name: tau2-dev
+      # Set EVAL_SPLITS/EVAL_PROMPT_DATA_EXTRA_ARGS when evaluating a different
+      # tau2 domain, task set, or split.
+      path: ${oc.env:TAU2_DEV_PROMPT_DATA}
+      custom_generate_function_path: examples.agent_env.tau2.rollout.generate
+      metadata_overrides:
+        split: dev

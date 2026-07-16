@@ -35,6 +35,22 @@ Durable reward variants should select a dedicated reward profile, such as
 `configs/agent_env/rewards/alfworld_ropd_seed.yaml`, instead of copying a full
 env config or exporting semantic reward environment variables.
 
+## Native Eval
+
+Formal checkpoint or training-time eval should use Slime's native eval path,
+not a task-specific driver script. Enable it from a run/train override with
+`EVAL_INTERVAL` and, when needed, `EVAL_CONFIG`. If `EVAL_CONFIG` is omitted and
+`examples/agent_env/<env>/eval_config.yaml` exists, the train adapter uses it.
+The adapter regenerates eval prompt-data under
+`${RUN_ROOT}/prompt_data/eval/`, exports the dataset variables referenced by
+the eval config, and sets `EVAL_FUNCTION_PATH` to Slime's stock
+`slime.rollout.sglang_rollout.generate_rollout` so full-async training still
+uses Slime's native eval loop.
+
+Use `EVAL_SPLITS` and `EVAL_PROMPT_NUM_TASKS` only as explicit experiment
+overrides. Formal comparisons must evaluate the full intended split and record
+the generated prompt-data files with the run artifacts.
+
 ## Rules
 
 - Do not create a copied profile to change one scalar for a one-off run. Change
