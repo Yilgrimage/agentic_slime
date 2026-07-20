@@ -253,6 +253,12 @@ def add_agent_env_arguments(parser):
         default=None,
         help="YAML reward profile installed as args.reward after custom env config loading.",
     )
+    parser.add_argument(
+        "--agent-env-config-overrides",
+        type=str,
+        default=None,
+        help="JSON object of dotted agent-env config overrides applied after --custom-config-path.",
+    )
     return parser
 
 
@@ -306,6 +312,45 @@ def _install_reward_profile(args: Any) -> None:
     setattr(args, "agent_env_reward_profile_path", str(path))
 
 
+def _set_dotted_config(args: Any, path: str, value: Any) -> None:
+    if not path or path.startswith(".") or path.endswith(".") or ".." in path:
+        raise ValueError(f"Invalid agent-env config override path: {path!r}")
+    target: Any = args
+    parts = path.split(".")
+    for part in parts[:-1]:
+        if isinstance(target, dict):
+            child = target.get(part)
+            if child is None:
+                child = {}
+                target[part] = child
+        else:
+            child = getattr(target, part, None)
+            if child is None:
+                child = {}
+                setattr(target, part, child)
+        if not isinstance(child, dict):
+            raise ValueError(f"Cannot override {path!r}: {part!r} is not a mapping")
+        target = child
+    if isinstance(target, dict):
+        target[parts[-1]] = value
+    else:
+        setattr(target, parts[-1], value)
+
+
+def _install_config_overrides(args: Any) -> None:
+    raw = str(getattr(args, "agent_env_config_overrides", "") or "").strip()
+    if not raw:
+        return
+    overrides = json.loads(raw)
+    if not isinstance(overrides, Mapping):
+        raise ValueError("--agent-env-config-overrides must be a JSON object")
+    for path, value in overrides.items():
+        if not isinstance(path, str):
+            raise ValueError("agent-env config override keys must be dotted strings")
+        _set_dotted_config(args, path, value)
+        _LOGGER.info("Applied agent-env config override: %s=%r", path, value)
+
+
 def main() -> None:
     megatron_arguments._hf_validate_args = _hf_validate_args
     _install_agent_env_megatron_actor()
@@ -314,6 +359,7 @@ def main() -> None:
     if not getattr(args, "env_server_url", None):
         raise ValueError("agent-env training requires --env-server-url; do not rely on Ray env propagation.")
     _install_reward_profile(args)
+    _install_config_overrides(args)
 
     if args.agent_env_train_loop == "sync":
         from train import train

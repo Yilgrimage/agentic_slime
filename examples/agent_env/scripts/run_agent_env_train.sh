@@ -622,6 +622,10 @@ ROLLOUT_ARGS=(
    --loss-mask-type "${LOSS_MASK_TYPE:-qwen3_5}"
    --balance-data
 )
+AGENT_ENV_ARGS=()
+if [ -n "${AGENT_ENV_CONFIG_OVERRIDES_JSON:-}" ]; then
+  AGENT_ENV_ARGS+=(--agent-env-config-overrides "${AGENT_ENV_CONFIG_OVERRIDES_JSON}")
+fi
 case "${APPLY_CHAT_TEMPLATE:-0}" in
   1|true|TRUE|yes|YES|on|ON)
     ROLLOUT_ARGS+=(--apply-chat-template)
@@ -840,6 +844,7 @@ echo "Checkpoint options: save_interval=${SAVE_INTERVAL:-${NUM_STEPS}} no_save_o
    "${MODEL_ARGS[@]}" \
    "${MODEL_EXTRA_ARGS_ARRAY[@]}" \
    "${ROLLOUT_ARGS[@]}" \
+   "${AGENT_ENV_ARGS[@]}" \
    "${EVAL_ARGS[@]}" \
    "${PERF_ARGS[@]}" \
    --train-env-vars "${TRAIN_ENV_VARS_JSON}" \
