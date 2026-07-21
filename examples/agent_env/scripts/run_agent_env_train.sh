@@ -435,7 +435,7 @@ prepare_native_eval() {
       exit 1
     fi
 
-    "${eval_python}" "${eval_script}" \
+    PYTHONPATH="${REPO_DIR}${PYTHONPATH:+:${PYTHONPATH}}" "${eval_python}" "${eval_script}" \
       --output "${path}" \
       --split "${split}" \
       "${eval_config_args[@]}" \
@@ -487,7 +487,7 @@ PROMPT_NUM_TASK_ARGS=()
 if [ "${PROMPT_NUM_TASKS}" != "all" ]; then
   PROMPT_NUM_TASK_ARGS=(--num-tasks "${PROMPT_NUM_TASKS}")
 fi
-"${PROMPT_DATA_PYTHON}" "${PROMPT_DATA_SCRIPT}" \
+PYTHONPATH="${REPO_DIR}${PYTHONPATH:+:${PYTHONPATH}}" "${PROMPT_DATA_PYTHON}" "${PROMPT_DATA_SCRIPT}" \
   --output "${DATA_PATH}" \
   --split train \
   "${PROMPT_DATA_CONFIG_ARGS[@]}" \
@@ -598,6 +598,89 @@ if [ "${USE_KL_LOSS}" = "1" ] || [ "${KL_LOSS_COEF:-0.00}" != "0.00" ]; then
   CKPT_ARGS+=(--ref-load "${REF_LOAD_DIR:-${LOAD_DIR}}")
 fi
 CKPT_ARGS+=(--load "${LOAD_DIR}")
+
+resolve_megatron_role_config() {
+  [ -n "${MEGATRON_CONFIG_PATH:-}" ] || return 0
+
+  local source_path resolved_path
+  source_path=$(resolve_repo_path "${MEGATRON_CONFIG_PATH}")
+  [ -f "${source_path}" ] || { echo "Missing Megatron role config: ${source_path}" >&2; exit 1; }
+
+  ACTOR_SAVE_DIR=${ACTOR_SAVE_DIR:-${SAVE_DIR}/actor}
+  CRITIC_SAVE_DIR=${CRITIC_SAVE_DIR:-${SAVE_DIR}/critic}
+  resolved_path="${LOG_DIR}/resolved_megatron_config.yaml"
+  export MEGATRON_CONFIG_SOURCE="${source_path}"
+  export MEGATRON_CONFIG_RESOLVED="${resolved_path}"
+  export ACTOR_SAVE_DIR CRITIC_SAVE_DIR
+
+  "${SLIME_PYTHON}" - <<'PY'
+import os
+from pathlib import Path
+
+import yaml
+
+source = Path(os.environ["MEGATRON_CONFIG_SOURCE"])
+target = Path(os.environ["MEGATRON_CONFIG_RESOLVED"])
+repo_dir = Path(os.environ["REPO_DIR"])
+
+cfg = yaml.safe_load(source.read_text()) or {}
+entries = cfg.get("megatron")
+if not isinstance(entries, list):
+    raise SystemExit(f"{source} must contain a top-level megatron list")
+
+def role_entry(role):
+    matches = [entry for entry in entries if isinstance(entry, dict) and entry.get("role") == role]
+    if len(matches) > 1:
+        raise SystemExit(f"{source} has multiple megatron entries for role={role}")
+    if matches:
+        return matches[0]
+    entry = {"name": "default", "role": role, "overrides": {}}
+    entries.append(entry)
+    return entry
+
+def canonical(path):
+    expanded = os.path.expandvars(os.path.expanduser(str(path)))
+    if not os.path.isabs(expanded):
+        expanded = str(repo_dir / expanded)
+    return os.path.normpath(os.path.abspath(expanded))
+
+role_saves = {
+    "actor": os.environ["ACTOR_SAVE_DIR"],
+    "critic": os.environ["CRITIC_SAVE_DIR"],
+}
+for role, save_dir in role_saves.items():
+    entry = role_entry(role)
+    overrides = entry.get("overrides")
+    if overrides is None:
+        overrides = entry.get("args")
+    if overrides is None:
+        overrides = {}
+    if not isinstance(overrides, dict):
+        raise SystemExit(f"{source} megatron role={role} overrides must be a mapping")
+    overrides["save"] = save_dir
+    entry["overrides"] = overrides
+    entry.pop("args", None)
+
+actor_save = canonical(role_saves["actor"])
+critic_save = canonical(role_saves["critic"])
+common = os.path.commonpath([actor_save, critic_save])
+if common == actor_save or common == critic_save:
+    raise SystemExit(
+        "Actor and critic checkpoint directories must not overlap: "
+        f"actor={actor_save} critic={critic_save}"
+    )
+
+target.parent.mkdir(parents=True, exist_ok=True)
+target.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+PY
+
+  MEGATRON_CONFIG_PATH="${resolved_path}"
+  export MEGATRON_CONFIG_PATH
+  echo "Megatron role config: source=${source_path} resolved=${MEGATRON_CONFIG_PATH}"
+  echo "Role checkpoint dirs: actor=${ACTOR_SAVE_DIR} critic=${CRITIC_SAVE_DIR}"
+}
+
+resolve_megatron_role_config
 
 ROLLOUT_ARGS=(
    --env-server-url "${ENV_ROUTER_URL}"
@@ -710,6 +793,10 @@ GRPO_ARGS=(
    --entropy-coef "${ENTROPY_COEF:-0.00}"
    --eps-clip "${EPS_CLIP:-0.2}"
    --eps-clip-high "${EPS_CLIP_HIGH:-0.28}"
+   --value-clip "${VALUE_CLIP:-0.2}"
+   --gamma "${GAMMA:-1.0}"
+   --lambd "${LAMBD:-1.0}"
+   --num-critic-only-steps "${NUM_CRITIC_ONLY_STEPS:-0}"
 )
 case "${REWARDS_NORMALIZATION:-1}" in
   0|false|FALSE|no|NO|off|OFF)
@@ -780,6 +867,9 @@ MISC_ARGS=(
    --rollout-num-gpus "${ROLLOUT_GPUS:-8}"
    --num-gpus-per-node "${NUM_GPUS:-4}"
 )
+if [ -n "${MEGATRON_CONFIG_PATH:-}" ]; then
+  MISC_ARGS+=(--megatron-config-path "${MEGATRON_CONFIG_PATH}")
+fi
 
 WANDB_PROJECT=${WANDB_PROJECT:-${EXP_PROJECT}}
 WANDB_GROUP=${WANDB_GROUP:-${EXP_NAME}}
@@ -837,7 +927,7 @@ PYH
 )
 fi
 
-echo "Launching ${ENV_NAME} GRPO with ${TRAIN_ENTRYPOINT}"
+echo "Launching ${ENV_NAME} ${ADVANTAGE_ESTIMATOR:-grpo} with ${TRAIN_ENTRYPOINT}"
 echo "Checkpoint options: save_interval=${SAVE_INTERVAL:-${NUM_STEPS}} no_save_optim=${NO_SAVE_OPTIM:-0} no_load_optim=${NO_LOAD_OPTIM:-0} async_save=${ASYNC_SAVE:-0}"
 "${SLIME_PYTHON}" "${REPO_DIR}/${TRAIN_ENTRYPOINT}" \
    "${CKPT_ARGS[@]}" \

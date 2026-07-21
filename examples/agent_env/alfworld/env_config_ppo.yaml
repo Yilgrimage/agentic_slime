@@ -1,0 +1,49 @@
+# ALFWorld agent-env config for PPO training.
+
+task:
+  split: train
+max_turns: 30
+
+timeouts:
+  policy_s: 600
+  env_request_s: 660
+
+interaction:
+  mode: text_action
+  enable_thinking: true
+  reasoning:
+    parser: qwen3-thinking
+    fallback_to_raw: false
+  text_action:
+    tag: action
+
+observation:
+  include_actions: true
+
+action:
+  restrict_to_available: false
+  invalid_fallback: model
+
+alfworld:
+  config_path: null
+  data_dir: ${AGENT_ENV_DATA_DIR}
+  training_method: dqn
+  num_train_games: -1
+  num_eval_games: -1
+  env_type: AlfredTWEnv
+  skip_to_task: false
+  direct_game_file: true
+
+env_server:
+  pool_size: 128
+  acquire_timeout_s: 600
+  lease_ttl_s: 1800
+  idempotency_ttl_s: 300
+  reuse_workers: true
+  reset_on_release: false
+  worker_start_timeout_s: 300
+  worker_request_timeout_s: 660
+  prewarm_splits:
+    - train
+  honor_direct_game_file: true
+  require_task_id: true
