@@ -11,7 +11,13 @@ ropd:
   concurrency: 8
   rubric_concurrency: 0
   judge_concurrency: 0
-  answer_mode: full
+  max_attempts: 6
+  rate_limit_backoff_s: 30
+  retry_backoff_s: 1
+  response_format: json_object
+  rubric_max_tokens: 32768
+  judge_max_tokens: 32768
+  answer_mode: final_without_tool_response
   reward_mode: answer_only
   reward_group_reference: students
   luffy_enable: false

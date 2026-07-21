@@ -102,6 +102,13 @@ async def call_json_judge(
     provider: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    max_tokens: int | None = None,
+    timeout_s: float | None = None,
+    response_format: str | dict[str, Any] | None = None,
+    extra_body: dict[str, Any] | None = None,
+    max_attempts: int | None = None,
+    rate_limit_backoff_s: float | None = None,
+    retry_backoff_s: float | None = None,
 ) -> Any:
     payload, _metadata = await call_json_judge_with_metadata(
         args,
@@ -112,6 +119,13 @@ async def call_json_judge(
         provider=provider,
         base_url=base_url,
         model=model,
+        max_tokens=max_tokens,
+        timeout_s=timeout_s,
+        response_format=response_format,
+        extra_body=extra_body,
+        max_attempts=max_attempts,
+        rate_limit_backoff_s=rate_limit_backoff_s,
+        retry_backoff_s=retry_backoff_s,
     )
     return payload
 
@@ -126,6 +140,13 @@ async def call_json_judge_with_metadata(
     provider: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    max_tokens: int | None = None,
+    timeout_s: float | None = None,
+    response_format: str | dict[str, Any] | None = None,
+    extra_body: dict[str, Any] | None = None,
+    max_attempts: int | None = None,
+    rate_limit_backoff_s: float | None = None,
+    retry_backoff_s: float | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     import aiohttp
 
@@ -137,8 +158,8 @@ async def call_json_judge_with_metadata(
     api_key = (api_key or runtime_env(args, "AUX_ENDPOINT_API_KEY", "")).strip()
     api_key_path = (api_key_path or runtime_env(args, "AUX_ENDPOINT_API_KEY_PATH", "")).strip()
     api_key = api_key or read_secret(api_key_path)
-    timeout_s = float(runtime_env(args, "AUX_ENDPOINT_TIMEOUT_S", "120") or 120)
-    max_tokens = int(runtime_env(args, "AUX_ENDPOINT_MAX_TOKENS", "1024") or 1024)
+    timeout_s = float(timeout_s if timeout_s is not None else (runtime_env(args, "AUX_ENDPOINT_TIMEOUT_S", "120") or 120))
+    max_tokens = int(max_tokens if max_tokens is not None else (runtime_env(args, "AUX_ENDPOINT_MAX_TOKENS", "1024") or 1024))
     temperature = float(runtime_env(args, "AUX_ENDPOINT_TEMPERATURE", "0.0") or 0.0)
     top_p = float(runtime_env(args, "AUX_ENDPOINT_TOP_P", "1.0") or 1.0)
     provider = (provider or runtime_env(args, "AUX_ENDPOINT_PROVIDER", "")).strip().lower()
@@ -156,6 +177,10 @@ async def call_json_judge_with_metadata(
         "top_p": top_p,
         "max_tokens": max_tokens,
     }
+    if response_format:
+        request_body["response_format"] = _normalize_response_format(response_format)
+    if extra_body:
+        request_body.update(extra_body)
     if provider in {"sglang", "vllm", "aux", "local"}:
         request_body["separate_reasoning"] = separate_reasoning
         request_body["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
@@ -168,7 +193,8 @@ async def call_json_judge_with_metadata(
         headers["Authorization"] = f"Bearer {api_key}"
 
     last_error: Exception | None = None
-    for attempt in range(3):
+    attempts = max(1, int(max_attempts or 3))
+    for attempt in range(attempts):
         started = time.monotonic()
         try:
             timeout = aiohttp.ClientTimeout(total=timeout_s)
@@ -181,7 +207,24 @@ async def call_json_judge_with_metadata(
                             f"{truncate(body, 800)}; payload_chars={len(user_prompt)}"
                         )
                     data = await response.json()
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            message = choice.get("message") or {}
+            content = message.get("content") or ""
+            if isinstance(content, list):
+                parts = []
+                for item in content:
+                    if isinstance(item, dict):
+                        parts.append(str(item.get("text") or item.get("content") or ""))
+                    else:
+                        parts.append(str(getattr(item, "text", "") or getattr(item, "content", "") or ""))
+                content = "\n".join(part for part in parts if part)
+            if not str(content).strip():
+                reasoning = message.get("reasoning_content") or message.get("reasoning")
+                raise ValueError(
+                    "judge returned empty content "
+                    f"finish_reason={choice.get('finish_reason')!r} "
+                    f"reasoning_chars={len(str(reasoning or ''))}"
+                )
             try:
                 payload = extract_json_payload(content)
             except Exception as exc:
@@ -194,6 +237,7 @@ async def call_json_judge_with_metadata(
                 "attempt": attempt + 1,
                 "latency_s": time.monotonic() - started,
                 "prompt_chars": len(user_prompt),
+                "max_tokens": float(max_tokens),
             }
             for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 value = usage.get(key)
@@ -205,7 +249,39 @@ async def call_json_judge_with_metadata(
             return payload, metadata
         except Exception as exc:
             last_error = exc
-            if attempt == 2:
+            if attempt == attempts - 1:
                 break
-            await asyncio.sleep(min(2**attempt, 30))
-    raise RuntimeError(f"agent-env judge failed after 3 attempts: {last_error!r}")
+            if _is_rate_limit_error(exc):
+                await asyncio.sleep(float(rate_limit_backoff_s if rate_limit_backoff_s is not None else min(2**attempt, 30)))
+            else:
+                await asyncio.sleep(float(retry_backoff_s if retry_backoff_s is not None else min(2**attempt, 30)))
+    raise RuntimeError(f"agent-env JSON reward request failed after {attempts} attempts: {last_error!r}")
+
+
+def _normalize_response_format(value: str | dict[str, Any]) -> dict[str, Any] | str:
+    if isinstance(value, dict):
+        return value
+    text = str(value).strip()
+    if text == "json_object":
+        return {"type": "json_object"}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    return parsed if isinstance(parsed, dict) else text
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "429",
+            "ratelimit",
+            "rate limit",
+            "too many requests",
+            "toomanyrequests",
+            "endpointtpmexceeded",
+            "tpm",
+        )
+    )

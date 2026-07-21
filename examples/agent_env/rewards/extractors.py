@@ -358,5 +358,14 @@ def record_reward_result(sample: Sample, impl_name: str, result: Any) -> None:
     sample_metadata["judge_score"] = float(record.get("score", 0.0))
     if record.get("raw") is not None:
         sample_metadata["judge_raw"] = record["raw"]
+        if isinstance(record["raw"], dict) and bool(record["raw"].get("remove_sample", False)):
+            sample.remove_sample = True
+            sample_metadata["discard_sample"] = True
+            sample_metadata["discard_reason"] = str(
+                record["raw"].get("discard_reason")
+                or record["raw"].get("fallback")
+                or record.get("reason")
+                or "reward_remove_sample"
+            )
     if record.get("reason"):
         sample_metadata["judge_reason"] = record["reason"]

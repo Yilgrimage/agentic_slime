@@ -28,6 +28,21 @@ from .types import RewardResult
 
 RUBRIC_SCHEMA_VERSION = "ropd.rubric.v1"
 BATCH_VERIFIER_SCHEMA_VERSION = "ropd.batch_verifier.v2"
+TEACHER_TRACE_FIELDS = (
+    "teacher_no_tool_response_text",
+    "teacher_trace_no_tool_response",
+    "teacher_no_tool_trace",
+    "reference_no_tool_trace",
+    "teacher_response",
+    "teacher_answer",
+    "teacher_final_answer",
+    "teacher_full_trace_text",
+    "teacher_trace",
+    "teacher_trajectory",
+    "reference_trace",
+)
+
+_TEACHER_INDEX_CACHE: dict[str, tuple[int, int, dict[str, dict[str, Any]]]] = {}
 
 RUBRIC_SYSTEM_PROMPT = "你是一名教育评估与共享评分细则设计专家。只返回 JSON 对象本身。"
 JUDGE_SYSTEM_PROMPT = "你是一名答案评分专家。只返回 JSON 对象本身。"
@@ -64,6 +79,8 @@ PROMPT:
 4. 对替代方法安全：如果回答采用了不同但同样合理的方法，只要体现出相同优点，也应被奖励。
 5. 尽可能具有区分度：优先选择那些更强的参考回答或学生回答明显具备、而更弱回答明显缺失的优点，但这些优点仍须保持为一般性的答案质量标准。
 6. 基于外显回答可评估：优先选择那些能够基于回答中可直接观察到的内容来评估答案质量的标准。
+7. 对 agent 任务，skill 名称只是能力线索而不是硬性约束；如果回答使用了等价 skill、MCP 或工具能力并正确执行，rubric 不应要求精确匹配某个历史 skill 名。
+8. 对 agent 任务，最终任务结论或完成状态应是最高权重信号；过程、证据链和工具使用是支撑信号，不能让一个最终结论错误的回答仅靠过程相似拿到高分。
 
 # 必须参考的三类内容场景
 请在 `category` 字段中填写最匹配该 criterion 的内容场景名称：
@@ -145,6 +162,9 @@ PROMPT:
 - 如果回答采用了不同但有效的方法，只要满足 criterion 描述的要求，也应判为 `true`。
 - 不要引入 rubric 和题目之外的额外评分标准。
 - 不要因为回答更长、更自信、措辞更像标准答案或风格更好就判为 `true`，除非 criterion 明确要求这些属性。
+- 不要因为 skill 名称不同而扣分；如果回答使用了等价 skill、MCP 或工具能力并正确执行，应按 criterion 实质判定。
+- 当回答清楚使用了与参考回答相同或等价的 MCP/tool 路径、参数合理、并且因为 timeout、rate limit、5xx 或 internal service error 等瞬时服务问题失败时，不要仅因服务没有返回数据而判定过程/tool-use criterion 失败。
+- 上述瞬时服务例外不适用于：工具选错、参数错误、缺鉴权/无权限、跳过必要取证、编造工具结果、或最终结论没有证据支持。
 - 不要比较不同回答之间谁更好。
 - 每个回答都必须独立评分。
 
@@ -285,6 +305,47 @@ def _role_endpoint(args: Any, role: str) -> dict[str, str]:
     return values
 
 
+def _role_cfg(args: Any, role: str, name: str, default: Any = None) -> Any:
+    role_value = _cfg(args, f"{role}_{name}", None)
+    if role_value is not None:
+        return role_value
+    return _cfg(args, name, default)
+
+
+def _role_int(args: Any, role: str, name: str, default: int) -> int:
+    return _positive_int(_role_cfg(args, role, name, default), default)
+
+
+def _role_float(args: Any, role: str, name: str, default: float) -> float:
+    return float_value(_role_cfg(args, role, name, default), default)
+
+
+def _role_json(args: Any, role: str, name: str) -> dict[str, Any] | None:
+    value = _role_cfg(args, role, name, None)
+    if value in (None, "", {}):
+        return None
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"reward.ropd.{role}_{name} must be a JSON object: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"reward.ropd.{role}_{name} must be a JSON object")
+    return parsed
+
+
+def _role_request_options(args: Any, role: str, *, default_max_tokens: int) -> dict[str, Any]:
+    return {
+        "max_tokens": _role_int(args, role, "max_tokens", default_max_tokens),
+        "max_attempts": _role_int(args, role, "max_attempts", _role_int(args, role, "attempts", 6)),
+        "rate_limit_backoff_s": _role_float(args, role, "rate_limit_backoff_s", 30.0),
+        "retry_backoff_s": _role_float(args, role, "retry_backoff_s", 1.0),
+        "response_format": _role_cfg(args, role, "response_format", "json_object"),
+        "extra_body": _role_json(args, role, "extra_body_json"),
+    }
+
+
 def _positive_int(value: Any, default: int) -> int:
     try:
         parsed = int(str(value).strip())
@@ -351,6 +412,158 @@ def _configured_metadata_value(args: Any, sample: Sample, cfg_name: str, default
     return _metadata_value(sample, keys)
 
 
+def _teacher_index_path(args: Any) -> Path | None:
+    raw = str(_cfg(args, "teacher_index_path", "") or runtime_env(args, "AGENT_ENV_ROPD_TEACHER_INDEX_PATH", "")).strip()
+    return resolve_path(args, raw) if raw else None
+
+
+def _candidate_values_from_mapping(mapping: dict[str, Any], keys: list[str]) -> list[str]:
+    values: list[str] = []
+    for key in keys:
+        value = mapping.get(key)
+        if value in (None, "", []):
+            continue
+        for item in _list_value(value):
+            values.append(item)
+            if "::" in item:
+                values.append(item.split("::", 1)[0])
+    return values
+
+
+def _teacher_index_key_candidates(args: Any, sample: Sample) -> list[str]:
+    sample_metadata = metadata(sample)
+    keys = _list_value(
+        _cfg(args, "teacher_index_keys", None),
+        (
+            "teacher_trace_key",
+            "teacher_index_key",
+            "teacher_rollout_key",
+            "rollout_key",
+            "source_sample_id",
+            "global_index",
+            "prompt_index",
+            "row_index",
+            "sample_id",
+            "task_id",
+            "id",
+            "task_index",
+        ),
+    )
+    candidates = _candidate_values_from_mapping(sample_metadata, keys)
+    source_row = sample_metadata.get("source_row")
+    if isinstance(source_row, dict):
+        candidates.extend(_candidate_values_from_mapping(source_row, keys))
+    sample_index = getattr(sample, "index", None)
+    if sample_index is not None:
+        candidates.append(str(sample_index))
+    join_value = _join_value(args, sample)
+    if join_value:
+        candidates.append(join_value)
+    return list(dict.fromkeys(value for value in candidates if value))
+
+
+def _first_mapping_text(mapping: dict[str, Any], keys: list[str]) -> str:
+    for key in keys:
+        value = mapping.get(key)
+        if value in (None, "", []):
+            continue
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+        return str(value).strip()
+    return ""
+
+
+def _teacher_index_row_text(args: Any, row: dict[str, Any]) -> str:
+    keys = _list_value(_cfg(args, "teacher_answer_keys", None), TEACHER_TRACE_FIELDS)
+    for source in (row, row.get("evidence"), row.get("adapter_result"), row.get("source_row")):
+        if isinstance(source, dict):
+            text = _first_mapping_text(source, keys)
+            if text:
+                return text
+    return ""
+
+
+def _teacher_index_row_status(row: dict[str, Any], *, has_text: bool) -> str:
+    for source in (row, row.get("evidence"), row.get("adapter_result")):
+        if isinstance(source, dict):
+            for success_key in ("teacher_success", "success", "completed"):
+                success = source.get(success_key)
+                if success is True:
+                    return "completed"
+            value = source.get("status") or source.get("teacher_status") or source.get("episode_status")
+            if value:
+                status = str(value).strip().lower()
+                if status in {"ok", "success", "succeeded", "done"}:
+                    return "completed"
+                return status
+    return "completed" if has_text else "missing"
+
+
+def _read_teacher_index(args: Any, path: Path) -> dict[str, dict[str, Any]]:
+    stat = path.stat()
+    cache_key = str(path.resolve())
+    cached = _TEACHER_INDEX_CACHE.get(cache_key)
+    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        return cached[2]
+
+    rows: list[dict[str, Any]] = []
+    if path.suffix.lower() == ".json":
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            if all(isinstance(item, dict) for item in value.values()):
+                rows = [dict(item, _index_key=str(key)) for key, item in value.items()]
+            elif isinstance(value.get("items"), list):
+                rows = [item for item in value["items"] if isinstance(item, dict)]
+            else:
+                rows = [value]
+        elif isinstance(value, list):
+            rows = [item for item in value if isinstance(item, dict)]
+    else:
+        with path.open("r", encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    if not line.endswith("\n"):
+                        break
+                    raise ValueError(f"Invalid JSON in teacher index {path}:{line_no}: {exc}") from exc
+                if isinstance(value, dict):
+                    rows.append(value)
+
+    key_fields = _list_value(
+        _cfg(args, "teacher_index_keys", None),
+        (
+            "teacher_trace_key",
+            "teacher_index_key",
+            "teacher_rollout_key",
+            "rollout_key",
+            "source_sample_id",
+            "global_index",
+            "prompt_index",
+            "row_index",
+            "sample_id",
+            "task_id",
+            "id",
+            "task_index",
+        ),
+    )
+    index: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        candidates = _candidate_values_from_mapping(row, key_fields)
+        source_row = row.get("source_row")
+        if isinstance(source_row, dict):
+            candidates.extend(_candidate_values_from_mapping(source_row, key_fields))
+        if row.get("_index_key") not in (None, ""):
+            candidates.append(str(row["_index_key"]))
+        for key in dict.fromkeys(candidates):
+            index.setdefault(key, row)
+
+    _TEACHER_INDEX_CACHE[cache_key] = (stat.st_mtime_ns, stat.st_size, index)
+    return index
+
+
 def _render_answer_block(label: str, answers: str | list[str] | tuple[str, ...], *, start_index: int = 0, force_labels: bool = False) -> str:
     if isinstance(answers, str):
         normalized = (answers,)
@@ -408,6 +621,25 @@ def _message_text(value: Any) -> str:
 def _strip_tool_response_text(text: str) -> str:
     if not text:
         return ""
+    text = re.sub(r"<\|im_start\|>system\n.*?<\|im_end\|>\n?", "", text, flags=re.S)
+    text = re.sub(r"<\|im_start\|>developer\n.*?<\|im_end\|>\n?", "", text, flags=re.S)
+    text = re.sub(r"<\|im_start\|>tool\n.*?<\|im_end\|>\n?", "", text, flags=re.S)
+    text = re.sub(r"<\|im_start\|>user\n\s*<tool_response>.*?</tool_response>\s*<\|im_end\|>\n?", "", text, flags=re.S)
+    text = re.sub(r"<tool_response>.*?</tool_response>", "", text, flags=re.S)
+    labels_to_strip = {"SYSTEM", "DEVELOPER", "TOOL", "TOOL_RESULT", "TOOL_RESULTS", "TOOL_RESPONSE", "TOOL_RESPONSES"}
+    pattern = re.compile(r"(?m)^(USER|ASSISTANT|SYSTEM|DEVELOPER|TOOL|TOOL_RESULT|TOOL_RESULTS|TOOL_RESPONSE|TOOL_RESPONSES|TOOL_CALLS):\s*\n?")
+    matches = list(pattern.finditer(text))
+    if matches:
+        pieces: list[str] = []
+        cursor = 0
+        for idx, match in enumerate(matches):
+            label = match.group(1)
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+            if label in labels_to_strip:
+                pieces.append(text[cursor : match.start()])
+                cursor = end
+        pieces.append(text[cursor:])
+        text = "".join(pieces)
     lines: list[str] = []
     skip_block = False
     for line in text.splitlines():
@@ -510,6 +742,18 @@ def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
         return tuple(
             dict.fromkeys(_sanitize_teacher_answer_for_anonymous_verifier(value) for value in values if value.strip())
         )
+    index_path = _teacher_index_path(args)
+    if index_path is not None:
+        index = _read_teacher_index(args, index_path)
+        for key in _teacher_index_key_candidates(args, sample):
+            row = index.get(key)
+            if row is None:
+                continue
+            text = _teacher_index_row_text(args, row)
+            status = _teacher_index_row_status(row, has_text=bool(text))
+            if status != "completed" or not text:
+                return ()
+            return (_sanitize_teacher_answer_for_anonymous_verifier(text),)
     return ()
 
 
@@ -865,6 +1109,7 @@ async def _rubric_for_bucket(
             prompt,
             system_prompt=RUBRIC_SYSTEM_PROMPT,
             api_key_path=_role_api_key_path(args, "rubric"),
+            **_role_request_options(args, "rubric", default_max_tokens=32768),
             **_role_endpoint(args, "rubric"),
         )
         call_metadata = {
@@ -915,8 +1160,11 @@ def _fallback_result(
     rubric_source: str = "",
     details: dict[str, Any] | None = None,
 ) -> RewardResult:
+    discard_reason = f"ropd_{reason}"
     raw = {
         "fallback": reason,
+        "remove_sample": True,
+        "discard_reason": discard_reason,
         "rubric_source": rubric_source or reason,
         "join_key": _join_key(args),
         "join_value": _join_value(args, sample),
@@ -927,7 +1175,7 @@ def _fallback_result(
         score=0.0,
         components={"rubric_task_success": 0.0},
         raw=raw,
-        reason=reason,
+        reason=discard_reason,
         returns_total=True,
         reward_version="ropd_v1_fallback",
     )
@@ -1030,6 +1278,7 @@ async def _score_bucket(
             prompt,
             system_prompt=JUDGE_SYSTEM_PROMPT,
             api_key_path=_role_api_key_path(args, "judge"),
+            **_role_request_options(args, "judge", default_max_tokens=32768),
             **_role_endpoint(args, "judge"),
         )
         judge_call = {
@@ -1156,8 +1405,9 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
         bucket_items, rubric_infos, strict=True
     ):
         if rubric is None:
+            reason = "missing_teacher" if not teacher_answers or rubric_source == "missing_teacher" else "missing_rubric"
             for idx in indices:
-                results[idx] = _fallback_result(args, samples[idx], "missing_rubric", rubric_source)
+                results[idx] = _fallback_result(args, samples[idx], reason, rubric_source)
             continue
         judge_tasks.append(
             (
