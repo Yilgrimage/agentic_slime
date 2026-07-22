@@ -577,6 +577,11 @@ case "${ASYNC_SAVE:-0}" in
     CKPT_ARGS+=(--async-save)
     ;;
 esac
+case "${USE_CHECKPOINT_OPT_PARAM_SCHEDULER:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    CKPT_ARGS+=(--use-checkpoint-opt-param-scheduler)
+    ;;
+esac
 USE_KL_LOSS=${USE_KL_LOSS:-0}
 LOAD_DIR=${LOAD_DIR:-${TORCH_DIST_DIR}}
 if [ ! -d "${LOAD_DIR}" ]; then

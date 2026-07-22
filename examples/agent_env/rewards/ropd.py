@@ -29,6 +29,9 @@ from .types import RewardResult
 RUBRIC_SCHEMA_VERSION = "ropd.rubric.v1"
 BATCH_VERIFIER_SCHEMA_VERSION = "ropd.batch_verifier.v2"
 TEACHER_TRACE_FIELDS = (
+    "teacher_tool_trace",
+    "teacher_trace_tool_io",
+    "teacher_action_observation_trace",
     "teacher_no_tool_response_text",
     "teacher_trace_no_tool_response",
     "teacher_no_tool_trace",
@@ -618,6 +621,200 @@ def _message_text(value: Any) -> str:
     return str(value)
 
 
+def _strip_reasoning_text(text: Any) -> str:
+    value = str(text or "")
+    value = re.sub(r"<think>.*?</think>", "", value, flags=re.I | re.S)
+    if "</think>" in value:
+        value = value.rsplit("</think>", 1)[1]
+    return value.strip()
+
+
+def _render_tool_calls(message: dict[str, Any]) -> str:
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return ""
+    rendered: list[str] = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            rendered.append(_message_text(call))
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = str(function.get("name") or call.get("name") or "").strip()
+        arguments = function.get("arguments") if "arguments" in function else call.get("arguments")
+        if isinstance(arguments, str):
+            arguments_text = arguments.strip()
+        else:
+            arguments_text = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True, default=str)
+        rendered.append(f"{name}({arguments_text})" if name else arguments_text)
+    return "\n".join(item for item in rendered if item.strip())
+
+
+def _action_text_from_assistant(message: dict[str, Any]) -> str:
+    tool_call_text = _render_tool_calls(message)
+    if tool_call_text:
+        return tool_call_text
+    content = _strip_reasoning_text(message.get("content"))
+    match = re.search(r"<action>\s*(.*?)\s*</action>", content, flags=re.I | re.S)
+    if match:
+        return match.group(1).strip()
+    return content
+
+
+def _message_content(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if content in (None, "", []):
+        return ""
+    return _message_text(content).strip()
+
+
+def _tool_response_from_messages(messages: list[dict[str, Any]], start: int) -> tuple[str, int]:
+    parts: list[str] = []
+    cursor = start
+    while cursor < len(messages):
+        message = messages[cursor]
+        role = str(message.get("role") or "")
+        if role == "assistant":
+            break
+        if role in {"user", "tool"}:
+            text = _message_content(message)
+            if text:
+                parts.append(text)
+        cursor += 1
+    return "\n\n".join(parts).strip(), cursor
+
+
+def _tool_io_trace_from_messages(messages: list[Any], *, final_observation: str = "") -> str:
+    normalized = [item for item in messages if isinstance(item, dict)]
+    if not normalized:
+        return ""
+    lines: list[str] = []
+    cursor = 0
+    initial_parts: list[str] = []
+    while cursor < len(normalized):
+        message = normalized[cursor]
+        role = str(message.get("role") or "")
+        if role == "assistant":
+            break
+        if role in {"user", "tool"}:
+            text = _message_content(message)
+            if text:
+                initial_parts.append(text)
+        cursor += 1
+    if initial_parts:
+        lines.append("Initial observation:\n" + "\n\n".join(initial_parts).strip())
+    step = 1
+    while cursor < len(normalized):
+        message = normalized[cursor]
+        if str(message.get("role") or "") != "assistant":
+            cursor += 1
+            continue
+        action_text = _action_text_from_assistant(message)
+        observation, next_cursor = _tool_response_from_messages(normalized, cursor + 1)
+        if not observation and final_observation and next_cursor >= len(normalized):
+            observation = final_observation
+        parts = [f"Step {step}:"]
+        if action_text:
+            parts.append(f"Tool call:\n{action_text}")
+        if observation:
+            parts.append(f"Tool response:\n{observation}")
+        if len(parts) > 1:
+            lines.append("\n".join(parts))
+            step += 1
+        cursor = max(next_cursor, cursor + 1)
+    return "\n\n".join(lines).strip()
+
+
+def _tool_io_trace_from_turns(turns: list[Any]) -> str:
+    lines: list[str] = []
+    for idx, turn in enumerate(turns, start=1):
+        if not isinstance(turn, dict):
+            continue
+        action = turn.get("action")
+        if action in (None, "", []):
+            assistant = turn.get("assistant_message")
+            if isinstance(assistant, dict):
+                action = _action_text_from_assistant(assistant)
+        env_step = turn.get("env_step")
+        observation = ""
+        if isinstance(env_step, dict):
+            observation = str(env_step.get("observation") or "").strip()
+        if not observation and turn.get("observation") not in (None, "", []):
+            observation = str(turn.get("observation") or "").strip()
+        parts = [f"Step {idx}:"]
+        if action not in (None, "", []):
+            parts.append(f"Tool call:\n{_message_text(action)}")
+        if observation:
+            parts.append(f"Tool response:\n{observation}")
+        if len(parts) > 1:
+            lines.append("\n".join(parts))
+    return "\n\n".join(lines).strip()
+
+
+def _tool_io_trace_from_token_segments(segments: list[Any]) -> str:
+    normalized = [item for item in segments if isinstance(item, dict)]
+    if not normalized:
+        return ""
+    lines: list[str] = []
+    step = 1
+    pending_action = ""
+    for segment in normalized:
+        kind = str(segment.get("kind") or "")
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        if kind == "initial_prompt":
+            if not lines:
+                lines.append("Initial observation:\n" + _strip_chat_boundary_tokens_for_reward(text))
+        elif kind == "assistant":
+            pending_action = _strip_reasoning_text(_strip_chat_boundary_tokens_for_reward(text))
+            match = re.search(r"<action>\s*(.*?)\s*</action>", pending_action, flags=re.I | re.S)
+            if match:
+                pending_action = match.group(1).strip()
+        elif kind == "environment" and pending_action:
+            lines.append(
+                f"Step {step}:\n"
+                f"Tool call:\n{pending_action}\n"
+                f"Tool response:\n{_strip_chat_boundary_tokens_for_reward(text)}"
+            )
+            pending_action = ""
+            step += 1
+    return "\n\n".join(lines).strip()
+
+
+def _strip_chat_boundary_tokens_for_reward(text: str) -> str:
+    value = str(text or "")
+    for token in ("<|im_start|>", "<|im_end|>", "<|endoftext|>"):
+        value = value.replace(token, "")
+    value = re.sub(r"(?m)^(system|assistant|user|tool)\s*$", "", value)
+    return value.strip()
+
+
+def _tool_io_trace_text(sample: Sample) -> str:
+    sample_metadata = metadata(sample)
+    episode_result = sample_metadata.get("episode_result")
+    final_observation = ""
+    if isinstance(episode_result, dict):
+        final_observation = str(episode_result.get("observation") or "").strip()
+    messages = sample_metadata.get("messages")
+    if isinstance(messages, list):
+        text = _tool_io_trace_from_messages(messages, final_observation=final_observation)
+        if text:
+            return text
+    turns = sample_metadata.get("turns")
+    if isinstance(turns, list):
+        text = _tool_io_trace_from_turns(turns)
+        if text:
+            return text
+    segments = sample_metadata.get("token_segments")
+    if isinstance(segments, list):
+        text = _tool_io_trace_from_token_segments(segments)
+        if text:
+            return text
+    return _strip_reasoning_text(str(getattr(sample, "response", "") or ""))
+
+
 def _strip_tool_response_text(text: str) -> str:
     if not text:
         return ""
@@ -697,6 +894,11 @@ def _answer_for_judge(args: Any, sample: Sample) -> str:
     mode = _answer_mode(args)
     if mode == "final":
         return prediction
+    if mode in {"tool_trace", "tool_io", "tool_call_response_trace", "action_observation_trace"}:
+        return _trim_answer_for_judge(_tool_io_trace_text(sample) or prediction)
+    if mode in {"final_with_tool_trace", "final_with_tool_io", "final_with_action_observation_trace"}:
+        trace = _tool_io_trace_text(sample)
+        return _trim_answer_for_judge(_combine_final_and_trace(prediction, trace, trace_label="Tool Call And Response Trace"))
     if mode in {"trace", "full_trace"}:
         return _trim_answer_for_judge(_trace_text(sample))
     if mode in {
