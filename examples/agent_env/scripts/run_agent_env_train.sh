@@ -43,6 +43,23 @@ resolve_repo_path() {
   fi
 }
 
+is_true_value() {
+  case "${1:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_nonzero_number() {
+  local value=${1:-0}
+  awk -v value="${value}" 'BEGIN {
+    if (value !~ /^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$/) {
+      exit 2
+    }
+    exit ((value + 0) != 0) ? 0 : 1
+  }'
+}
+
 if [ -n "${TRAIN_PROFILE:-}" ]; then
   TRAIN_PROFILE_PATH=$(resolve_repo_path "${TRAIN_PROFILE}")
   [ -f "${TRAIN_PROFILE_PATH}" ] || { echo "Missing train profile: ${TRAIN_PROFILE_PATH}" >&2; exit 1; }
@@ -583,6 +600,18 @@ case "${USE_CHECKPOINT_OPT_PARAM_SCHEDULER:-0}" in
     ;;
 esac
 USE_KL_LOSS=${USE_KL_LOSS:-0}
+KL_LOSS_ENABLED=0
+if is_true_value "${USE_KL_LOSS}"; then
+  KL_LOSS_ENABLED=1
+elif is_nonzero_number "${KL_LOSS_COEF:-0.00}"; then
+  KL_LOSS_ENABLED=1
+else
+  kl_loss_status=$?
+  if [ "${kl_loss_status}" -eq 2 ]; then
+    echo "Invalid KL_LOSS_COEF: ${KL_LOSS_COEF:-0.00}" >&2
+    exit 1
+  fi
+fi
 LOAD_DIR=${LOAD_DIR:-${TORCH_DIST_DIR}}
 if [ ! -d "${LOAD_DIR}" ]; then
   cat >&2 <<EOF
@@ -599,7 +628,7 @@ Create it first, for example:
 EOF
   exit 1
 fi
-if [ "${USE_KL_LOSS}" = "1" ] || [ "${KL_LOSS_COEF:-0.00}" != "0.00" ]; then
+if [ "${KL_LOSS_ENABLED}" = "1" ]; then
   CKPT_ARGS+=(--ref-load "${REF_LOAD_DIR:-${LOAD_DIR}}")
 fi
 CKPT_ARGS+=(--load "${LOAD_DIR}")
@@ -823,7 +852,7 @@ case "${USE_ROLLOUT_LOGPROBS:-0}" in
     GRPO_ARGS+=(--use-rollout-logprobs)
     ;;
 esac
-if [ "${USE_KL_LOSS}" = "1" ] || [ "${KL_LOSS_COEF:-0.00}" != "0.00" ]; then
+if [ "${KL_LOSS_ENABLED}" = "1" ]; then
   GRPO_ARGS+=(--use-kl-loss --kl-loss-coef "${KL_LOSS_COEF:-0.00}" --kl-loss-type "${KL_LOSS_TYPE:-low_var_kl}")
 fi
 
