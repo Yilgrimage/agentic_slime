@@ -589,11 +589,7 @@ def _limit_text(text: Any, max_chars: int) -> str:
 
 
 def _trim_answer_for_judge(answer: Any) -> str:
-    answer_text = str(answer or "")
-    if "</think>" not in answer_text:
-        return answer_text
-    trimmed = answer_text.rsplit("</think>", 1)[1].strip()
-    return trimmed or answer_text
+    return _strip_reasoning_text(_strip_chat_boundary_tokens_for_reward(str(answer or "")))
 
 
 def _sanitize_teacher_answer_for_anonymous_verifier(answer: Any) -> str:
@@ -623,9 +619,12 @@ def _message_text(value: Any) -> str:
 
 def _strip_reasoning_text(text: Any) -> str:
     value = str(text or "")
-    value = re.sub(r"<think>.*?</think>", "", value, flags=re.I | re.S)
+    value = re.sub(r"<think\b[^>]*>.*?</think>", "", value, flags=re.I | re.S)
+    value = re.sub(r"<\|begin_of_thought\|>.*?<\|end_of_thought\|>", "", value, flags=re.I | re.S)
     if "</think>" in value:
         value = value.rsplit("</think>", 1)[1]
+    if "<|end_of_thought|>" in value:
+        value = value.rsplit("<|end_of_thought|>", 1)[1]
     return value.strip()
 
 
@@ -744,7 +743,7 @@ def _tool_io_trace_from_turns(turns: list[Any]) -> str:
             observation = str(turn.get("observation") or "").strip()
         parts = [f"Step {idx}:"]
         if action not in (None, "", []):
-            parts.append(f"Tool call:\n{_message_text(action)}")
+            parts.append(f"Tool call:\n{_strip_reasoning_text(_message_text(action))}")
         if observation:
             parts.append(f"Tool response:\n{observation}")
         if len(parts) > 1:

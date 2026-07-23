@@ -29,6 +29,7 @@ AUX_NODE=${AUX_NODE:-}
 AUX_PORT=${AUX_PORT:-}
 AUX_GPUS=${AUX_GPUS:-}
 AUX_TP=${AUX_TP:-}
+AUX_DP=${AUX_DP:-}
 AUX_PP=${AUX_PP:-}
 AUX_SESSION=${AUX_SESSION:-}
 AUX_MEM_FRACTION=${AUX_MEM_FRACTION:-}
@@ -89,6 +90,7 @@ Options:
   --port PORT                    Local aux SGLang port.
   --gpus CSV                     Local aux CUDA_VISIBLE_DEVICES.
   --tp N                         Local aux tensor parallel size.
+  --dp N                         Local aux data parallel size.
   --pp N                         Local aux pipeline parallel size.
   --max-model-len N              Local vLLM max model length.
   --gpu-memory-utilization X     Local vLLM GPU memory utilization.
@@ -137,6 +139,7 @@ while [ $# -gt 0 ]; do
     --port) AUX_PORT=$2; shift 2 ;;
     --gpus) AUX_GPUS=$2; shift 2 ;;
     --tp) AUX_TP=$2; shift 2 ;;
+    --dp) AUX_DP=$2; shift 2 ;;
     --pp) AUX_PP=$2; shift 2 ;;
     --max-model-len) AUX_MAX_MODEL_LEN=$2; shift 2 ;;
     --gpu-memory-utilization) AUX_GPU_MEMORY_UTILIZATION=$2; shift 2 ;;
@@ -197,6 +200,7 @@ apply_aux_defaults() {
   fi
   AUX_PORT=${AUX_PORT:-18080}
   AUX_GPUS=${AUX_GPUS:-0,1,2,3,4,5,6,7}
+  AUX_DP=${AUX_DP:-1}
   AUX_PP=${AUX_PP:-1}
   AUX_SESSION=${AUX_SESSION:-agent_env_aux_endpoint}
   AUX_MEM_FRACTION=${AUX_MEM_FRACTION:-0.65}
@@ -606,7 +610,7 @@ cleanup_aux_runtime() {
 }
 
 start_sglang_endpoint() {
-  local nodes_file model_path node node_addr base_url tool_parser reasoning_parser tp log serve_cmd
+  local nodes_file model_path node node_addr base_url tool_parser reasoning_parser tp dp log serve_cmd
   nodes_file=$(resolve_path "${AUX_NODES_FILE}")
   model_path=$(resolve_local_model_path)
   node=$(resolve_aux_node "${nodes_file}")
@@ -624,11 +628,12 @@ start_sglang_endpoint() {
   tool_parser="${AUX_TOOL_CALL_PARSER:-$(infer_tool_call_parser_from_model "${model_path}" sglang)}"
   reasoning_parser="${AUX_REASONING_PARSER:-$(infer_reasoning_parser_from_model "${model_path}" sglang)}"
   tp="${AUX_TP:-$(infer_tp_from_model "${model_path}")}"
+  dp="${AUX_DP:-1}"
   log="${LOG_DIR}/aux_endpoint.log"
-  serve_cmd=$(printf 'cd %q && mkdir -p %q && export PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=%q PYTHONPATH=%q no_proxy=%q NO_PROXY=%q && %q -m sglang.launch_server --model-path %q --served-model-name %q --host 0.0.0.0 --port %q --tp-size %q --mem-fraction-static %q --reasoning-parser %q --tool-call-parser %q --trust-remote-code > %q 2>&1' \
+  serve_cmd=$(printf 'cd %q && mkdir -p %q && export PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=%q PYTHONPATH=%q no_proxy=%q NO_PROXY=%q && %q -m sglang.launch_server --model-path %q --served-model-name %q --host 0.0.0.0 --port %q --tp-size %q --dp-size %q --mem-fraction-static %q --reasoning-parser %q --tool-call-parser %q --trust-remote-code > %q 2>&1' \
     "${REPO_DIR}" "${LOG_DIR}" "${AUX_GPUS}" "${REPO_DIR}" \
     "${no_proxy:-localhost,127.0.0.1,0.0.0.0,::1}" "${NO_PROXY:-localhost,127.0.0.1,0.0.0.0,::1}" \
-    "${AUX_SERVE_PYTHON}" "${model_path}" "${AUX_SERVED_MODEL_NAME}" "${AUX_PORT}" "${tp}" "${AUX_MEM_FRACTION}" \
+    "${AUX_SERVE_PYTHON}" "${model_path}" "${AUX_SERVED_MODEL_NAME}" "${AUX_PORT}" "${tp}" "${dp}" "${AUX_MEM_FRACTION}" \
     "${reasoning_parser}" "${tool_parser}" "${log}")
   if [ -n "${AUX_EXTRA_SERVER_ARGS}" ]; then
     serve_cmd="${serve_cmd} ${AUX_EXTRA_SERVER_ARGS}"
