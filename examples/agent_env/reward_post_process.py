@@ -73,7 +73,7 @@ def check_reward_nonzero_std(args: Any, samples: list[Sample], **_: Any) -> Dyna
     group_size = int(arg(args, "n_samples_per_prompt", len(samples)) or len(samples))
     min_valid_fraction = _float_value(_runtime_env(args, "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "0.5"), 0.5)
     if len(active) <= group_size * min_valid_fraction:
-        return DynamicFilterOutput(keep=False, reason=f"too_few_active_samples_{len(active)}")
+        return DynamicFilterOutput(keep=False, reason="too_few_active_samples")
 
     rewards = [_reward_value(args, sample) for sample in active]
     mean = sum(rewards) / len(rewards)
@@ -81,7 +81,7 @@ def check_reward_nonzero_std(args: Any, samples: list[Sample], **_: Any) -> Dyna
     keep = math.sqrt(variance) > 1e-6
     return DynamicFilterOutput(
         keep=keep,
-        reason=None if keep else f"zero_std_{round(rewards[0], 1)}",
+        reason=None if keep else "zero_std",
     )
 
 

@@ -11,5 +11,5 @@ def check_reward_nonzero_std(args, samples: list[Sample], **kwargs):
     keep = torch.tensor(rewards, dtype=torch.float64).std() > 1e-6
     return DynamicFilterOutput(
         keep=keep,
-        reason=None if keep else f"zero_std_{round(rewards[0], 1)}",
+        reason=None if keep else "zero_std",
     )
