@@ -621,6 +621,8 @@ def _strip_reasoning_text(text: Any) -> str:
     value = str(text or "")
     value = re.sub(r"<think\b[^>]*>.*?</think>", "", value, flags=re.I | re.S)
     value = re.sub(r"<\|begin_of_thought\|>.*?<\|end_of_thought\|>", "", value, flags=re.I | re.S)
+    value = re.sub(r"<think\b[^>]*>.*?(?=<action\b|$)", "", value, flags=re.I | re.S)
+    value = re.sub(r"<\|begin_of_thought\|>.*?(?=<action\b|$)", "", value, flags=re.I | re.S)
     if "</think>" in value:
         value = value.rsplit("</think>", 1)[1]
     if "<|end_of_thought|>" in value:
@@ -784,7 +786,7 @@ def _tool_io_trace_from_token_segments(segments: list[Any]) -> str:
 
 def _strip_chat_boundary_tokens_for_reward(text: str) -> str:
     value = str(text or "")
-    for token in ("<|im_start|>", "<|im_end|>", "<|endoftext|>"):
+    for token in ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "</s>"):
         value = value.replace(token, "")
     value = re.sub(r"(?m)^(system|assistant|user|tool)\s*$", "", value)
     return value.strip()
