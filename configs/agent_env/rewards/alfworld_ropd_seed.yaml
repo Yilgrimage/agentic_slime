@@ -17,7 +17,7 @@ ropd:
   response_format: json_object
   rubric_max_tokens: 32768
   judge_max_tokens: 32768
-  answer_mode: final_without_tool_response
+  answer_mode: trace_without_tool_response
   reward_mode: answer_only
   reward_group_reference: students
   luffy_enable: false
