@@ -31,6 +31,11 @@ The verifier always scores teacher and student answers anonymously in the same
 batch; `reward_group_reference` only controls whether teacher scores enter the
 group baseline. The default V0 path is answer-only LLM rubric/judge reward;
 teacher-anchored baselines are explicit opt-in knobs.
+`ropd.schema_mode` selects the verifier schema. Use `binary` for the older
+boolean rubric path, or `answer_process_50_50` when the reward should follow
+the answer-first ROPD design: core answer correctness is 50% of the answer
+score, answer support is the other 50%, and process scores are diagnostics only
+unless a future reward profile explicitly changes that contract.
 Durable reward variants should select a dedicated reward profile, such as
 `configs/agent_env/rewards/alfworld_ropd_seed.yaml`, instead of copying a full
 env config or exporting semantic reward environment variables.

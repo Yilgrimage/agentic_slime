@@ -35,6 +35,8 @@ from .types import RewardResult
 
 RUBRIC_SCHEMA_VERSION = "ropd.rubric.v1"
 BATCH_VERIFIER_SCHEMA_VERSION = "ropd.batch_verifier.v2"
+ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION = "ropd.answer_process_rubric.v1"
+ANSWER_PROCESS_VERIFIER_SCHEMA_VERSION = "ropd.answer_process_step_batch_verifier.v1"
 TEACHER_TRACE_FIELDS = (
     "teacher_full_trace_text",
     "teacher_trace",
@@ -213,6 +215,260 @@ criterion 内部没有部分分。每条 criterion 只能是 true 或 false。
 - 最终只输出 JSON object，不要输出解释、Markdown 或其他文本。
 """
 
+RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评估专家。你的任务是为同一道业务问题生成一套 answer-first 的共享评分细则。
+
+输入包含：
+- teacher trajectory：高置信度参考轨迹，但不保证绝对正确，也不是唯一解法。
+- student trajectory：待评估轨迹，可能暴露当前模型的质量缺口。
+
+请生成两组 rubric：
+1. answer_rubrics：评价最终回答质量。`a1` 必须是核心结论正确性，后续 `a2...` 评价最终回答里的证据、关键细节、边界披露和风险说明。
+2. process_rubrics：评价过程、工具、证据链、取证可靠性和错误处理。该分数暂不进入最终 reward，只用于后续 trace 内部信用分配和诊断。
+
+# 输入数据
+[Question]
+{question}
+
+[Teacher Trajectory]
+{teacher_response}
+
+[Student Trajectory]
+{student_response}
+
+[Additional Instructions]
+{extra_rubric_instructions}
+
+# 打分口径
+后续 verifier 会对每条 rubric 给 0 到 5 分：
+- 5：完全满足。
+- 4：基本满足，只有轻微遗漏。
+- 3：部分满足，但缺少重要细节。
+- 2：只有少量相关内容。
+- 1：极弱相关或基本不可用。
+- 0：不满足。
+
+最终 answer reward 的计算方式固定为：
+- `core_score = a1.score`，范围 0 到 5。
+- `support_score = weighted_average(a2..an scores)`，范围 0 到 5。
+- `answer_reward = core_score + support_score`，范围 0 到 10。
+- 也就是核心结论正确性占 answer reward 的 50%，其他 answer rubric 加权归一后占 50%。
+
+process score 独立计算为 `weighted_average(p1..pn scores)`，范围 0 到 5，暂不参与 `answer_reward`。
+
+# 核心原则
+- `a1` 必须只评价最终回答是否解决用户核心问题和核心结论是否正确。它允许 0 到 5 的部分分：例如多对象任务里答对部分对象、结论方向正确但缺关键限定、或只完成部分子问题。
+- `a2...` 只评价最终回答中的必要证据、关键细节、置信边界、不可达信息披露和风险说明。不要把工具路径本身写进 answer rubric。
+- process_rubrics 只评价过程中是否正确选择 skill/tool、是否基于可见证据推理、是否处理工具错误、是否避免编造工具结果、是否能定位到具体 step。
+- 如果最终回答没有回答用户核心问题、对象类型错误、关键事实错误、编造结果、只有过程没有结论、或没有最终答案，`a1` 应接近 0。
+- 如果正确处理方式是披露鉴权、权限、数据不可达或证据不足，`a1` 应奖励“明确披露阻断点且不编造业务结论”；自信给出具体分析但没有相应证据，应低分。
+- 不要要求复刻 teacher 的措辞、格式或具体工具路径；等价能力、等价证据和等价结论应被允许。
+- 若 trajectory 只声称用了工具但没有可见证据，process rubric 不能自动给高分。
+
+# rubric 设计要求
+- `answer_rubrics` 生成 2 到 5 条。
+- `answer_rubrics[0]` 必须是 `a1`，category 必须是 `Core Answer Correctness`，`max_score` 必须是 5，`weight` 必须是 1。
+- `answer_rubrics[1:]` 每条 `max_score` 必须是 5，`weight` 为正数，用来控制 support_score 的加权平均。
+- `process_rubrics` 生成 2 到 5 条。
+- 每条 process rubric 的 `max_score` 必须是 5，`weight` 为正数。
+- process rubric 必须能定位到具体 step；不要写“整体过程合理”“证据充分”这类无法定位到具体 step 的 criterion。
+
+# 禁止项
+不要写：
+- “与 teacher 答案一致”
+- “使用和 teacher 相同的工具”
+- “措辞/结构和 teacher 相同”
+- 只能通过直接比较 teacher 和 student 才能判断的 criterion
+- 奖励长篇幅、泛化流程描述或表面自信的 criterion
+
+# 输出格式
+只返回 JSON 对象，结构必须为：
+```json
+{
+  "schema_version": "ropd.answer_process_rubric.v1",
+  "answer_rubrics": [
+    {
+      "criterion_id": "a1",
+      "category": "Core Answer Correctness",
+      "criterion": "0-5 分核心结论正确性标准",
+      "max_score": 5,
+      "weight": 1
+    },
+    {
+      "criterion_id": "a2",
+      "category": "Answer Support",
+      "criterion": "0-5 分最终回答证据/关键细节/边界披露标准",
+      "max_score": 5,
+      "weight": 1
+    }
+  ],
+  "process_rubrics": [
+    {
+      "criterion_id": "p1",
+      "category": "Process Evidence",
+      "criterion": "0-5 分、可定位 step 的过程/证据标准",
+      "max_score": 5,
+      "weight": 1
+    }
+  ],
+  "maximum_scores": {
+    "answer_core": 5,
+    "answer_support": 5,
+    "answer": 10,
+    "process": 5,
+    "total": 10
+  },
+  "score_policy": {
+    "answer_first": true,
+    "answer_core_weight": 0.5,
+    "answer_support_weight": 0.5,
+    "answer_weight": 1.0,
+    "process_weight": 0.0,
+    "process_for_credit_assignment": true,
+    "final_reward_uses": "answer_only",
+    "rubric_score_range": "0_to_5_per_criterion"
+  }
+}
+```
+
+# 输出约束
+- `schema_version` 必须严格等于 `ropd.answer_process_rubric.v1`。
+- `answer_rubrics[].criterion_id` 必须为 `a1`, `a2`, ...
+- `process_rubrics[].criterion_id` 必须为 `p1`, `p2`, ...
+- 每条 rubric 的 `max_score` 必须等于 5。
+- 每条 rubric 的 `weight` 必须是正数。
+- `maximum_scores.answer_core` 必须等于 5。
+- `maximum_scores.answer_support` 必须等于 5。
+- `maximum_scores.answer` 必须等于 10。
+- `maximum_scores.process` 必须等于 5。
+- `maximum_scores.total` 必须等于 10。
+- 只返回 JSON，不要输出解释、Markdown 或额外文本。
+"""
+
+VERIFIER_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评分专家。你的任务是针对同一道题，在给定 answer/process 分离 rubric 的情况下，一次性评价多个匿名 trajectory。
+
+[Question]
+{question}
+
+[Rubrics]
+{rubrics}
+
+[Anonymous Trajectories]
+{answers}
+
+[Additional Scoring Instructions]
+{extra_scoring_instructions}
+
+# 输入说明
+每个 trajectory 已经被拆成稳定的 `[Step N]` 编号。`step_indices` 必须引用同一个 trajectory 内的这些 Step 编号，不要跨 trajectory 引用。
+
+# 核心评分规则
+对每个 trajectory 独立评分，不能比较不同 trajectory，也不能猜哪个是 teacher 或 student。
+
+你必须分别输出：
+1. `answer_scores`：对每条 answer rubric 给 0 到 5 分，并简短说明原因。
+2. `process_scores`：对每条 process rubric 给 0 到 5 分，并简短说明原因。
+3. `process_step_evidence`：每条 process rubric 得分大于 0 时，列出支持该判断的 step 序号；得分为 0 时给空数组。
+
+# 0-5 分含义
+- 5：完全满足。
+- 4：基本满足，只有轻微遗漏。
+- 3：部分满足，但缺少重要细节。
+- 2：只有少量相关内容。
+- 1：极弱相关或基本不可用。
+- 0：不满足。
+
+# Answer-first 规则
+- 最终 answer 是当前 final reward 的唯一来源。
+- `a1` 是核心结论正确性，必须按最终回答的核心结论给 0 到 5 分。多对象、多子问题任务可以给部分分；没有最终答案、编造核心事实、对象错配或答非所问应接近 0。
+- `a2...` 评价最终回答的证据、关键细节、边界披露和风险说明。它们不应替代 `a1`，也不能因为过程看起来努力就抬高核心结论分。
+- 如果正确处理方式是披露鉴权/权限/数据不可达/证据不足，则明确披露阻断点且不编造业务结论可以获得相应 answer 分；自信给出具体业务归因、对象判断或数值结论但缺少可见证据，应低分并可设 `fatal_error=true`。
+
+# Process 规则
+- process_rubrics 只用于过程诊断和后续信用分配，不参与当前 final answer reward。
+- process_rubrics 评价工具/skill 选择、证据链、错误处理、是否基于可见证据、是否避免编造工具结果。
+- 如果 trajectory 声称查过工具，但没有可见证据支撑，不能给高 process 分。
+- 如果工具失败但 trajectory 明确披露阻断点且没有编造结论，可以给对应 process 分，但不能因此自动给 answer 分。
+- 对每个 process rubric，如果 score > 0，`step_indices` 必须列出最关键的 1 到 5 个 step；不要把所有相关 step 全塞进去。
+- 如果无法把某条 process rubric 的满足依据定位到具体 step，该 process rubric 应给 0 分。
+- `evidence` 应简短说明为什么这些 step 支撑该 criterion，不要复述整段轨迹。
+
+# 质量枚举
+为每个 trajectory 给出 `final_answer_quality`：
+- `correct`：最终回答完整且核心事实正确。
+- `mostly_correct`：核心结论正确，仅有轻微遗漏或轻微不确定。
+- `partial`：部分回答了问题，但缺关键事实、关键对象或关键归因。
+- `wrong`：核心结论错误、对象类型错误、答非所问或明显幻觉。
+- `no_answer`：没有可用最终回答，或只有“无法完成/turn budget/继续查询”等非答案。
+
+如果存在严重错误（明显编造工具结果、把空结果说成有结果、越权利用隐藏信息、核心对象错配），`fatal_error` 设为 true。
+
+# 输出格式
+只返回 JSON object：
+```json
+{
+  "schema_version": "ropd.answer_process_step_batch_verifier.v1",
+  "answers": [
+    {
+      "answer_index": 1,
+      "answer_scores": [
+        {
+          "criterion_id": "a1",
+          "score": 4,
+          "rationale": "核心结论方向正确，但遗漏一个关键对象。"
+        },
+        {
+          "criterion_id": "a2",
+          "score": 3,
+          "rationale": "给出了部分证据，但证据链不完整。"
+        }
+      ],
+      "process_scores": [
+        {
+          "criterion_id": "p1",
+          "score": 4,
+          "rationale": "使用了相关 skill/tool 并获得主要证据。"
+        },
+        {
+          "criterion_id": "p2",
+          "score": 0,
+          "rationale": "未看到对应过程。"
+        }
+      ],
+      "process_step_evidence": [
+        {
+          "criterion_id": "p1",
+          "satisfied": true,
+          "score": 4,
+          "step_indices": [2, 4],
+          "evidence": "Step 2 读取相关 skill，Step 4 调用商品信息工具并获得可用证据。"
+        },
+        {
+          "criterion_id": "p2",
+          "satisfied": false,
+          "score": 0,
+          "step_indices": [],
+          "evidence": "未看到对应证据。"
+        }
+      ],
+      "final_answer_quality": "partial",
+      "fatal_error": false
+    }
+  ]
+}
+```
+
+# 输出约束
+- `schema_version` 必须严格等于 `ropd.answer_process_step_batch_verifier.v1`。
+- `answers` 数组必须包含每个输入 trajectory 各一项。
+- `answer_index` 必须从 1 开始，并按输入顺序覆盖所有 trajectory。
+- `answer_scores` 长度必须等于 answer_rubrics 数量，criterion_id 顺序必须与 answer_rubrics 完全一致。
+- `process_scores` 长度必须等于 process_rubrics 数量，criterion_id 顺序必须与 process_rubrics 完全一致。
+- `process_step_evidence` 长度必须等于 process_rubrics 数量，并且 criterion_id 顺序必须与 process_rubrics 完全一致。
+- 所有 `score` 必须是 0 到 5 的数字。
+- 每个 `step_indices` 只能包含正整数；如果对应 process score 为 0，`step_indices` 必须为空。
+- 只返回 JSON，不要输出解释、Markdown 或其他文本。
+"""
+
 _STAGE_SEMAPHORES: dict[tuple[int, str, int], asyncio.Semaphore] = {}
 
 
@@ -231,6 +487,10 @@ def _cfg_int(args: Any, cfg_name: str, default: int) -> int:
 def _cfg_choice(args: Any, cfg_name: str, default: str, choices: set[str]) -> str:
     value = str(_cfg(args, cfg_name, default) or default).strip().lower()
     return value if value in choices else default
+
+
+def _schema_mode(args: Any) -> str:
+    return _cfg_choice(args, "schema_mode", "binary", {"binary", "answer_process_50_50"})
 
 
 def _list_value(value: Any, default: tuple[str, ...] = ()) -> list[str]:
@@ -820,7 +1080,108 @@ def _normalize_rubric(payload: Any) -> dict[str, Any] | None:
     }
 
 
+def _positive_float(value: Any, default: float = 1.0) -> float:
+    parsed = float_value(value, default)
+    return parsed if parsed > 0 else default
+
+
+def _normalize_answer_process_items(
+    items: Any,
+    *,
+    prefix: str,
+    default_category: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for idx, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        criterion = str(item.get("criterion") or item.get("description") or "").strip()
+        if not criterion:
+            continue
+        expected_id = f"{prefix}{idx}"
+        criterion_id = str(item.get("criterion_id") or expected_id).strip() or expected_id
+        if not re.fullmatch(rf"{prefix}[1-9][0-9]*", criterion_id):
+            criterion_id = expected_id
+        normalized.append(
+            {
+                "criterion_id": criterion_id,
+                "category": str(item.get("category") or default_category),
+                "criterion": criterion,
+                "max_score": 5,
+                "weight": _positive_float(item.get("weight", 1.0), 1.0),
+            }
+        )
+    return normalized
+
+
+def _normalize_answer_process_rubric(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
+        return None
+    answer_items = _normalize_answer_process_items(
+        payload.get("answer_rubrics"),
+        prefix="a",
+        default_category="Answer Support",
+    )
+    process_items = _normalize_answer_process_items(
+        payload.get("process_rubrics"),
+        prefix="p",
+        default_category="Process Evidence",
+    )
+    if len(answer_items) < 2 or not process_items:
+        return None
+    answer_items[0] = {
+        **answer_items[0],
+        "criterion_id": "a1",
+        "category": "Core Answer Correctness",
+        "max_score": 5,
+        "weight": 1.0,
+    }
+    for idx, item in enumerate(answer_items[1:], start=2):
+        item["criterion_id"] = f"a{idx}"
+        item["max_score"] = 5
+    for idx, item in enumerate(process_items, start=1):
+        item["criterion_id"] = f"p{idx}"
+        item["max_score"] = 5
+    return {
+        "schema_version": ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION,
+        "answer_rubrics": answer_items,
+        "process_rubrics": process_items,
+        "maximum_scores": {
+            "answer_core": 5,
+            "answer_support": 5,
+            "answer": 10,
+            "process": 5,
+            "total": 10,
+        },
+        "score_policy": {
+            "answer_first": True,
+            "answer_core_weight": 0.5,
+            "answer_support_weight": 0.5,
+            "answer_weight": 1.0,
+            "process_weight": 0.0,
+            "process_for_credit_assignment": True,
+            "final_reward_uses": "answer_only",
+            "rubric_score_range": "0_to_5_per_criterion",
+        },
+    }
+
+
+def _normalize_rubric_for_mode(args: Any, payload: Any) -> dict[str, Any] | None:
+    if _schema_mode(args) == "answer_process_50_50":
+        return _normalize_answer_process_rubric(payload)
+    return _normalize_rubric(payload)
+
+
 def _maximum_score(rubric: Any) -> float:
+    if isinstance(rubric, dict) and rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
+        maximum_scores = rubric.get("maximum_scores")
+        if isinstance(maximum_scores, dict):
+            return float_value(maximum_scores.get("answer"), 10.0)
+        return 10.0
     normalized = _normalize_rubric(rubric)
     if normalized is None:
         return 0.0
@@ -843,8 +1204,13 @@ def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: 
     question_max_chars = _cfg_int(args, "question_max_chars", 8000)
     student_max_chars = _cfg_int(args, "student_rubric_max_chars", 6000)
     reference_max_chars = _cfg_int(args, "reference_max_chars", 0)
+    template = (
+        RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE
+        if _schema_mode(args) == "answer_process_50_50"
+        else RUBRICATOR_PROMPT_TEMPLATE
+    )
     return _render_template(
-        RUBRICATOR_PROMPT_TEMPLATE,
+        template,
         {
             "question": _limit_text(task_prompt(samples[0]), question_max_chars),
             "teacher_response": _render_answer_block(
@@ -871,13 +1237,26 @@ def _build_verifier_prompt(
 ) -> str:
     question_max_chars = _cfg_int(args, "question_max_chars", 8000)
     answer_max_chars = _cfg_int(args, "verifier_answer_max_chars", 6000)
+    if isinstance(rubric, dict) and rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
+        template = VERIFIER_ANSWER_PROCESS_PROMPT_TEMPLATE
+        rubric_payload = {
+            "answer_rubrics": rubric.get("answer_rubrics", []),
+            "process_rubrics": rubric.get("process_rubrics", []),
+            "maximum_scores": rubric.get("maximum_scores", {}),
+            "score_policy": rubric.get("score_policy", {}),
+        }
+        answer_label = "Trajectory"
+    else:
+        template = VERIFIER_PROMPT_TEMPLATE
+        rubric_payload = rubric["rubrics"]
+        answer_label = "Answer"
     return _render_template(
-        VERIFIER_PROMPT_TEMPLATE,
+        template,
         {
             "question": _limit_text(task_prompt(sample), question_max_chars),
-            "rubrics": json.dumps(rubric["rubrics"], ensure_ascii=False, indent=2),
+            "rubrics": json.dumps(rubric_payload, ensure_ascii=False, indent=2),
             "answers": _render_answer_block(
-                "Answer",
+                answer_label,
                 [_limit_text(answer, answer_max_chars) for answer in answers],
                 start_index=1,
                 force_labels=True,
@@ -921,7 +1300,32 @@ def _anonymous_answer_items(
     )
 
 
-def _parse_batch_scores(payload: Any, *, rubric: dict[str, Any], expected: int) -> list[dict[str, Any]]:
+def _score_0_to_5(value: Any) -> float:
+    score = float_value(value, 0.0)
+    return max(0.0, min(5.0, score))
+
+
+def _score_item(raw: Any, *, criterion_id: str) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return {
+            "criterion_id": str(raw.get("criterion_id") or criterion_id),
+            "score": _score_0_to_5(raw.get("score", raw.get("value", 0.0))),
+            "rationale": str(raw.get("rationale") or raw.get("reason") or "").strip(),
+        }
+    raise ValueError("ROPD answer-process score item must be an object")
+
+
+def _weighted_average_0_to_5(scores: list[float], items: list[dict[str, Any]]) -> float:
+    if not scores or not items:
+        return 0.0
+    weights = [_positive_float(item.get("weight", 1.0), 1.0) for item in items]
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return 0.0
+    return sum(score * weight for score, weight in zip(scores, weights, strict=True)) / total_weight
+
+
+def _parse_binary_batch_scores(payload: Any, *, rubric: dict[str, Any], expected: int) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         raise ValueError("ROPD verifier response must be a JSON object")
     if payload.get("schema_version") != BATCH_VERIFIER_SCHEMA_VERSION:
@@ -960,6 +1364,116 @@ def _parse_batch_scores(payload: Any, *, rubric: dict[str, Any], expected: int) 
             }
         )
     return scores
+
+
+def _parse_answer_process_batch_scores(
+    payload: Any,
+    *,
+    rubric: dict[str, Any],
+    expected: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        raise ValueError("ROPD answer-process verifier response must be a JSON object")
+    if payload.get("schema_version") != ANSWER_PROCESS_VERIFIER_SCHEMA_VERSION:
+        raise ValueError("ROPD answer-process verifier schema_version mismatch")
+    answers = payload.get("answers")
+    if not isinstance(answers, list) or len(answers) != expected:
+        raise ValueError(
+            f"ROPD answer-process verifier returned "
+            f"{0 if not isinstance(answers, list) else len(answers)} scores for {expected} answers"
+        )
+    answer_items = list(rubric.get("answer_rubrics", []))
+    process_items = list(rubric.get("process_rubrics", []))
+    answer_ids = [str(item.get("criterion_id")) for item in answer_items]
+    process_ids = [str(item.get("criterion_id")) for item in process_items]
+    scores: list[dict[str, Any]] = []
+    for expected_index, item in enumerate(answers, start=1):
+        if not isinstance(item, dict):
+            raise ValueError("ROPD answer-process answer item must be an object")
+        if int(item.get("answer_index", -1)) != expected_index:
+            raise ValueError("ROPD answer-process answer_index must cover 1..n in order")
+        answer_scores_raw = item.get("answer_scores")
+        process_scores_raw = item.get("process_scores")
+        if not isinstance(answer_scores_raw, list) or len(answer_scores_raw) != len(answer_items):
+            raise ValueError("ROPD answer-process answer_scores length mismatch")
+        if not isinstance(process_scores_raw, list) or len(process_scores_raw) != len(process_items):
+            raise ValueError("ROPD answer-process process_scores length mismatch")
+
+        answer_score_items = [
+            _score_item(raw, criterion_id=criterion_id)
+            for raw, criterion_id in zip(answer_scores_raw, answer_ids, strict=True)
+        ]
+        process_score_items = [
+            _score_item(raw, criterion_id=criterion_id)
+            for raw, criterion_id in zip(process_scores_raw, process_ids, strict=True)
+        ]
+        for score_item, criterion_id in zip(answer_score_items, answer_ids, strict=True):
+            if score_item["criterion_id"] != criterion_id:
+                raise ValueError("ROPD answer-process answer criterion_id mismatch")
+        for score_item, criterion_id in zip(process_score_items, process_ids, strict=True):
+            if score_item["criterion_id"] != criterion_id:
+                raise ValueError("ROPD answer-process process criterion_id mismatch")
+
+        evidence_raw = item.get("process_step_evidence")
+        if not isinstance(evidence_raw, list) or len(evidence_raw) != len(process_items):
+            raise ValueError("ROPD answer-process process_step_evidence length mismatch")
+        evidence_items: list[dict[str, Any]] = []
+        for raw_evidence, criterion_id, process_score in zip(
+            evidence_raw, process_ids, process_score_items, strict=True
+        ):
+            if not isinstance(raw_evidence, dict):
+                raise ValueError("ROPD answer-process evidence item must be an object")
+            if str(raw_evidence.get("criterion_id", criterion_id)) != criterion_id:
+                raise ValueError("ROPD answer-process evidence criterion_id mismatch")
+            raw_steps = raw_evidence.get("step_indices", [])
+            if not isinstance(raw_steps, list):
+                raise ValueError("ROPD answer-process step_indices must be a list")
+            step_indices = [int(step) for step in raw_steps if isinstance(step, int) or str(step).isdigit()]
+            if process_score["score"] <= 0 and step_indices:
+                raise ValueError("ROPD answer-process zero process score cannot have step evidence")
+            evidence_items.append(
+                {
+                    "criterion_id": criterion_id,
+                    "satisfied": bool(raw_evidence.get("satisfied", process_score["score"] > 0)),
+                    "score": float(process_score["score"]),
+                    "step_indices": step_indices,
+                    "evidence": str(raw_evidence.get("evidence") or "").strip(),
+                }
+            )
+
+        answer_values = [float(score_item["score"]) for score_item in answer_score_items]
+        process_values = [float(score_item["score"]) for score_item in process_score_items]
+        answer_core_score = answer_values[0] if answer_values else 0.0
+        answer_support_score = _weighted_average_0_to_5(answer_values[1:], answer_items[1:])
+        answer_score = answer_core_score + answer_support_score
+        process_score = _weighted_average_0_to_5(process_values, process_items)
+        final_answer_quality = str(item.get("final_answer_quality") or "").strip().lower()
+        if final_answer_quality not in {"correct", "mostly_correct", "partial", "wrong", "no_answer"}:
+            raise ValueError("ROPD answer-process final_answer_quality mismatch")
+        if "fatal_error" not in item:
+            raise ValueError("ROPD answer-process fatal_error is required")
+        scores.append(
+            {
+                "answer_index": expected_index,
+                "answer_scores": answer_score_items,
+                "process_scores": process_score_items,
+                "process_step_evidence": evidence_items,
+                "answer_core_score": answer_core_score,
+                "answer_support_score": answer_support_score,
+                "answer_score": answer_score,
+                "process_score": process_score,
+                "final_score": answer_score,
+                "final_answer_quality": final_answer_quality,
+                "fatal_error": bool(item.get("fatal_error", False)),
+            }
+        )
+    return scores
+
+
+def _parse_batch_scores(payload: Any, *, rubric: dict[str, Any], expected: int) -> list[dict[str, Any]]:
+    if rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
+        return _parse_answer_process_batch_scores(payload, rubric=rubric, expected=expected)
+    return _parse_binary_batch_scores(payload, rubric=rubric, expected=expected)
 
 
 def _existing_rubric(args: Any, sample: Sample) -> Any:
@@ -1081,7 +1595,7 @@ async def _rubric_for_bucket(
         return None, "missing_teacher", None, ()
 
     existing = _existing_rubric(args, sample)
-    existing_rubric = _normalize_rubric(existing)
+    existing_rubric = _normalize_rubric_for_mode(args, existing)
     if existing_rubric is not None:
         return existing_rubric, "teacher", None, teacher_answers
 
@@ -1120,7 +1634,7 @@ async def _rubric_for_bucket(
             },
         )
         return None, "rubric_error", None, teacher_answers
-    rubric = _normalize_rubric(payload)
+    rubric = _normalize_rubric_for_mode(args, payload)
     _dump_artifact(
         args,
         "rubricator",
@@ -1202,6 +1716,7 @@ def _result(
     raw = {
         "rubric": rubric,
         "rubric_hash": _rubric_hash(rubric),
+        "ropd_schema_mode": _schema_mode(args),
         "rubric_source": rubric_source,
         "judge": student_item,
         "student_score": float(student_score),
@@ -1227,6 +1742,18 @@ def _result(
         "strip_assistant_response": trace_options.strip_assistant_response,
         "strip_system_prompt": trace_options.strip_system_prompt,
     }
+    for key in (
+        "answer_core_score",
+        "answer_support_score",
+        "process_score",
+        "answer_scores",
+        "process_scores",
+        "process_step_evidence",
+        "final_answer_quality",
+        "fatal_error",
+    ):
+        if key in student_item:
+            raw[key] = student_item[key]
     if teacher_reference_score is not None:
         raw["teacher_reference_score"] = float(teacher_reference_score)
     if rubric_call is not None:
@@ -1235,7 +1762,10 @@ def _result(
         raw["judge_call"] = judge_call
     return RewardResult(
         score=weighted,
-        components={"rubric_task_success": weighted, "ropd_answer_score": bounded},
+        components={
+            "rubric_task_success": weighted,
+            "ropd_answer_score": bounded,
+        },
         raw=raw,
         reason="",
         returns_total=True,

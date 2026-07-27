@@ -79,6 +79,14 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ropd_teacher_answer_scores: list[float] = []
     ropd_train_scores: list[float] = []
     ropd_rubric_sizes: list[float] = []
+    ropd_answer_rubric_sizes: list[float] = []
+    ropd_process_rubric_sizes: list[float] = []
+    ropd_answer_core_scores: list[float] = []
+    ropd_answer_support_scores: list[float] = []
+    ropd_process_scores: list[float] = []
+    ropd_fatal_error_count = 0
+    ropd_fatal_error_seen = False
+    ropd_final_answer_quality: dict[str, int] = {}
     ropd_teacher_below_student = 0
     ropd_teacher_below_student_seen = False
 
@@ -110,6 +118,22 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         reward_score = _float_or_none(raw.get("reward_score"))
         if reward_score is not None:
             ropd_train_scores.append(reward_score)
+        answer_core_score = _float_or_none(raw.get("answer_core_score"))
+        if answer_core_score is not None:
+            ropd_answer_core_scores.append(answer_core_score)
+        answer_support_score = _float_or_none(raw.get("answer_support_score"))
+        if answer_support_score is not None:
+            ropd_answer_support_scores.append(answer_support_score)
+        process_score = _float_or_none(raw.get("process_score"))
+        if process_score is not None:
+            ropd_process_scores.append(process_score)
+        if "fatal_error" in raw:
+            ropd_fatal_error_seen = True
+            ropd_fatal_error_count += int(bool(raw.get("fatal_error")))
+        final_answer_quality = raw.get("final_answer_quality")
+        if final_answer_quality:
+            key = str(final_answer_quality)
+            ropd_final_answer_quality[key] = ropd_final_answer_quality.get(key, 0) + 1
         maximum_score = _float_or_none(raw.get("maximum_score"))
         teacher_scores = raw.get("teacher_scores")
         if isinstance(teacher_scores, list):
@@ -128,6 +152,12 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         rubric_items = rubric.get("rubrics")
         if isinstance(rubric_items, list):
             ropd_rubric_sizes.append(float(len(rubric_items)))
+        answer_rubrics = rubric.get("answer_rubrics")
+        if isinstance(answer_rubrics, list):
+            ropd_answer_rubric_sizes.append(float(len(answer_rubrics)))
+        process_rubrics = rubric.get("process_rubrics")
+        if isinstance(process_rubrics, list):
+            ropd_process_rubric_sizes.append(float(len(process_rubrics)))
 
     total = len(real_samples)
     metrics: dict[str, float] = {}
@@ -150,6 +180,20 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics["reward/ropd/train_score_mean"] = _mean(ropd_train_scores)
     if ropd_rubric_sizes:
         metrics["reward/ropd/rubric_size_mean"] = _mean(ropd_rubric_sizes)
+    if ropd_answer_rubric_sizes:
+        metrics["reward/ropd/answer_rubric_size_mean"] = _mean(ropd_answer_rubric_sizes)
+    if ropd_process_rubric_sizes:
+        metrics["reward/ropd/process_rubric_size_mean"] = _mean(ropd_process_rubric_sizes)
+    if ropd_answer_core_scores:
+        metrics["reward/ropd/answer_core_score_mean"] = _mean(ropd_answer_core_scores)
+    if ropd_answer_support_scores:
+        metrics["reward/ropd/answer_support_score_mean"] = _mean(ropd_answer_support_scores)
+    if ropd_process_scores:
+        metrics["reward/ropd/process_score_mean"] = _mean(ropd_process_scores)
+    if ropd_fatal_error_seen:
+        metrics["reward/ropd/fatal_error_rate"] = ropd_fatal_error_count / total
+    for quality, count in ropd_final_answer_quality.items():
+        metrics[f"reward/ropd/final_answer_quality_{quality}_rate"] = count / total
     if ropd_teacher_below_student_seen:
         metrics["reward/ropd/teacher_below_student_rate"] = ropd_teacher_below_student / total
     _reward_call_metrics(metrics, role="judge", calls=judge_calls, sample_count=total)
