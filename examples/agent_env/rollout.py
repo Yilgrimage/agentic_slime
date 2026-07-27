@@ -14,8 +14,9 @@ from typing import Any, Callable
 from slime.utils.http_utils import post
 from slime.utils.types import Sample
 
+from examples.agent_env.dump import int_runtime_env, reserve_dump_slot, runtime_env, safe_filename_part, sample_dump_step_label
+
 logger = logging.getLogger(__name__)
-_SAMPLE_DUMP_COUNTS: dict[str, int] = {}
 _DELTA_BASE_MESSAGES = [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "I am a user."},
@@ -139,15 +140,7 @@ def metadata(sample: Sample) -> dict:
 
 
 def _runtime_env(args: Any, name: str, default: str = "") -> str:
-    value = os.environ.get(name)
-    if value:
-        return value
-    train_env_vars = getattr(args, "train_env_vars", None) or {}
-    if isinstance(train_env_vars, dict):
-        value = train_env_vars.get(name)
-        if value:
-            return str(value)
-    return default
+    return runtime_env(args, name, default)
 
 
 def _sample_case_dump_enabled(args: Any) -> bool:
@@ -160,10 +153,7 @@ def _sample_case_dump_enabled(args: Any) -> bool:
 
 
 def _int_runtime_env(args: Any, name: str, default: str = "0") -> int:
-    try:
-        return int(_runtime_env(args, name, default) or 0)
-    except (TypeError, ValueError):
-        return 0
+    return int_runtime_env(args, name, default)
 
 
 def _case_dump_buckets(sample: Sample) -> list[str]:
@@ -194,6 +184,10 @@ def _case_dump_limit(args: Any, bucket: str) -> int:
     if bucket == "format_errors":
         return _int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_FORMAT_N", "0")
     return _int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_N", "0")
+
+
+def _case_dump_total_limit(args: Any) -> int:
+    return _int_runtime_env(args, "AGENT_ENV_ROLLOUT_DUMP_TOTAL_N", "0")
 
 
 def _dump_trace_mode(args: Any) -> str:
@@ -325,21 +319,35 @@ def dump_completed_sample_case(args: Any, spec: AgentEnvSpec, sample: Sample, to
         return
     sample_metadata = sample.metadata or {}
     trace_mode = _dump_trace_mode(args)
+    dump_step = sample_dump_step_label(sample)
+    safe_dump_step = safe_filename_part(dump_step)
     for bucket in _case_dump_buckets(sample):
         limit = _case_dump_limit(args, bucket)
         if limit <= 0:
             continue
-        counter_key = f"{spec.name}:{bucket}"
-        count = _SAMPLE_DUMP_COUNTS.get(counter_key, 0)
-        if count >= limit:
+        total_limit = _case_dump_total_limit(args)
+        slot = reserve_dump_slot(
+            namespace=f"rollout_cases:{spec.name}",
+            stage=bucket,
+            dump_step=dump_step,
+            per_step_limit=limit,
+            total_limit=total_limit,
+        )
+        if slot is None:
             continue
-        _SAMPLE_DUMP_COUNTS[counter_key] = count + 1
+        count, total_count = slot
         output_dir = Path(run_root) / "rollout_cases" / spec.name / bucket
         output_dir.mkdir(parents=True, exist_ok=True)
-        path = output_dir / f"{_case_dump_file_stem(bucket)}_{count:04d}_pid{os.getpid()}_{uuid.uuid4().hex[:8]}.json"
+        path = (
+            output_dir
+            / f"step_{safe_dump_step}_{_case_dump_file_stem(bucket)}_{count:04d}_pid{os.getpid()}_{uuid.uuid4().hex[:8]}.json"
+        )
         record = {
-            "sample_index": count,
+            "sample_index": getattr(sample, "index", None),
+            "dump_step": dump_step,
             "dump_bucket": bucket,
+            "dump_index_in_step": count,
+            "dump_index_total": total_count,
             "status": getattr(getattr(sample, "status", None), "name", str(getattr(sample, "status", ""))),
             "remove_sample": bool(getattr(sample, "remove_sample", False)),
             "discard_sample": bool(sample_metadata.get("discard_sample", False)),
@@ -1490,10 +1498,12 @@ def lease_request_id(sample: Sample) -> str:
 
 def outcome_reward(args: Any, spec: AgentEnvSpec, success: bool, score: float) -> float:
     reward = float(cfg_path(args, "reward.outcome", 10.0))
-    source = cfg_path(args, "reward.source", spec.default_reward_source)
+    source = str(cfg_path(args, "reward.source", spec.default_reward_source) or "").strip().lower()
     if source == "score":
         return float(score) * reward
-    return reward if success else 0.0
+    if source in {"success", "won"}:
+        return reward if success else 0.0
+    raise ValueError(f"Unsupported reward.source={source!r}; expected score, success, or won")
 
 
 def format_reward(args: Any, valid: bool) -> float:

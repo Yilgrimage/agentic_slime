@@ -12,6 +12,10 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from slime.utils.types import Sample
+
+from examples.agent_env.trace_rendering import TraceCompressionOptions, render_trace_for_reward
+
 
 def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -148,86 +152,23 @@ def _limit_text(value: Any, max_chars: int) -> str:
     return text
 
 
-def _json_text(value: Any, max_chars: int = 0) -> str:
-    try:
-        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
-    except TypeError:
-        text = str(value)
-    return _limit_text(text, max_chars)
-
-
-def _message_text(message: Any, max_chars: int) -> str:
-    if not isinstance(message, dict):
-        return _limit_text(message, max_chars)
-    chunks: list[str] = []
-    content = message.get("content")
-    if content not in (None, "", []):
-        chunks.append(f"content: {_limit_text(content, max_chars)}")
-    tool_calls = message.get("tool_calls")
-    if isinstance(tool_calls, list) and tool_calls:
-        rendered = []
-        for call in tool_calls:
-            if not isinstance(call, dict):
-                rendered.append(str(call))
-                continue
-            function = call.get("function") if isinstance(call.get("function"), dict) else {}
-            name = str(function.get("name") or call.get("name") or "")
-            arguments = function.get("arguments") if "arguments" in function else call.get("arguments")
-            rendered.append(f"{name}({_json_text(arguments, max_chars)})")
-        chunks.append("tool_calls: " + "; ".join(rendered))
-    if not chunks:
-        chunks.append(_json_text(message, max_chars))
-    return "\n".join(chunks)
-
-
-def _action_text(action: Any, max_chars: int) -> str:
-    if isinstance(action, dict):
-        if action.get("type") == "tool_call":
-            name = str(action.get("name") or "")
-            arguments = action.get("arguments")
-            return f"{name}({_json_text(arguments, max_chars)})"
-        if action.get("type") == "assistant_message":
-            return _limit_text(action.get("content"), max_chars)
-    return _json_text(action, max_chars)
-
-
-def _compact_teacher_response(record: dict[str, Any], max_chars: int) -> str:
+def _teacher_trace_sample(record: dict[str, Any]) -> Sample:
     result = record.get("result") if isinstance(record.get("result"), dict) else {}
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    lines = [
-        f"task_id: {record.get('task_id') or record.get('task_index')}",
-        f"split: {record.get('split')}",
-        f"status: {result.get('status')}",
-        f"score: {result.get('score')}",
-        f"success: {result.get('success')}",
-    ]
-    turns = metadata.get("turns")
-    if isinstance(turns, list) and turns:
-        for turn in turns:
-            if not isinstance(turn, dict):
-                continue
-            lines.append(f"\nTurn {turn.get('turn')}:")
-            if "assistant_message" in turn:
-                lines.append("Assistant:")
-                lines.append(_message_text(turn.get("assistant_message"), max_chars))
-            if "action" in turn:
-                lines.append("Action:")
-                lines.append(_action_text(turn.get("action"), max_chars))
-            env_step = turn.get("env_step")
-            if isinstance(env_step, dict):
-                observation = env_step.get("observation")
-                if observation not in (None, "", []):
-                    lines.append("Observation:")
-                    lines.append(_limit_text(observation, max_chars))
-    else:
-        messages = metadata.get("messages")
-        if isinstance(messages, list) and messages:
-            for idx, message in enumerate(messages):
-                if not isinstance(message, dict):
-                    continue
-                lines.append(f"\nMessage {idx} role={message.get('role')}:")
-                lines.append(_message_text(message, max_chars))
-    return "\n".join(lines).strip()
+    return Sample(prompt=_row_prompt(record.get("input") if isinstance(record.get("input"), dict) else {}), metadata=metadata)
+
+
+def _teacher_full_trace(record: dict[str, Any], max_chars: int) -> str:
+    text = render_trace_for_reward(
+        _teacher_trace_sample(record),
+        options=TraceCompressionOptions(
+            strip_reasoning=False,
+            strip_tool_response=False,
+            strip_assistant_response=False,
+            strip_system_prompt=False,
+        ),
+    )
+    return _limit_text(text, max_chars)
 
 
 def _record_success(record: dict[str, Any]) -> bool:
@@ -240,11 +181,13 @@ def _teacher_row(record: dict[str, Any], max_chars: int) -> dict[str, Any]:
     input_row = record.get("input") if isinstance(record.get("input"), dict) else {}
     input_metadata = _metadata(input_row)
     task_id = str(record.get("task_id") or input_metadata.get("task_id") or "")
+    full_trace = _teacher_full_trace(record, max_chars)
     row: dict[str, Any] = {
         "task_id": task_id,
         "task_index": record.get("task_index"),
         "split": record.get("split"),
-        "teacher_response": _compact_teacher_response(record, max_chars),
+        "teacher_full_trace_text": full_trace,
+        "teacher_response": full_trace,
         "teacher_success": _record_success(record),
         "teacher_score": result.get("score"),
         "teacher_status": result.get("status"),

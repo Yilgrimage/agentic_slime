@@ -69,15 +69,15 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         real_samples = samples
 
     rm_scores = []
-    component_values: dict[str, list[float]] = {}
     fallback_reasons: dict[str, int] = {}
     rubric_sources: dict[str, int] = {}
     judge_calls: list[dict[str, Any]] = []
     rubric_calls: list[dict[str, Any]] = []
-    ropd_student_scores: list[float] = []
-    ropd_teacher_scores: list[float] = []
-    ropd_reward_scores: list[float] = []
-    ropd_maximum_scores: list[float] = []
+    ropd_student_points: list[float] = []
+    ropd_teacher_points: list[float] = []
+    ropd_answer_scores: list[float] = []
+    ropd_teacher_answer_scores: list[float] = []
+    ropd_train_scores: list[float] = []
     ropd_rubric_sizes: list[float] = []
     ropd_teacher_below_student = 0
     ropd_teacher_below_student_seen = False
@@ -88,10 +88,6 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         score = _float_or_none(rm_reward.get("score"))
         if score is not None:
             rm_scores.append(score)
-        for key, value in _as_dict(rm_reward.get("components")).items():
-            scalar = _float_or_none(value)
-            if scalar is not None:
-                component_values.setdefault(str(key), []).append(scalar)
         raw = _as_dict(rm_reward.get("raw"))
         fallback = raw.get("fallback")
         if fallback:
@@ -107,18 +103,23 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             rubric_calls.append(rubric_call)
         student_score = _float_or_none(raw.get("student_score"))
         if student_score is not None:
-            ropd_student_scores.append(student_score)
+            ropd_student_points.append(student_score)
+        answer_score = _float_or_none(raw.get("answer_score"))
+        if answer_score is not None:
+            ropd_answer_scores.append(answer_score)
         reward_score = _float_or_none(raw.get("reward_score"))
         if reward_score is not None:
-            ropd_reward_scores.append(reward_score)
+            ropd_train_scores.append(reward_score)
         maximum_score = _float_or_none(raw.get("maximum_score"))
-        if maximum_score is not None:
-            ropd_maximum_scores.append(maximum_score)
         teacher_scores = raw.get("teacher_scores")
         if isinstance(teacher_scores, list):
-            ropd_teacher_scores.extend(
-                value for item in teacher_scores if (value := _float_or_none(item)) is not None
-            )
+            for item in teacher_scores:
+                teacher_score = _float_or_none(item)
+                if teacher_score is None:
+                    continue
+                ropd_teacher_points.append(teacher_score)
+                if maximum_score is not None and maximum_score > 0:
+                    ropd_teacher_answer_scores.append(max(0.0, min(1.0, teacher_score / maximum_score)))
         if "teacher_below_student" in raw:
             ropd_teacher_below_student_seen = True
         if raw.get("teacher_below_student"):
@@ -133,24 +134,20 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     if rm_scores:
         metrics["reward/rm_score_mean"] = _mean(rm_scores)
         metrics["reward/rm_score_nonzero_rate"] = sum(1 for value in rm_scores if value != 0.0) / len(rm_scores)
-    for name, values in component_values.items():
-        if name == "env_reward":
-            continue
-        metrics[f"reward/component_{name}_mean"] = _mean(values)
     for reason, count in fallback_reasons.items():
         metrics[f"reward/fallback_{reason}_rate"] = count / total
     for source, count in rubric_sources.items():
         metrics[f"reward/ropd/rubric_source_{source}_rate"] = count / total
-    if rubric_sources:
-        metrics["reward/ropd/rubric_count"] = float(sum(rubric_sources.values()))
-    if ropd_student_scores:
-        metrics["reward/ropd/student_score_mean"] = _mean(ropd_student_scores)
-    if ropd_teacher_scores:
-        metrics["reward/ropd/teacher_score_mean"] = _mean(ropd_teacher_scores)
-    if ropd_reward_scores:
-        metrics["reward/ropd/reward_score_mean"] = _mean(ropd_reward_scores)
-    if ropd_maximum_scores:
-        metrics["reward/ropd/maximum_score_mean"] = _mean(ropd_maximum_scores)
+    if ropd_student_points:
+        metrics["reward/ropd/student_points_mean"] = _mean(ropd_student_points)
+    if ropd_teacher_points:
+        metrics["reward/ropd/teacher_points_mean"] = _mean(ropd_teacher_points)
+    if ropd_answer_scores:
+        metrics["reward/ropd/answer_score_mean"] = _mean(ropd_answer_scores)
+    if ropd_teacher_answer_scores:
+        metrics["reward/ropd/teacher_answer_score_mean"] = _mean(ropd_teacher_answer_scores)
+    if ropd_train_scores:
+        metrics["reward/ropd/train_score_mean"] = _mean(ropd_train_scores)
     if ropd_rubric_sizes:
         metrics["reward/ropd/rubric_size_mean"] = _mean(ropd_rubric_sizes)
     if ropd_teacher_below_student_seen:
@@ -158,16 +155,6 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     _reward_call_metrics(metrics, role="judge", calls=judge_calls, sample_count=total)
     _reward_call_metrics(metrics, role="rubric", calls=rubric_calls, sample_count=total)
     return metrics
-
-
-def _prefix_reward_metrics(metrics: dict[str, float], prefix: str) -> dict[str, float]:
-    out: dict[str, float] = {}
-    for key, value in metrics.items():
-        if key.startswith("reward/"):
-            out[f"{prefix}/{key.removeprefix('reward/')}"] = value
-        else:
-            out[f"{prefix}/{key}"] = value
-    return out
 
 
 def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
@@ -286,7 +273,6 @@ def generated_train_scope_metrics(
     """
 
     generated_samples = _flatten_sample_groups(generated_groups)
-    train_samples = _flatten_sample_groups(train_groups)
     generated_group_count = float(len(generated_groups))
     train_group_count = float(len(train_groups))
     dropped_group_count = max(0.0, generated_group_count - train_group_count)
@@ -294,6 +280,7 @@ def generated_train_scope_metrics(
     metrics: dict[str, float] = {
         "rollout/dynamic_filter/generated_groups": generated_group_count,
         "rollout/dynamic_filter/kept_groups": train_group_count,
+        "rollout/dynamic_filter/dropped_groups": dropped_group_count,
         "rollout/dynamic_filter/drop_rate": dropped_group_count / generated_group_count
         if generated_group_count
         else 0.0,
@@ -335,13 +322,11 @@ def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_ext
 
     if generated_env_metrics:
         log_dict |= {f"{prefix}/{key}": value for key, value in generated_env_metrics.items()}
-        log_dict |= environment_metrics(samples, prefix=f"{prefix}/train")
     else:
         log_dict |= environment_metrics(samples, prefix=prefix)
 
     if generated_reward_metrics:
         log_dict |= {f"reward/{key}": value for key, value in generated_reward_metrics.items()}
-        log_dict |= _prefix_reward_metrics(reward_metrics(samples), "reward/train")
     else:
         log_dict |= reward_metrics(samples)
 

@@ -26,6 +26,53 @@ _worker: AsyncRolloutWorker | None = None
 _worker_key: tuple[int, int] | None = None
 
 
+def _iter_samples(node: Any):
+    if isinstance(node, Sample):
+        yield node
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_samples(item)
+
+
+class _AnnotatedDataBuffer:
+    """Attach dump-only generation buckets before the async worker runs RM.
+
+    In fully-async mode ROPD artifacts are written inside the background
+    generation worker, before a later training step drains the completed group.
+    The real consumer rollout_id is therefore not known yet. This wrapper gives
+    diagnostics a stable generated-step bucket without changing Slime's
+    training rollout_id semantics.
+    """
+
+    def __init__(self, data_buffer: Any, *, groups_per_dump_step: int):
+        self._data_buffer = data_buffer
+        self._groups_per_dump_step = max(1, int(groups_per_dump_step))
+        self._next_submission_id = 0
+        self._lock = threading.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._data_buffer, name)
+
+    def add_samples(self, groups: Any) -> Any:
+        return self._data_buffer.add_samples(groups)
+
+    def get_samples(self, num_samples: int):
+        groups = self._data_buffer.get_samples(num_samples)
+        for group in groups or []:
+            with self._lock:
+                submission_id = self._next_submission_id
+                self._next_submission_id += 1
+            dump_step = submission_id // self._groups_per_dump_step
+            index_in_dump_step = submission_id % self._groups_per_dump_step
+            for sample in _iter_samples(group):
+                sample_metadata = sample.metadata or {}
+                sample.metadata = sample_metadata
+                sample_metadata.setdefault("agent_env_async_submission_id", submission_id)
+                sample_metadata.setdefault("agent_env_async_dump_step", dump_step)
+                sample_metadata.setdefault("agent_env_async_index_in_dump_step", index_in_dump_step)
+        return groups
+
+
 def _runtime_env(args: Any, name: str, default: str = "") -> str:
     value = os.environ.get(name)
     if value:
@@ -74,7 +121,11 @@ def _get_worker(args: Any, data_buffer: Any) -> AsyncRolloutWorker:
                 int(args.sglang_server_concurrency) * get_rollout_num_engines(args),
                 int(args.n_samples_per_prompt),
             )
-            _worker = AsyncRolloutWorker(args, data_buffer, concurrency=max_groups)
+            annotated_data_buffer = _AnnotatedDataBuffer(
+                data_buffer,
+                groups_per_dump_step=int(args.rollout_batch_size),
+            )
+            _worker = AsyncRolloutWorker(args, annotated_data_buffer, concurrency=max_groups)
             _worker.start()
             _worker_key = key
         return _worker

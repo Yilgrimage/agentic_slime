@@ -11,6 +11,13 @@ from typing import Any
 
 from slime.utils.types import Sample
 
+from examples.agent_env.dump import record_dump_step_label, reserve_dump_slot, sample_dump_step_label
+from examples.agent_env.trace_rendering import (
+    TraceCompressionOptions,
+    compress_trace_text,
+    render_answer_for_reward,
+)
+
 from .config import resolve_path, reward_cfg_path
 from .extractors import (
     bool_value,
@@ -29,6 +36,10 @@ from .types import RewardResult
 RUBRIC_SCHEMA_VERSION = "ropd.rubric.v1"
 BATCH_VERIFIER_SCHEMA_VERSION = "ropd.batch_verifier.v2"
 TEACHER_TRACE_FIELDS = (
+    "teacher_full_trace_text",
+    "teacher_trace",
+    "teacher_trajectory",
+    "reference_trace",
     "teacher_tool_trace",
     "teacher_trace_tool_io",
     "teacher_action_observation_trace",
@@ -39,10 +50,6 @@ TEACHER_TRACE_FIELDS = (
     "teacher_response",
     "teacher_answer",
     "teacher_final_answer",
-    "teacher_full_trace_text",
-    "teacher_trace",
-    "teacher_trajectory",
-    "reference_trace",
 )
 
 _TEACHER_INDEX_CACHE: dict[str, tuple[int, int, dict[str, dict[str, Any]]]] = {}
@@ -206,7 +213,6 @@ criterion 内部没有部分分。每条 criterion 只能是 true 或 false。
 - 最终只输出 JSON object，不要输出解释、Markdown 或其他文本。
 """
 
-_DUMP_COUNTS: dict[str, int] = {}
 _STAGE_SEMAPHORES: dict[tuple[int, str, int], asyncio.Semaphore] = {}
 
 
@@ -253,6 +259,13 @@ def _dump_limit(args: Any) -> int:
     return max(0, int_value(raw, 0))
 
 
+def _dump_total_limit(args: Any) -> int:
+    raw = runtime_env(args, "AGENT_ENV_ROPD_DUMP_TOTAL_N", "").strip()
+    if raw == "":
+        raw = str(_cfg(args, "dump_total_n", "") or "").strip()
+    return max(0, int_value(raw, 0))
+
+
 def _dump_dir(args: Any) -> Path | None:
     if _dump_limit(args) <= 0:
         return None
@@ -267,16 +280,31 @@ def _dump_dir(args: Any) -> Path | None:
     return Path(run_root) / "reward_artifacts" / "ropd"
 
 
+def _sample_rollout_label(sample: Sample) -> str:
+    return sample_dump_step_label(sample)
+
+
+def _record_rollout_label(record: dict[str, Any]) -> str:
+    return record_dump_step_label(record)
+
+
 def _dump_artifact(args: Any, stage: str, record: dict[str, Any]) -> None:
     output_dir = _dump_dir(args)
     if output_dir is None:
         return
     limit = _dump_limit(args)
-    key = f"{stage}:{os.getpid()}"
-    count = _DUMP_COUNTS.get(key, 0)
-    if count >= limit:
+    total_limit = _dump_total_limit(args)
+    dump_step = _record_rollout_label(record)
+    slot = reserve_dump_slot(
+        namespace="reward_artifacts:ropd",
+        stage=stage,
+        dump_step=dump_step,
+        per_step_limit=limit,
+        total_limit=total_limit,
+    )
+    if slot is None:
         return
-    _DUMP_COUNTS[key] = count + 1
+    count, total_count = slot
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{stage}_pid{os.getpid()}.jsonl"
     payload = {
@@ -284,9 +312,12 @@ def _dump_artifact(args: Any, stage: str, record: dict[str, Any]) -> None:
         "stage": stage,
         "pid": os.getpid(),
         "time": time.time(),
-        "index": count,
+        "dump_step": dump_step,
+        "index": total_count,
         **record,
     }
+    payload["dump_step"] = dump_step
+    payload["index_in_step"] = count
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str) + "\n")
 
@@ -588,12 +619,22 @@ def _limit_text(text: Any, max_chars: int) -> str:
     return truncate(value, max_chars)
 
 
-def _trim_answer_for_judge(answer: Any) -> str:
-    return _strip_reasoning_text(_strip_chat_boundary_tokens_for_reward(str(answer or "")))
+def _trace_options(args: Any) -> TraceCompressionOptions:
+    return TraceCompressionOptions(
+        strip_reasoning=_cfg_bool(args, "strip_reasoning", True),
+        strip_tool_response=_cfg_bool(args, "strip_tool_response", False),
+        strip_assistant_response=_cfg_bool(args, "strip_assistant_response", True),
+        strip_system_prompt=_cfg_bool(args, "strip_system_prompt", True),
+    )
 
 
-def _sanitize_teacher_answer_for_anonymous_verifier(answer: Any) -> str:
-    text = _trim_answer_for_judge(answer)
+def _sanitize_teacher_answer_for_anonymous_verifier(args: Any, answer: Any) -> str:
+    text = compress_trace_text(
+        answer,
+        options=_trace_options(args),
+        check_reasoning_presence=True,
+        reasoning_context="ropd_teacher_answer",
+    )
     replacements = (
         (r"\bTeacher response\b", "Response"),
         (r"\bTeacher action\b", "Action"),
@@ -607,313 +648,47 @@ def _sanitize_teacher_answer_for_anonymous_verifier(answer: Any) -> str:
     return text
 
 
-def _message_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (dict, list, tuple)):
-        return json.dumps(value, ensure_ascii=False, default=str)
-    return str(value)
-
-
-def _strip_reasoning_text(text: Any) -> str:
-    value = str(text or "")
-    value = re.sub(r"<think\b[^>]*>.*?</think>", "", value, flags=re.I | re.S)
-    value = re.sub(r"<\|begin_of_thought\|>.*?<\|end_of_thought\|>", "", value, flags=re.I | re.S)
-    value = re.sub(r"<think\b[^>]*>.*?(?=<action\b|$)", "", value, flags=re.I | re.S)
-    value = re.sub(r"<\|begin_of_thought\|>.*?(?=<action\b|$)", "", value, flags=re.I | re.S)
-    if "</think>" in value:
-        value = value.rsplit("</think>", 1)[1]
-    if "<|end_of_thought|>" in value:
-        value = value.rsplit("<|end_of_thought|>", 1)[1]
-    return value.strip()
-
-
-def _render_tool_calls(message: dict[str, Any]) -> str:
-    tool_calls = message.get("tool_calls")
-    if not isinstance(tool_calls, list) or not tool_calls:
-        return ""
-    rendered: list[str] = []
-    for call in tool_calls:
-        if not isinstance(call, dict):
-            rendered.append(_message_text(call))
-            continue
-        function = call.get("function") if isinstance(call.get("function"), dict) else {}
-        name = str(function.get("name") or call.get("name") or "").strip()
-        arguments = function.get("arguments") if "arguments" in function else call.get("arguments")
-        if isinstance(arguments, str):
-            arguments_text = arguments.strip()
-        else:
-            arguments_text = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True, default=str)
-        rendered.append(f"{name}({arguments_text})" if name else arguments_text)
-    return "\n".join(item for item in rendered if item.strip())
-
-
-def _action_text_from_assistant(message: dict[str, Any]) -> str:
-    tool_call_text = _render_tool_calls(message)
-    if tool_call_text:
-        return tool_call_text
-    content = _strip_reasoning_text(message.get("content"))
-    match = re.search(r"<action>\s*(.*?)\s*</action>", content, flags=re.I | re.S)
-    if match:
-        return match.group(1).strip()
-    return content
-
-
-def _message_content(message: dict[str, Any]) -> str:
-    content = message.get("content")
-    if isinstance(content, str):
-        return content.strip()
-    if content in (None, "", []):
-        return ""
-    return _message_text(content).strip()
-
-
-def _tool_response_from_messages(messages: list[dict[str, Any]], start: int) -> tuple[str, int]:
-    parts: list[str] = []
-    cursor = start
-    while cursor < len(messages):
-        message = messages[cursor]
-        role = str(message.get("role") or "")
-        if role == "assistant":
-            break
-        if role in {"user", "tool"}:
-            text = _message_content(message)
-            if text:
-                parts.append(text)
-        cursor += 1
-    return "\n\n".join(parts).strip(), cursor
-
-
-def _tool_io_trace_from_messages(messages: list[Any], *, final_observation: str = "") -> str:
-    normalized = [item for item in messages if isinstance(item, dict)]
-    if not normalized:
-        return ""
-    lines: list[str] = []
-    cursor = 0
-    initial_parts: list[str] = []
-    while cursor < len(normalized):
-        message = normalized[cursor]
-        role = str(message.get("role") or "")
-        if role == "assistant":
-            break
-        if role in {"user", "tool"}:
-            text = _message_content(message)
-            if text:
-                initial_parts.append(text)
-        cursor += 1
-    if initial_parts:
-        lines.append("Initial observation:\n" + "\n\n".join(initial_parts).strip())
-    step = 1
-    while cursor < len(normalized):
-        message = normalized[cursor]
-        if str(message.get("role") or "") != "assistant":
-            cursor += 1
-            continue
-        action_text = _action_text_from_assistant(message)
-        observation, next_cursor = _tool_response_from_messages(normalized, cursor + 1)
-        if not observation and final_observation and next_cursor >= len(normalized):
-            observation = final_observation
-        parts = [f"Step {step}:"]
-        if action_text:
-            parts.append(f"Tool call:\n{action_text}")
-        if observation:
-            parts.append(f"Tool response:\n{observation}")
-        if len(parts) > 1:
-            lines.append("\n".join(parts))
-            step += 1
-        cursor = max(next_cursor, cursor + 1)
-    return "\n\n".join(lines).strip()
-
-
-def _tool_io_trace_from_turns(turns: list[Any]) -> str:
-    lines: list[str] = []
-    for idx, turn in enumerate(turns, start=1):
-        if not isinstance(turn, dict):
-            continue
-        action = turn.get("action")
-        if action in (None, "", []):
-            assistant = turn.get("assistant_message")
-            if isinstance(assistant, dict):
-                action = _action_text_from_assistant(assistant)
-        env_step = turn.get("env_step")
-        observation = ""
-        if isinstance(env_step, dict):
-            observation = str(env_step.get("observation") or "").strip()
-        if not observation and turn.get("observation") not in (None, "", []):
-            observation = str(turn.get("observation") or "").strip()
-        parts = [f"Step {idx}:"]
-        if action not in (None, "", []):
-            parts.append(f"Tool call:\n{_strip_reasoning_text(_message_text(action))}")
-        if observation:
-            parts.append(f"Tool response:\n{observation}")
-        if len(parts) > 1:
-            lines.append("\n".join(parts))
-    return "\n\n".join(lines).strip()
-
-
-def _tool_io_trace_from_token_segments(segments: list[Any]) -> str:
-    normalized = [item for item in segments if isinstance(item, dict)]
-    if not normalized:
-        return ""
-    lines: list[str] = []
-    step = 1
-    pending_action = ""
-    for segment in normalized:
-        kind = str(segment.get("kind") or "")
-        text = str(segment.get("text") or "").strip()
-        if not text:
-            continue
-        if kind == "initial_prompt":
-            if not lines:
-                lines.append("Initial observation:\n" + _strip_chat_boundary_tokens_for_reward(text))
-        elif kind == "assistant":
-            pending_action = _strip_reasoning_text(_strip_chat_boundary_tokens_for_reward(text))
-            match = re.search(r"<action>\s*(.*?)\s*</action>", pending_action, flags=re.I | re.S)
-            if match:
-                pending_action = match.group(1).strip()
-        elif kind == "environment" and pending_action:
-            lines.append(
-                f"Step {step}:\n"
-                f"Tool call:\n{pending_action}\n"
-                f"Tool response:\n{_strip_chat_boundary_tokens_for_reward(text)}"
-            )
-            pending_action = ""
-            step += 1
-    return "\n\n".join(lines).strip()
-
-
-def _strip_chat_boundary_tokens_for_reward(text: str) -> str:
-    value = str(text or "")
-    for token in ("<|im_start|>", "<|im_end|>", "<|endoftext|>", "</s>"):
-        value = value.replace(token, "")
-    value = re.sub(r"(?m)^(system|assistant|user|tool)\s*$", "", value)
-    return value.strip()
-
-
-def _tool_io_trace_text(sample: Sample) -> str:
-    sample_metadata = metadata(sample)
-    episode_result = sample_metadata.get("episode_result")
-    final_observation = ""
-    if isinstance(episode_result, dict):
-        final_observation = str(episode_result.get("observation") or "").strip()
-    messages = sample_metadata.get("messages")
-    if isinstance(messages, list):
-        text = _tool_io_trace_from_messages(messages, final_observation=final_observation)
-        if text:
-            return text
-    turns = sample_metadata.get("turns")
-    if isinstance(turns, list):
-        text = _tool_io_trace_from_turns(turns)
-        if text:
-            return text
-    segments = sample_metadata.get("token_segments")
-    if isinstance(segments, list):
-        text = _tool_io_trace_from_token_segments(segments)
-        if text:
-            return text
-    return _strip_reasoning_text(str(getattr(sample, "response", "") or ""))
-
-
-def _strip_tool_response_text(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r"<\|im_start\|>system\n.*?<\|im_end\|>\n?", "", text, flags=re.S)
-    text = re.sub(r"<\|im_start\|>developer\n.*?<\|im_end\|>\n?", "", text, flags=re.S)
-    text = re.sub(r"<\|im_start\|>tool\n.*?<\|im_end\|>\n?", "", text, flags=re.S)
-    text = re.sub(r"<\|im_start\|>user\n\s*<tool_response>.*?</tool_response>\s*<\|im_end\|>\n?", "", text, flags=re.S)
-    text = re.sub(r"<tool_response>.*?</tool_response>", "", text, flags=re.S)
-    labels_to_strip = {"SYSTEM", "DEVELOPER", "TOOL", "TOOL_RESULT", "TOOL_RESULTS", "TOOL_RESPONSE", "TOOL_RESPONSES"}
-    pattern = re.compile(r"(?m)^(USER|ASSISTANT|SYSTEM|DEVELOPER|TOOL|TOOL_RESULT|TOOL_RESULTS|TOOL_RESPONSE|TOOL_RESPONSES|TOOL_CALLS):\s*\n?")
-    matches = list(pattern.finditer(text))
-    if matches:
-        pieces: list[str] = []
-        cursor = 0
-        for idx, match in enumerate(matches):
-            label = match.group(1)
-            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-            if label in labels_to_strip:
-                pieces.append(text[cursor : match.start()])
-                cursor = end
-        pieces.append(text[cursor:])
-        text = "".join(pieces)
-    lines: list[str] = []
-    skip_block = False
-    for line in text.splitlines():
-        normalized = line.strip().lower()
-        if normalized.startswith("[observation") or normalized.startswith("observation after action"):
-            skip_block = True
-            continue
-        if skip_block and (normalized.startswith("[assistant") or normalized.startswith("[action") or normalized.startswith("step ")):
-            skip_block = False
-        if not skip_block:
-            lines.append(line)
-    return "\n".join(lines).strip()
-
-
-def _trace_text(sample: Sample, *, omit_tool_responses: bool = False) -> str:
-    sample_metadata = metadata(sample)
-    turns = sample_metadata.get("turns")
-    if isinstance(turns, list) and turns:
-        lines: list[str] = []
-        for idx, turn in enumerate(turns, start=1):
-            if not isinstance(turn, dict):
-                lines.append(f"Step {idx}:\n{_message_text(turn)}")
-                continue
-            response_text = turn.get("parser_text") or turn.get("response_text") or ""
-            action = turn.get("action")
-            observation = turn.get("observation")
-            parts = [f"Step {idx}:"]
-            if response_text:
-                parts.append(f"Response:\n{_message_text(response_text)}")
-            if action not in (None, "", []):
-                parts.append(f"Action:\n{_message_text(action)}")
-            if not omit_tool_responses and observation not in (None, "", []):
-                parts.append(f"Observation after action:\n{_message_text(observation)}")
-            lines.append("\n".join(parts))
-        return "\n\n".join(lines)
-    trace_value = _metadata_value(sample, ["trace", "trajectory", "rollout_trace", "student_trace"])
-    trace_text = _message_text(trace_value) if trace_value not in (None, "", []) else str(getattr(sample, "response", "") or "")
-    return _strip_tool_response_text(trace_text) if omit_tool_responses else trace_text
-
-
-def _combine_final_and_trace(prediction: str, trace: str, *, trace_label: str) -> str:
-    prediction = prediction.strip()
-    trace = trace.strip()
-    if prediction and trace and prediction != trace:
-        return f"[Final Answer]\n{prediction}\n\n[{trace_label}]\n{trace}"
-    return prediction or trace
-
-
 def _answer_mode(args: Any) -> str:
-    return str(_cfg(args, "answer_mode", "full") or "full").strip().lower()
-
-
-def _answer_for_judge(args: Any, sample: Sample) -> str:
-    prediction = _trim_answer_for_judge(prediction_text(sample))
-    mode = _answer_mode(args)
-    if mode == "final":
-        return prediction
-    if mode in {"tool_trace", "tool_io", "tool_call_response_trace", "action_observation_trace"}:
-        return _trim_answer_for_judge(_tool_io_trace_text(sample) or prediction)
-    if mode in {"final_with_tool_trace", "final_with_tool_io", "final_with_action_observation_trace"}:
-        trace = _tool_io_trace_text(sample)
-        return _trim_answer_for_judge(_combine_final_and_trace(prediction, trace, trace_label="Tool Call And Response Trace"))
-    if mode in {"trace", "full_trace"}:
-        return _trim_answer_for_judge(_trace_text(sample))
-    if mode in {
+    mode = str(_cfg(args, "answer_mode", "trace") or "trace").strip().lower()
+    if mode in {"final", "trace"}:
+        return mode
+    deprecated = {
+        "tool_trace",
+        "tool_io",
+        "tool_call_response_trace",
+        "action_observation_trace",
+        "final_with_tool_trace",
+        "final_with_tool_io",
+        "final_with_action_observation_trace",
+        "full_trace",
+        "full",
         "final_without_tool_response",
         "final_without_tool_responses",
         "final_with_no_tool_trace",
         "final_with_no_tool_response_trace",
         "final_with_trace_no_tool_response",
-    }:
-        trace = _trace_text(sample, omit_tool_responses=True)
-        return _trim_answer_for_judge(_combine_final_and_trace(prediction, trace, trace_label="Rollout Trace Without Tool Responses"))
-    if mode in {"trace_without_tool_response", "trace_without_tool_responses", "no_tool_trace", "no_tool_response_trace", "trace_no_tool_response"}:
-        return _trim_answer_for_judge(_trace_text(sample, omit_tool_responses=True) or prediction)
-    return _trim_answer_for_judge(_combine_final_and_trace(prediction, _trace_text(sample), trace_label="Rollout Trace"))
+        "trace_without_tool_response",
+        "trace_without_tool_responses",
+        "no_tool_trace",
+        "no_tool_response_trace",
+        "trace_no_tool_response",
+    }
+    if mode in deprecated:
+        raise RuntimeError(
+            f"ropd.answer_mode={mode!r} is deprecated. Use answer_mode=trace plus strip_* switches, "
+            "or answer_mode=final."
+        )
+    raise RuntimeError(f"Unsupported ropd.answer_mode={mode!r}; expected 'trace' or 'final'")
+
+
+def _answer_for_judge(args: Any, sample: Sample) -> str:
+    return render_answer_for_reward(
+        sample,
+        final_answer=prediction_text(sample),
+        answer_mode=_answer_mode(args),
+        options=_trace_options(args),
+        check_reasoning_presence=True,
+    )
 
 
 def _student_answer(args: Any, sample: Sample) -> str:
@@ -925,7 +700,12 @@ def _student_answer(args: Any, sample: Sample) -> str:
         ),
     )
     if value not in (None, "", []):
-        return _trim_answer_for_judge(value)
+        return compress_trace_text(
+            value,
+            options=_trace_options(args),
+            check_reasoning_presence=True,
+            reasoning_context="ropd_student_answer",
+        )
     return _answer_for_judge(args, sample)
 
 
@@ -943,7 +723,11 @@ def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
             values.append(str(metadata_value))
     if values:
         return tuple(
-            dict.fromkeys(_sanitize_teacher_answer_for_anonymous_verifier(value) for value in values if value.strip())
+            dict.fromkeys(
+                _sanitize_teacher_answer_for_anonymous_verifier(args, value)
+                for value in values
+                if value.strip()
+            )
         )
     index_path = _teacher_index_path(args)
     if index_path is not None:
@@ -956,7 +740,7 @@ def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
             status = _teacher_index_row_status(row, has_text=bool(text))
             if status != "completed" or not text:
                 return ()
-            return (_sanitize_teacher_answer_for_anonymous_verifier(text),)
+            return (_sanitize_teacher_answer_for_anonymous_verifier(args, text),)
     return ()
 
 
@@ -1325,6 +1109,7 @@ async def _rubric_for_bucket(
             args,
             "rubricator",
             {
+                "dump_step": _sample_rollout_label(sample),
                 "join_key": _join_key(args),
                 "join_value": _join_value(args, sample),
                 "status": "error",
@@ -1340,6 +1125,7 @@ async def _rubric_for_bucket(
         args,
         "rubricator",
         {
+            "dump_step": _sample_rollout_label(sample),
             "join_key": _join_key(args),
             "join_value": _join_value(args, sample),
             "status": "ok" if rubric is not None else "invalid_rubric",
@@ -1399,6 +1185,8 @@ def _result(
     student_item: dict[str, Any],
     student_position: int,
     teacher_below_student: bool,
+    teacher_below_any_student: bool,
+    teacher_reference_score: float | None,
 ) -> RewardResult:
     if maximum_score <= 0:
         bounded = 0.0
@@ -1409,6 +1197,7 @@ def _result(
         answer_score=bounded,
         group_stats=group_stats,
     )
+    trace_options = _trace_options(args)
     weighted = train_score * _weight(args)
     raw = {
         "rubric": rubric,
@@ -1422,6 +1211,7 @@ def _result(
         "answer_score": float(bounded),
         "student_answer_position": int(student_position),
         "teacher_below_student": bool(teacher_below_student),
+        "group_teacher_below_any_student": bool(teacher_below_any_student),
         "ropd_group_reference": group_stats.get("reference", "students"),
         "ropd_group_reference_mean": float(group_stats.get("mean", 0.0)),
         "ropd_group_reference_std": float(group_stats.get("std", 0.0)),
@@ -1432,7 +1222,13 @@ def _result(
         "ropd_luffy_enabled": bool(_luffy_enabled(args)),
         "ropd_luffy_mode": _luffy_mode(args),
         "answer_mode": _answer_mode(args),
+        "strip_reasoning": trace_options.strip_reasoning,
+        "strip_tool_response": trace_options.strip_tool_response,
+        "strip_assistant_response": trace_options.strip_assistant_response,
+        "strip_system_prompt": trace_options.strip_system_prompt,
     }
+    if teacher_reference_score is not None:
+        raw["teacher_reference_score"] = float(teacher_reference_score)
     if rubric_call is not None:
         raw["rubric_call"] = rubric_call
     if judge_call is not None:
@@ -1496,6 +1292,7 @@ async def _score_bucket(
             args,
             "verifier",
             {
+                "dump_step": _sample_rollout_label(samples[0]),
                 "join_key": _join_key(args),
                 "join_value": _join_value(args, samples[0]),
                 "bucket_key": bucket_key,
@@ -1532,11 +1329,17 @@ async def _score_bucket(
         max(0.0, min(1.0, float(score) / maximum_score)) for score in teacher_scores
     ) if maximum_score > 0 else ()
     group_stats = _group_stats(args, student_answer_scores, teacher_answer_scores)
-    teacher_below_student = bool(teacher_scores and min(teacher_scores) < max(item[0] for item in student_scores_by_index if item is not None))
+    teacher_reference_score = min(teacher_scores) if teacher_scores else None
+    student_above_teacher_flags = [
+        bool(teacher_reference_score is not None and item is not None and float(item[0]) > teacher_reference_score)
+        for item in student_scores_by_index
+    ]
+    teacher_below_any_student = any(student_above_teacher_flags)
     _dump_artifact(
         args,
         "verifier",
         {
+            "dump_step": _sample_rollout_label(samples[0]),
             "join_key": _join_key(args),
             "join_value": _join_value(args, samples[0]),
             "bucket_key": bucket_key,
@@ -1550,7 +1353,9 @@ async def _score_bucket(
             "student_scores": [None if item is None else item[0] for item in student_scores_by_index],
             "maximum_score": maximum_score,
             "group_stats": group_stats,
-            "teacher_below_student": teacher_below_student,
+            "teacher_reference_score": teacher_reference_score,
+            "student_above_teacher_flags": student_above_teacher_flags,
+            "group_teacher_below_any_student": teacher_below_any_student,
             "call": judge_call,
         },
     )
@@ -1577,7 +1382,9 @@ async def _score_bucket(
                 student_score=student_score,
                 student_item=student_item,
                 student_position=student_position,
-                teacher_below_student=teacher_below_student,
+                teacher_below_student=student_above_teacher_flags[idx],
+                teacher_below_any_student=teacher_below_any_student,
+                teacher_reference_score=teacher_reference_score,
             )
         )
     return results

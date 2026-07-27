@@ -17,12 +17,18 @@ ropd:
   response_format: json_object
   rubric_max_tokens: 32768
   judge_max_tokens: 32768
-  answer_mode: trace_without_tool_response
+  answer_mode: trace
+  strip_reasoning: true
+  strip_tool_response: false
+  strip_assistant_response: true
+  strip_system_prompt: true
   reward_mode: answer_only
   reward_group_reference: students
   luffy_enable: false
   luffy_mode: off
   teacher_answer_keys:
+    - teacher_full_trace_text
+    - teacher_trace
     - teacher_response
     - teacher_answer
     - teacher_final_answer

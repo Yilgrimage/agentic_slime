@@ -5,31 +5,30 @@ outcome: 10.0
 
 ropd:
   join_key: task_id
-  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/webshop_official_il_teacher_tool_trace.jsonl
+  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
   teacher_index_keys:
     - task_id
     - task_index
   teacher_answer_keys:
     - teacher_full_trace_text
     - teacher_trace
-    - teacher_tool_trace
     - teacher_response
     - teacher_answer
     - teacher_final_answer
   allow_online_rubric: true
-  concurrency: 8
-  rubric_concurrency: 4
-  judge_concurrency: 4
-  max_attempts: 6
-  rate_limit_backoff_s: 20
+  concurrency: 4
+  rubric_concurrency: 2
+  judge_concurrency: 2
+  max_attempts: 4
+  rate_limit_backoff_s: 10
   retry_backoff_s: 1
   response_format: json_object
-  rubric_max_tokens: 8192
-  judge_max_tokens: 8192
-  question_max_chars: 4000
-  reference_max_chars: 12000
-  student_rubric_max_chars: 12000
-  verifier_answer_max_chars: 12000
+  rubric_max_tokens: 4096
+  judge_max_tokens: 4096
+  question_max_chars: 6000
+  reference_max_chars: 8000
+  student_rubric_max_chars: 4000
+  verifier_answer_max_chars: 4000
   answer_mode: trace
   strip_reasoning: true
   strip_tool_response: false
