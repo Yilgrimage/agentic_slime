@@ -52,7 +52,7 @@ def render_trace_for_reward(sample: Sample, *, options: TraceCompressionOptions 
         rendered = _render_turns(
             turns,
             options=options,
-            initial_observation=_initial_observation_from_messages(sample_metadata.get("messages"), options=options),
+            initial_observation=_initial_observation_from_sample_metadata(sample_metadata, options=options),
         )
         if rendered:
             return rendered
@@ -315,6 +315,52 @@ def _render_turns(
         if len(parts) > 1:
             lines.append("\n".join(parts))
     return "\n\n".join(lines).strip()
+
+
+def _initial_observation_from_sample_metadata(sample_metadata: dict[str, Any], *, options: TraceCompressionOptions) -> str:
+    explicit = _first_metadata_value(sample_metadata, ("reward_initial_observation", "initial_observation"))
+    if explicit not in (None, "", []):
+        return compress_trace_text(
+            explicit,
+            options=options,
+            strip_assistant_response=False,
+        )
+
+    task_prompt = _task_prompt_from_sample_metadata(sample_metadata)
+    if task_prompt:
+        return "Task:\n" + task_prompt
+
+    return _initial_observation_from_messages(sample_metadata.get("messages"), options=options)
+
+
+def _task_prompt_from_sample_metadata(sample_metadata: dict[str, Any]) -> str:
+    keys = ("query", "task_prompt", "instruction", "question", "task_question", "instruction_text")
+    for key in keys:
+        value = sample_metadata.get(key)
+        if value not in (None, "", []):
+            return str(value).strip()
+    for nested_key in ("env_metadata", "requested_task", "source_row"):
+        nested = sample_metadata.get(nested_key)
+        if isinstance(nested, dict):
+            for key in keys:
+                value = nested.get(key)
+                if value not in (None, "", []):
+                    return str(value).strip()
+    turns = sample_metadata.get("turns")
+    if isinstance(turns, list):
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            env_step = turn.get("env_step")
+            if not isinstance(env_step, dict):
+                continue
+            info = env_step.get("info")
+            if isinstance(info, dict):
+                for key in keys:
+                    value = info.get(key)
+                    if value not in (None, "", []):
+                        return str(value).strip()
+    return ""
 
 
 def _initial_observation_from_messages(messages: Any, *, options: TraceCompressionOptions) -> str:
