@@ -436,7 +436,20 @@ def task_key(sample: Sample, spec: AgentEnvSpec) -> str:
 
 def record_env_metadata(sample_metadata: dict[str, Any], spec: AgentEnvSpec, env_meta: dict[str, Any]) -> None:
     sample_metadata[spec.name] = env_meta
-    for key in ("task_id", "task_ref", "domain", "data_source", "task_set", "dataset_name"):
+    for key in (
+        "task_id",
+        "task_ref",
+        "domain",
+        "data_source",
+        "task_set",
+        "dataset_name",
+        "query",
+        "task_prompt",
+        "instruction",
+        "question",
+        "task_question",
+        "instruction_text",
+    ):
         value = env_meta.get(key)
         if value not in (None, "", []):
             sample_metadata.setdefault(key, value)

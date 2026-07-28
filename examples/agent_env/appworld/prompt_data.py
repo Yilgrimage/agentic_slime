@@ -11,6 +11,8 @@ import yaml
 from examples.agent_env.appworld.prompt import DEFAULT_PROMPT
 from examples.agent_env.prompting import require_prompt
 
+_TASK_INSTRUCTION_CACHE: dict[str, str] = {}
+
 
 def _env_path(value: Any, envvar: str) -> str:
     text = str(value or "").strip()
@@ -35,13 +37,17 @@ def _split_dataset(config: dict[str, Any], split: str) -> str:
     return str(appworld.get("dataset_name") or split)
 
 
-def _load_task_ids(config: dict[str, Any], split: str) -> list[str]:
+def _configure_appworld_root(config: dict[str, Any]) -> None:
     appworld = config.get("appworld") if isinstance(config.get("appworld"), dict) else {}
     root = _env_path(appworld.get("root") or os.environ.get("APPWORLD_ROOT", ""), "APPWORLD_ROOT")
     if root:
         os.environ["APPWORLD_ROOT"] = root
         os.environ.setdefault("HOME", root)
 
+
+def _load_task_ids(config: dict[str, Any], split: str) -> list[str]:
+    appworld = config.get("appworld") if isinstance(config.get("appworld"), dict) else {}
+    _configure_appworld_root(config)
     from appworld.task import load_task_ids
 
     ids = load_task_ids(
@@ -54,6 +60,68 @@ def _load_task_ids(config: dict[str, Any], split: str) -> list[str]:
     if limit is not None:
         ids = ids[: int(limit)]
     return [str(item) for item in ids]
+
+
+def _task_instruction(task_id: str, fallback: Any = "") -> str:
+    task_id = str(task_id or "").strip()
+    fallback_text = str(fallback or "").strip()
+    if not task_id:
+        if fallback_text:
+            return fallback_text
+        raise ValueError("AppWorld task metadata requires task_id before instruction can be resolved")
+    cached = _TASK_INSTRUCTION_CACHE.get(task_id)
+    if cached:
+        return cached
+    instruction = _task_instruction_from_specs(task_id)
+    if instruction:
+        _TASK_INSTRUCTION_CACHE[task_id] = instruction
+        return instruction
+    try:
+        from appworld.task import Task
+
+        task = Task.load(task_id, load_ground_truth=False, include_api_response_schemas=False)
+        instruction = str(getattr(task, "instruction", "") or "").strip()
+    except Exception:
+        if fallback_text:
+            instruction = fallback_text
+        else:
+            raise
+    if not instruction:
+        raise ValueError(f"AppWorld task {task_id!r} has empty instruction")
+    _TASK_INSTRUCTION_CACHE[task_id] = instruction
+    return instruction
+
+
+def _task_instruction_from_specs(task_id: str) -> str:
+    root = os.environ.get("APPWORLD_ROOT", "").strip()
+    if not root:
+        return ""
+    root_path = Path(root).expanduser()
+    candidates = (
+        root_path / "data" / "tasks" / task_id / "specs.json",
+        root_path / "tasks" / task_id / "specs.json",
+    )
+    for specs_path in candidates:
+        if not specs_path.exists():
+            continue
+        specs = json.loads(specs_path.read_text(encoding="utf-8"))
+        instruction = str(specs.get("instruction") or "").strip()
+        if instruction:
+            return instruction
+    return ""
+
+
+def _instruction_from_row(row: dict[str, Any]) -> str:
+    for key in ("task_prompt", "instruction", "question", "query", "instruction_text"):
+        value = row.get(key)
+        if value not in (None, "", []):
+            return str(value)
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    for key in ("task_prompt", "instruction", "question", "query", "instruction_text"):
+        value = metadata.get(key)
+        if value not in (None, "", []):
+            return str(value)
+    return ""
 
 
 def _read_task_rows(path: Path, split: str) -> list[dict[str, Any]]:
@@ -86,6 +154,9 @@ def _read_task_rows(path: Path, split: str) -> list[dict[str, Any]]:
             dataset_name = row.get("dataset_name")
             if dataset_name not in (None, "", []):
                 task_row["dataset_name"] = str(dataset_name)
+            instruction = _instruction_from_row(row)
+            if instruction:
+                task_row["instruction"] = instruction
             rows.append(task_row)
     if not rows:
         raise RuntimeError(f"No AppWorld task rows for split={split} in {path}")
@@ -108,6 +179,7 @@ def write_split(path: Path, split: str, num_tasks: int, prompt: str, start_task:
         for offset in range(num_tasks):
             task_index = start_task + offset
             task_id = task_ids[task_index % len(task_ids)]
+            instruction = _task_instruction(task_id)
             row = {
                 "prompt": prompt,
                 "metadata": {
@@ -115,6 +187,8 @@ def write_split(path: Path, split: str, num_tasks: int, prompt: str, start_task:
                     "task_id": task_id,
                     "split": split,
                     "dataset_name": dataset_name,
+                    "instruction": instruction,
+                    "task_prompt": instruction,
                 },
             }
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -132,6 +206,7 @@ def write_task_rows(path: Path, split: str, num_tasks: int, prompt: str, start_t
         for offset, task_row in enumerate(selected):
             task_index = int(task_row.get("task_index", start_task + offset))
             task_id = str(task_row.get("task_id") or "")
+            instruction = _task_instruction(task_id, task_row.get("instruction"))
             row = {
                 "prompt": prompt,
                 "metadata": {
@@ -139,6 +214,8 @@ def write_task_rows(path: Path, split: str, num_tasks: int, prompt: str, start_t
                     "task_id": task_id,
                     "split": str(task_row.get("split") or split),
                     "dataset_name": str(task_row.get("dataset_name") or dataset_name),
+                    "instruction": instruction,
+                    "task_prompt": instruction,
                 },
             }
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -161,6 +238,7 @@ def main() -> None:
         parser.error("Specify exactly one of --output or --output-dir.")
 
     config = _load_config(args.config)
+    _configure_appworld_root(config)
 
     def build(path: Path, split: str) -> None:
         dataset_name = _split_dataset(config, split)

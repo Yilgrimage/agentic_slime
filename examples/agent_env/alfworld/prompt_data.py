@@ -12,9 +12,9 @@ from examples.agent_env.prompting import require_prompt
 
 
 TEACHER_METADATA_KEYS = (
-    "teacher_response",
-    "teacher_answer",
-    "teacher_final_answer",
+    "teacher_full_trace_text",
+    "teacher_trace",
+    "teacher_tool_trace",
     "teacher_actions",
     "teacher_success",
     "ropd_rubric",

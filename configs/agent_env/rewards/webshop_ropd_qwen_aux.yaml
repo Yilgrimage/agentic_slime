@@ -10,12 +10,9 @@ ropd:
     - task_id
     - task_index
   teacher_answer_keys:
-    - teacher_full_trace_text
     - teacher_trace
     - teacher_tool_trace
-    - teacher_response
-    - teacher_answer
-    - teacher_final_answer
+    - teacher_full_trace_text
   allow_online_rubric: true
   concurrency: 8
   rubric_concurrency: 4
@@ -26,10 +23,6 @@ ropd:
   response_format: json_object
   rubric_max_tokens: 8192
   judge_max_tokens: 8192
-  question_max_chars: 4000
-  reference_max_chars: 12000
-  student_rubric_max_chars: 12000
-  verifier_answer_max_chars: 12000
   answer_mode: trace
   strip_reasoning: true
   strip_tool_response: false

@@ -76,7 +76,44 @@ def render_trace_for_reward(sample: Sample, *, options: TraceCompressionOptions 
     )
     if trace_value not in (None, "", []):
         return compress_trace_text(trace_value, options=options)
-    return compress_trace_text(str(getattr(sample, "response", "") or ""), options=options)
+    sample_index = getattr(sample, "index", sample_metadata.get("sample_index", "unknown"))
+    raise ValueError(
+        "reward trace is missing structured trace fields for sample "
+        f"{sample_index}; expected one of reward_trace/judge_trace/ropd_trace, turns, "
+        "messages, token_segments, trace/trajectory/rollout_trace/student_trace"
+    )
+
+
+def render_teacher_trace_for_reward(
+    trace: Any,
+    *,
+    options: TraceCompressionOptions | None = None,
+    check_reasoning_presence: bool = False,
+    reasoning_context: str = "teacher_trace",
+) -> str:
+    """Render teacher trajectories through the same reward trace contract.
+
+    Teacher data may come from structured rollout records or legacy text dumps.
+    Do not let raw assistant prose/code-fence transcripts silently become the
+    judge input when the student path is rendered as tool-call/tool-response
+    trace.
+    """
+
+    options = options or TraceCompressionOptions()
+    if check_reasoning_presence:
+        _check_reasoning_contract(trace, options, context=reasoning_context)
+    if trace in (None, "", []):
+        return ""
+    if isinstance(trace, Sample):
+        return render_trace_for_reward(trace, options=options)
+    structured = _render_structured_teacher_trace(trace, options=options)
+    if structured:
+        return structured
+    text = _message_text(_drop_structured_reasoning(trace) if options.strip_reasoning else trace)
+    legacy = _render_legacy_teacher_text(text, options=options)
+    if legacy:
+        return legacy
+    return compress_trace_text(trace, options=options)
 
 
 def compress_trace_text(
@@ -102,6 +139,135 @@ def compress_trace_text(
     if options.strip_tool_response:
         value = _strip_tool_response_text(value)
     return value.strip()
+
+
+def _render_structured_teacher_trace(trace: Any, *, options: TraceCompressionOptions) -> str:
+    if isinstance(trace, dict):
+        payload = trace
+    elif isinstance(trace, (list, tuple)):
+        normalized = list(trace)
+        role_count = sum(1 for item in normalized if isinstance(item, dict) and item.get("role"))
+        payload = {"messages": normalized} if role_count else {"turns": normalized}
+    else:
+        return ""
+    try:
+        return render_trace_for_reward(Sample(prompt="", metadata=payload), options=options)
+    except ValueError:
+        return ""
+
+
+def _render_legacy_teacher_text(text: str, *, options: TraceCompressionOptions) -> str:
+    value = _strip_chat_boundary_tokens(str(text or ""))
+    if options.strip_system_prompt:
+        value = _strip_system_prompt_text(value)
+    if options.strip_reasoning:
+        value = _strip_reasoning_text(value)
+    if not value.strip():
+        return ""
+    if _looks_like_legacy_turn_transcript(value):
+        rendered = _render_legacy_turn_transcript(value, options=options)
+        if rendered:
+            return rendered
+    if _looks_like_reward_trace(value):
+        return compress_trace_text(value, options=options)
+    return ""
+
+
+def _looks_like_legacy_turn_transcript(text: str) -> bool:
+    return bool(re.search(r"(?im)^\s*Turn\s+\d+\s*:", str(text or "")))
+
+
+def _looks_like_reward_trace(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?im)^\s*(Initial observation|Step\s+\d+|Tool call|Tool response|Action|Observation(?: after action)?)\s*:",
+            str(text or ""),
+        )
+    )
+
+
+def _render_legacy_turn_transcript(text: str, *, options: TraceCompressionOptions) -> str:
+    matches = list(re.finditer(r"(?im)^\s*Turn\s+\d+\s*:\s*", text))
+    if not matches:
+        return ""
+    lines: list[str] = []
+    prefix = text[: matches[0].start()].strip()
+    if prefix:
+        initial = compress_trace_text(
+            prefix,
+            options=options,
+            strip_assistant_response=False,
+        )
+        if initial:
+            lines.append("Initial observation:\n" + initial)
+    step = 1
+    for idx, match in enumerate(matches):
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        body = text[match.end() : end].strip()
+        pairs = _legacy_action_observation_pairs(body)
+        if not pairs:
+            continue
+        for action, observation in pairs:
+            action_text = _normalize_legacy_tool_call(action)
+            if not action_text:
+                continue
+            parts = [f"Step {step}:", "Tool call:", action_text]
+            if observation and not options.strip_tool_response:
+                parts.extend(["Tool response:", observation.strip()])
+            lines.append("\n".join(parts))
+            step += 1
+    return "\n\n".join(lines).strip()
+
+
+def _legacy_action_observation_pairs(text: str) -> list[tuple[str, str]]:
+    pairs = _explicit_action_observation_pairs(text)
+    if pairs:
+        return pairs
+    return _code_fence_action_observation_pairs(text)
+
+
+def _explicit_action_observation_pairs(text: str) -> list[tuple[str, str]]:
+    chunks = re.split(r"(?im)^\s*Action\s*:\s*", str(text or ""))
+    pairs: list[tuple[str, str]] = []
+    for chunk in chunks[1:]:
+        match = re.search(r"(?im)^\s*Observation(?: after action)?\s*:\s*", chunk)
+        if not match:
+            action = chunk.strip()
+            observation = ""
+        else:
+            action = chunk[: match.start()].strip()
+            observation = chunk[match.end() :].strip()
+        if action:
+            pairs.append((action, observation))
+    return pairs
+
+
+def _code_fence_action_observation_pairs(text: str) -> list[tuple[str, str]]:
+    blocks = [
+        match.group(1).strip()
+        for match in re.finditer(r"```(?:[A-Za-z0-9_+.-]+)?\s*\n(.*?)```", str(text or ""), flags=re.S)
+        if match.group(1).strip()
+    ]
+    pairs: list[tuple[str, str]] = []
+    cursor = 0
+    while cursor < len(blocks):
+        action = blocks[cursor].strip()
+        observation = blocks[cursor + 1].strip() if cursor + 1 < len(blocks) else ""
+        if action:
+            pairs.append((action, observation))
+        cursor += 2
+    return pairs
+
+
+def _normalize_legacy_tool_call(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    if re.match(r"^[A-Za-z_][\w.-]*\s*\(", value, flags=re.S):
+        return value
+    if "\n" in value or "apis." in value or value.startswith(("import ", "from ")):
+        return "execute(" + json.dumps({"code": value}, ensure_ascii=False, sort_keys=True) + ")"
+    return value
 
 
 def _render_turns(

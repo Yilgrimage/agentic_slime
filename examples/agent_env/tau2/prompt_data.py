@@ -13,9 +13,9 @@ from typing import Any
 from examples.agent_env.tau2.prompt import DEFAULT_PROMPT
 
 TEACHER_METADATA_KEYS = (
-    "teacher_response",
-    "teacher_answer",
-    "teacher_final_answer",
+    "teacher_full_trace_text",
+    "teacher_trace",
+    "teacher_tool_trace",
     "teacher_actions",
     "teacher_success",
     "teacher_score",

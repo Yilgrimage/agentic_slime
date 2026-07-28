@@ -16,18 +16,19 @@ from examples.agent_env.trace_rendering import (
     TraceCompressionOptions,
     compress_trace_text,
     render_answer_for_reward,
+    render_teacher_trace_for_reward,
 )
 
 from .config import resolve_path, reward_cfg_path
 from .extractors import (
     bool_value,
+    explicit_task_prompt,
     float_value,
     int_value,
     metadata,
     prediction_text,
     reference_values,
     runtime_env,
-    task_prompt,
     truncate,
 )
 from .llm_client import call_json_judge_with_metadata, judge_mode
@@ -36,22 +37,19 @@ from .types import RewardResult
 RUBRIC_SCHEMA_VERSION = "ropd.rubric.v1"
 BATCH_VERIFIER_SCHEMA_VERSION = "ropd.batch_verifier.v2"
 ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION = "ropd.answer_process_rubric.v1"
-ANSWER_PROCESS_VERIFIER_SCHEMA_VERSION = "ropd.answer_process_step_batch_verifier.v1"
+ANSWER_PROCESS_VERIFIER_SCHEMA_VERSION = "ropd.answer_process_compact_batch_verifier.v1"
 TEACHER_TRACE_FIELDS = (
-    "teacher_full_trace_text",
+    "teacher_tool_trace",
     "teacher_trace",
     "teacher_trajectory",
-    "reference_trace",
-    "teacher_tool_trace",
-    "teacher_trace_tool_io",
     "teacher_action_observation_trace",
+    "teacher_full_trace_text",
+    "reference_trace",
+    "teacher_trace_tool_io",
     "teacher_no_tool_response_text",
     "teacher_trace_no_tool_response",
     "teacher_no_tool_trace",
     "reference_no_tool_trace",
-    "teacher_response",
-    "teacher_answer",
-    "teacher_final_answer",
 )
 
 _TEACHER_INDEX_CACHE: dict[str, tuple[int, int, dict[str, dict[str, Any]]]] = {}
@@ -358,16 +356,15 @@ VERIFIER_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评分专
 [Additional Scoring Instructions]
 {extra_scoring_instructions}
 
-# 输入说明
-每个 trajectory 已经被拆成稳定的 `[Step N]` 编号。`step_indices` 必须引用同一个 trajectory 内的这些 Step 编号，不要跨 trajectory 引用。
-
 # 核心评分规则
 对每个 trajectory 独立评分，不能比较不同 trajectory，也不能猜哪个是 teacher 或 student。
 
 你必须分别输出：
-1. `answer_scores`：对每条 answer rubric 给 0 到 5 分，并简短说明原因。
-2. `process_scores`：对每条 process rubric 给 0 到 5 分，并简短说明原因。
-3. `process_step_evidence`：每条 process rubric 得分大于 0 时，列出支持该判断的 step 序号；得分为 0 时给空数组。
+1. `answer_scores`：对每条 answer rubric 给 0 到 5 分。
+2. `process_scores`：对每条 process rubric 给 0 到 5 分。
+3. `final_answer_quality` 和 `fatal_error`。
+
+不要输出 rationale、evidence、step_indices 或长文本解释；这些会显著拖慢正式训练。
 
 # 0-5 分含义
 - 5：完全满足。
@@ -388,9 +385,6 @@ VERIFIER_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评分专
 - process_rubrics 评价工具/skill 选择、证据链、错误处理、是否基于可见证据、是否避免编造工具结果。
 - 如果 trajectory 声称查过工具，但没有可见证据支撑，不能给高 process 分。
 - 如果工具失败但 trajectory 明确披露阻断点且没有编造结论，可以给对应 process 分，但不能因此自动给 answer 分。
-- 对每个 process rubric，如果 score > 0，`step_indices` 必须列出最关键的 1 到 5 个 step；不要把所有相关 step 全塞进去。
-- 如果无法把某条 process rubric 的满足依据定位到具体 step，该 process rubric 应给 0 分。
-- `evidence` 应简短说明为什么这些 step 支撑该 criterion，不要复述整段轨迹。
 
 # 质量枚举
 为每个 trajectory 给出 `final_answer_quality`：
@@ -406,48 +400,28 @@ VERIFIER_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评分专
 只返回 JSON object：
 ```json
 {
-  "schema_version": "ropd.answer_process_step_batch_verifier.v1",
+  "schema_version": "ropd.answer_process_compact_batch_verifier.v1",
   "answers": [
     {
       "answer_index": 1,
       "answer_scores": [
         {
           "criterion_id": "a1",
-          "score": 4,
-          "rationale": "核心结论方向正确，但遗漏一个关键对象。"
+          "score": 4
         },
         {
           "criterion_id": "a2",
-          "score": 3,
-          "rationale": "给出了部分证据，但证据链不完整。"
+          "score": 3
         }
       ],
       "process_scores": [
         {
           "criterion_id": "p1",
-          "score": 4,
-          "rationale": "使用了相关 skill/tool 并获得主要证据。"
+          "score": 4
         },
         {
           "criterion_id": "p2",
-          "score": 0,
-          "rationale": "未看到对应过程。"
-        }
-      ],
-      "process_step_evidence": [
-        {
-          "criterion_id": "p1",
-          "satisfied": true,
-          "score": 4,
-          "step_indices": [2, 4],
-          "evidence": "Step 2 读取相关 skill，Step 4 调用商品信息工具并获得可用证据。"
-        },
-        {
-          "criterion_id": "p2",
-          "satisfied": false,
-          "score": 0,
-          "step_indices": [],
-          "evidence": "未看到对应证据。"
+          "score": 0
         }
       ],
       "final_answer_quality": "partial",
@@ -458,14 +432,13 @@ VERIFIER_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评分专
 ```
 
 # 输出约束
-- `schema_version` 必须严格等于 `ropd.answer_process_step_batch_verifier.v1`。
+- `schema_version` 必须严格等于 `ropd.answer_process_compact_batch_verifier.v1`。
 - `answers` 数组必须包含每个输入 trajectory 各一项。
 - `answer_index` 必须从 1 开始，并按输入顺序覆盖所有 trajectory。
 - `answer_scores` 长度必须等于 answer_rubrics 数量，criterion_id 顺序必须与 answer_rubrics 完全一致。
 - `process_scores` 长度必须等于 process_rubrics 数量，criterion_id 顺序必须与 process_rubrics 完全一致。
-- `process_step_evidence` 长度必须等于 process_rubrics 数量，并且 criterion_id 顺序必须与 process_rubrics 完全一致。
 - 所有 `score` 必须是 0 到 5 的数字。
-- 每个 `step_indices` 只能包含正整数；如果对应 process score 为 0，`step_indices` 必须为空。
+- 不要输出未要求字段，尤其不要输出 rationale、evidence、step_indices。
 - 只返回 JSON，不要输出解释、Markdown 或其他文本。
 """
 
@@ -680,7 +653,7 @@ def _cache_key(sample: Sample) -> str:
     sample_metadata = metadata(sample)
     raw = {
         "task_id": sample_metadata.get("task_id"),
-        "prompt": task_prompt(sample),
+        "task_prompt": explicit_task_prompt(sample),
         "references": reference_values(sample),
     }
     text = json.dumps(raw, ensure_ascii=False, sort_keys=True, default=str)
@@ -872,11 +845,29 @@ def _render_answer_block(label: str, answers: str | list[str] | tuple[str, ...],
     )
 
 
-def _limit_text(text: Any, max_chars: int) -> str:
+def _limit_reward_text(args: Any, text: Any, max_chars: int, *, field: str) -> str:
     value = str(text or "")
-    if max_chars <= 0:
+    if max_chars <= 0 or len(value) <= max_chars:
         return value
-    return truncate(value, max_chars)
+    if _cfg_bool(args, "allow_text_truncation", False):
+        return truncate(value, max_chars)
+    raise ValueError(
+        f"ROPD {field} has {len(value)} chars, exceeding {max_chars}. "
+        "Reward inputs must not be silently truncated; use trace strip_* options "
+        "or explicitly set ropd.allow_text_truncation=true for a debug-only run."
+    )
+
+
+def _ropd_question(sample: Sample) -> str:
+    question = explicit_task_prompt(sample).strip()
+    if question:
+        return question
+    sample_metadata = metadata(sample)
+    task_id = sample_metadata.get("task_id")
+    raise ValueError(
+        "ROPD requires explicit task question metadata (query/task_prompt/instruction/question). "
+        f"sample.prompt is not accepted as a fallback because it may be a policy/system template; task_id={task_id!r}"
+    )
 
 
 def _trace_options(args: Any) -> TraceCompressionOptions:
@@ -889,7 +880,7 @@ def _trace_options(args: Any) -> TraceCompressionOptions:
 
 
 def _sanitize_teacher_answer_for_anonymous_verifier(args: Any, answer: Any) -> str:
-    text = compress_trace_text(
+    text = render_teacher_trace_for_reward(
         answer,
         options=_trace_options(args),
         check_reasoning_presence=True,
@@ -942,37 +933,55 @@ def _answer_mode(args: Any) -> str:
 
 
 def _answer_for_judge(args: Any, sample: Sample) -> str:
+    mode = _answer_mode(args)
+    if mode == "final":
+        return compress_trace_text(
+            prediction_text(sample),
+            options=_trace_options(args),
+            strip_assistant_response=False,
+            check_reasoning_presence=True,
+            reasoning_context="ropd_student_final_answer",
+        )
     return render_answer_for_reward(
         sample,
-        final_answer=prediction_text(sample),
-        answer_mode=_answer_mode(args),
+        final_answer=_explicit_final_answer(sample),
+        answer_mode=mode,
         options=_trace_options(args),
         check_reasoning_presence=True,
     )
 
 
 def _student_answer(args: Any, sample: Sample) -> str:
-    value = _metadata_value(
-        sample,
-        _list_value(
-            _cfg(args, "student_answer_keys", None),
-            ("student_response", "student_answer", "student_final_answer"),
-        ),
-    )
-    if value not in (None, "", []):
-        return compress_trace_text(
-            value,
-            options=_trace_options(args),
-            check_reasoning_presence=True,
-            reasoning_context="ropd_student_answer",
-        )
     return _answer_for_judge(args, sample)
+
+
+def _explicit_final_answer(sample: Sample) -> str:
+    sample_metadata = metadata(sample)
+    for key in ("final_answer", "answer"):
+        value = sample_metadata.get(key)
+        if value not in (None, "", []):
+            return str(value)
+    env_eval = sample_metadata.get("env_evaluate")
+    if isinstance(env_eval, dict):
+        info = env_eval.get("info")
+        if isinstance(info, dict) and info.get("final_answer") not in (None, ""):
+            return str(info["final_answer"])
+    turns = sample_metadata.get("turns")
+    if isinstance(turns, list):
+        for turn in reversed(turns):
+            if not isinstance(turn, dict):
+                continue
+            env_step = turn.get("env_step")
+            info = env_step.get("info") if isinstance(env_step, dict) and isinstance(env_step.get("info"), dict) else {}
+            if info.get("final_answer") not in (None, ""):
+                return str(info["final_answer"])
+    return ""
 
 
 def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
     keys = _list_value(
         _cfg(args, "teacher_answer_keys", None),
-        ("teacher_response", "teacher_answer", "teacher_final_answer"),
+        TEACHER_TRACE_FIELDS,
     )
     values: list[str] = []
     metadata_value = _metadata_value(sample, keys)
@@ -1201,8 +1210,8 @@ def _render_template(template: str, replacements: dict[str, str]) -> str:
 
 
 def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: tuple[str, ...]) -> str:
-    question_max_chars = _cfg_int(args, "question_max_chars", 8000)
-    student_max_chars = _cfg_int(args, "student_rubric_max_chars", 6000)
+    question_max_chars = _cfg_int(args, "question_max_chars", 0)
+    student_max_chars = _cfg_int(args, "student_rubric_max_chars", 0)
     reference_max_chars = _cfg_int(args, "reference_max_chars", 0)
     template = (
         RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE
@@ -1212,14 +1221,17 @@ def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: 
     return _render_template(
         template,
         {
-            "question": _limit_text(task_prompt(samples[0]), question_max_chars),
+            "question": _limit_reward_text(args, _ropd_question(samples[0]), question_max_chars, field="question"),
             "teacher_response": _render_answer_block(
                 "Reference",
-                [_limit_text(answer, reference_max_chars) for answer in teacher_answers],
+                [_limit_reward_text(args, answer, reference_max_chars, field="teacher_response") for answer in teacher_answers],
             ),
             "student_response": _render_answer_block(
                 "Student",
-                [_limit_text(_student_answer(args, sample), student_max_chars) for sample in samples],
+                [
+                    _limit_reward_text(args, _student_answer(args, sample), student_max_chars, field="student_response")
+                    for sample in samples
+                ],
                 start_index=0,
                 force_labels=True,
             ),
@@ -1235,8 +1247,8 @@ def _build_verifier_prompt(
     rubric: dict[str, Any],
     answers: tuple[str, ...],
 ) -> str:
-    question_max_chars = _cfg_int(args, "question_max_chars", 8000)
-    answer_max_chars = _cfg_int(args, "verifier_answer_max_chars", 6000)
+    question_max_chars = _cfg_int(args, "question_max_chars", 0)
+    answer_max_chars = _cfg_int(args, "verifier_answer_max_chars", 0)
     if isinstance(rubric, dict) and rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
         template = VERIFIER_ANSWER_PROCESS_PROMPT_TEMPLATE
         rubric_payload = {
@@ -1253,11 +1265,11 @@ def _build_verifier_prompt(
     return _render_template(
         template,
         {
-            "question": _limit_text(task_prompt(sample), question_max_chars),
+            "question": _limit_reward_text(args, _ropd_question(sample), question_max_chars, field="question"),
             "rubrics": json.dumps(rubric_payload, ensure_ascii=False, indent=2),
             "answers": _render_answer_block(
                 answer_label,
-                [_limit_text(answer, answer_max_chars) for answer in answers],
+                [_limit_reward_text(args, answer, answer_max_chars, field="verifier_answer") for answer in answers],
                 start_index=1,
                 force_labels=True,
             ),
@@ -1414,32 +1426,35 @@ def _parse_answer_process_batch_scores(
             if score_item["criterion_id"] != criterion_id:
                 raise ValueError("ROPD answer-process process criterion_id mismatch")
 
-        evidence_raw = item.get("process_step_evidence")
-        if not isinstance(evidence_raw, list) or len(evidence_raw) != len(process_items):
+        evidence_raw = item.get("process_step_evidence", [])
+        if evidence_raw is None:
+            evidence_raw = []
+        if evidence_raw and (not isinstance(evidence_raw, list) or len(evidence_raw) != len(process_items)):
             raise ValueError("ROPD answer-process process_step_evidence length mismatch")
         evidence_items: list[dict[str, Any]] = []
-        for raw_evidence, criterion_id, process_score in zip(
-            evidence_raw, process_ids, process_score_items, strict=True
-        ):
-            if not isinstance(raw_evidence, dict):
-                raise ValueError("ROPD answer-process evidence item must be an object")
-            if str(raw_evidence.get("criterion_id", criterion_id)) != criterion_id:
-                raise ValueError("ROPD answer-process evidence criterion_id mismatch")
-            raw_steps = raw_evidence.get("step_indices", [])
-            if not isinstance(raw_steps, list):
-                raise ValueError("ROPD answer-process step_indices must be a list")
-            step_indices = [int(step) for step in raw_steps if isinstance(step, int) or str(step).isdigit()]
-            if process_score["score"] <= 0 and step_indices:
-                raise ValueError("ROPD answer-process zero process score cannot have step evidence")
-            evidence_items.append(
-                {
-                    "criterion_id": criterion_id,
-                    "satisfied": bool(raw_evidence.get("satisfied", process_score["score"] > 0)),
-                    "score": float(process_score["score"]),
-                    "step_indices": step_indices,
-                    "evidence": str(raw_evidence.get("evidence") or "").strip(),
-                }
-            )
+        if evidence_raw:
+            for raw_evidence, criterion_id, process_score in zip(
+                evidence_raw, process_ids, process_score_items, strict=True
+            ):
+                if not isinstance(raw_evidence, dict):
+                    raise ValueError("ROPD answer-process evidence item must be an object")
+                if str(raw_evidence.get("criterion_id", criterion_id)) != criterion_id:
+                    raise ValueError("ROPD answer-process evidence criterion_id mismatch")
+                raw_steps = raw_evidence.get("step_indices", [])
+                if not isinstance(raw_steps, list):
+                    raise ValueError("ROPD answer-process step_indices must be a list")
+                step_indices = [int(step) for step in raw_steps if isinstance(step, int) or str(step).isdigit()]
+                if process_score["score"] <= 0 and step_indices:
+                    raise ValueError("ROPD answer-process zero process score cannot have step evidence")
+                evidence_items.append(
+                    {
+                        "criterion_id": criterion_id,
+                        "satisfied": bool(raw_evidence.get("satisfied", process_score["score"] > 0)),
+                        "score": float(process_score["score"]),
+                        "step_indices": step_indices,
+                        "evidence": str(raw_evidence.get("evidence") or "").strip(),
+                    }
+                )
 
         answer_values = [float(score_item["score"]) for score_item in answer_score_items]
         process_values = [float(score_item["score"]) for score_item in process_score_items]

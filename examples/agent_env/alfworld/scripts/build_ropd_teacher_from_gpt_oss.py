@@ -76,9 +76,10 @@ def build_rows(zip_path: Path, *, max_records: int | None = None) -> list[dict[s
             if task_id in seen_task_ids:
                 continue
             seen_task_ids.add(task_id)
+            teacher_trace = compact_teacher_trace(rows, init_obs=str(success.get("init_obs") or ""))
             row = {
                 "task_id": task_id,
-                "teacher_response": compact_teacher_trace(rows, init_obs=str(success.get("init_obs") or "")),
+                "teacher_full_trace_text": teacher_trace,
                 "teacher_actions": [str(item.get("action") or "") for item in rows if item.get("action")],
                 "teacher_success": True,
                 "source": "gpt-oss-120b_treact_success_traj",

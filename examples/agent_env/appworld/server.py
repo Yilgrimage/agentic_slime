@@ -242,9 +242,16 @@ class AppWorldBackend:
             parts.append("Supervisor API includes `apis.supervisor.show_active_task()` and `apis.supervisor.complete_task(answer=..., status='success')`.")
         return "\n".join(parts)
 
+    def _task_instruction(self) -> str:
+        assert self.world is not None
+        instruction = str(getattr(self.world.task, "instruction", "") or "").strip()
+        if not instruction:
+            raise ValueError(f"AppWorld task {self.task_id!r} has empty instruction")
+        return instruction
+
     def _initial_observation(self) -> str:
         assert self.world is not None
-        instruction = str(getattr(self.world.task, "instruction", "")).strip()
+        instruction = self._task_instruction()
         parts = [f"Task id: {self.task_id}", f"Instruction:\n{instruction}"]
         overview = self._api_overview().strip()
         if overview:
@@ -314,6 +321,23 @@ class AppWorldBackend:
             return f"Unknown AppWorld tool `{name}`. Respond with a markdown Python code block that calls AppWorld APIs."
         return f"Unknown AppWorld tool `{name}`. Respond with a <code>...</code> block that calls AppWorld APIs."
 
+    def _execution_error_observation(self, exc: Exception) -> str:
+        message = str(exc).strip() or repr(exc)
+        return f"Tool execution error ({type(exc).__name__}): {message}"
+
+    def _execute_code(self, code: str) -> tuple[str, dict[str, Any]]:
+        assert self.world is not None
+        try:
+            return str(self.world.execute(code)), {}
+        except Exception as exc:
+            logger.info("AppWorld tool execution failed for task %s", self.task_id, exc_info=True)
+            observation = self._execution_error_observation(exc)
+            return observation, {
+                "tool_error": observation,
+                "execution_error": True,
+                "execution_error_type": type(exc).__name__,
+            }
+
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         split = str(payload.get("split") or self.split)
         dataset = str(payload.get("dataset_name") or _split_dataset(self.config, split))
@@ -345,10 +369,13 @@ class AppWorldBackend:
         self.step_count = 0
         self.final_score = 0.0
         self.done = False
+        instruction = self._task_instruction()
         self.last_info = {
             "task_id": self.task_id,
             "dataset_name": self.dataset_name,
             "experiment_name": self.experiment_name,
+            "instruction": instruction,
+            "task_prompt": instruction,
             "tools": ["execute", "finish"],
         }
         return {
@@ -381,14 +408,14 @@ class AppWorldBackend:
             "pass_percentage": float(getattr(tracker, "pass_percentage", 0.0) or 0.0),
         }
 
-    def _finish(self, arguments: dict[str, Any]) -> str:
+    def _finish(self, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         assert self.world is not None
         answer = arguments.get("answer", arguments.get("message", None))
         status = str(arguments.get("status", "success"))
         if answer is None and not arguments.get("submit", False):
-            return "Finish requested without submitting an answer. Evaluating current AppWorld state."
+            return "Finish requested without submitting an answer. Evaluating current AppWorld state.", {}
         code = f"print(apis.supervisor.complete_task(answer={answer!r}, status={status!r}))"
-        return str(self.world.execute(code))
+        return self._execute_code(code)
 
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         assert self.world is not None
@@ -400,10 +427,13 @@ class AppWorldBackend:
 
         if name in {"execute", "python", "python_exec"}:
             code = str(arguments.get("code") or arguments.get("python") or arguments.get("command") or "")
-            observation = str(self.world.execute(code))
+            observation, error_info = self._execute_code(code)
+            info.update(error_info)
         elif name in {"finish", "final_response", "submit"}:
-            observation = self._finish(arguments)
-            self.done = True
+            observation, error_info = self._finish(arguments)
+            info.update(error_info)
+            if not error_info:
+                self.done = True
         elif name in {"format_error", "invalid_format"}:
             observation = self._format_error_observation()
             info["format_error"] = True
@@ -539,6 +569,8 @@ class AppWorldBackend:
             "done": status == "completed",
             "success": success,
             "info": last_step.get("info") if isinstance(last_step.get("info"), dict) else {},
+            "instruction": info.get("instruction"),
+            "task_prompt": info.get("task_prompt"),
             "split": self.split,
             "task_index": self.task_index,
             "num_tasks": len(self.task_ids),

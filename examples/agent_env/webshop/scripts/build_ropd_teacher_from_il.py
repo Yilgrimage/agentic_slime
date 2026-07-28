@@ -63,9 +63,18 @@ def _limit_text(text: Any, max_chars: int) -> str:
     return value[:head] + "\n...[truncated]...\n" + value[-tail:]
 
 
-def _teacher_tool_trace(row: dict[str, Any], *, max_observation_chars: int, max_action_chars: int) -> str:
+def _teacher_tool_trace(
+    row: dict[str, Any],
+    *,
+    max_observation_chars: int,
+    max_action_chars: int,
+) -> tuple[str, dict[str, Any]]:
     states = row.get("states") if isinstance(row.get("states"), list) else []
     actions = row.get("actions") if isinstance(row.get("actions"), list) else []
+    original_observation_chars = sum(len(str(state or "").strip()) for state in states)
+    original_action_chars = sum(len(str(action or "").strip()) for action in actions)
+    observation_truncated = max_observation_chars > 0 and any(len(str(state or "").strip()) > max_observation_chars for state in states)
+    action_truncated = max_action_chars > 0 and any(len(str(action or "").strip()) > max_action_chars for action in actions)
     lines: list[str] = []
     if states:
         lines.append("Initial observation:\n" + _limit_text(states[0], max_observation_chars))
@@ -74,7 +83,17 @@ def _teacher_tool_trace(row: dict[str, Any], *, max_observation_chars: int, max_
         if idx < len(states):
             parts.extend(["Tool response:", _limit_text(states[idx], max_observation_chars)])
         lines.append("\n".join(parts))
-    return "\n\n".join(lines).strip()
+    metadata = {
+        "teacher_observation_chars_original": original_observation_chars,
+        "teacher_action_chars_original": original_action_chars,
+        "teacher_observation_truncated": bool(observation_truncated),
+        "teacher_action_truncated": bool(action_truncated),
+    }
+    if max_observation_chars > 0:
+        metadata["teacher_max_observation_chars"] = int(max_observation_chars)
+    if max_action_chars > 0:
+        metadata["teacher_max_action_chars"] = int(max_action_chars)
+    return "\n\n".join(lines).strip(), metadata
 
 
 def _read_il_rows(zip_path: Path, member: str) -> list[dict[str, Any]]:
@@ -184,29 +203,29 @@ def build_rows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str
             continue
         row = il["row"]
         actions = row.get("actions") if isinstance(row.get("actions"), list) else []
-        trace = _teacher_tool_trace(
+        trace, trace_metadata = _teacher_tool_trace(
             row,
             max_observation_chars=args.max_observation_chars,
             max_action_chars=args.max_action_chars,
         )
-        output.append(
-            {
-                "task_id": goal["task_id"],
-                "task_index": goal["task_index"],
-                "split": args.split,
-                "teacher_tool_trace": trace,
-                "teacher_response": trace,
-                "teacher_success": bool(il["success"]),
-                "teacher_score": 1.0 if il["success"] else 0.0,
-                "teacher_actions": actions,
-                "teacher_instruction": goal["instruction_text"],
-                "teacher_source": "webshop_official_il_trajs_finalized_images",
-                "teacher_source_zip": str(args.il_zip),
-                "teacher_action_count": len(actions),
-                "asin": goal.get("asin"),
-                "goal_options": goal.get("goal_options"),
-            }
-        )
+        teacher_row = {
+            "task_id": goal["task_id"],
+            "task_index": goal["task_index"],
+            "split": args.split,
+            "teacher_full_trace_text": trace,
+            "teacher_tool_trace": trace,
+            "teacher_success": bool(il["success"]),
+            "teacher_score": 1.0 if il["success"] else 0.0,
+            "teacher_actions": actions,
+            "teacher_instruction": goal["instruction_text"],
+            "teacher_source": "webshop_official_il_trajs_finalized_images",
+            "teacher_source_zip": str(args.il_zip),
+            "teacher_action_count": len(actions),
+            "asin": goal.get("asin"),
+            "goal_options": goal.get("goal_options"),
+        }
+        teacher_row.update(trace_metadata)
+        output.append(teacher_row)
     summary = {
         "goals": len(goals),
         "il_rows": len(il_rows),
@@ -215,6 +234,8 @@ def build_rows(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str
         "missing": missing,
         "coverage": len(output) / len(goals) if goals else 0.0,
         "success_rows": sum(1 for row in output if row.get("teacher_success")),
+        "rows_with_observation_truncation": sum(1 for row in output if row.get("teacher_observation_truncated")),
+        "rows_with_action_truncation": sum(1 for row in output if row.get("teacher_action_truncated")),
         "split": args.split,
         "output": str(args.output),
     }
@@ -237,8 +258,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attr-file", default=str(data_dir / "data" / "items_ins_v2.json"))
     parser.add_argument("--num-products", type=int, default=100000)
     parser.add_argument("--split", default="train")
-    parser.add_argument("--max-observation-chars", type=int, default=1200)
-    parser.add_argument("--max-action-chars", type=int, default=240)
+    parser.add_argument("--max-observation-chars", type=int, default=0)
+    parser.add_argument("--max-action-chars", type=int, default=0)
     parser.add_argument("--min-coverage", type=float, default=0.0)
     parser.add_argument("--summary-json", default="")
     return parser.parse_args()

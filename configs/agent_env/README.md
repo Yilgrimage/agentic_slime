@@ -27,6 +27,23 @@ concurrency is configured under `ropd.concurrency`; optional
 limits, with `0` meaning "follow the global ROPD concurrency".
 ROPD training semantics such as `answer_mode`, `reward_mode`,
 `reward_group_reference`, and `luffy_*` also belong under `ropd.*`.
+When `ropd.answer_mode=trace`, student inputs must be rendered by the shared
+agent-env trace renderer from structured trajectory fields such as `turns`,
+`messages`, `token_segments`, `reward_trace`, `judge_trace`, or `ropd_trace`.
+Do not use historical answer fields such as `student_response` as trace
+fallbacks. Teacher data for trace mode must likewise go through the shared
+teacher trace renderer and expose canonical trace fields, preferably
+`teacher_tool_trace` or `teacher_trace`; raw audit transcripts may be stored as
+`teacher_raw_trace_text` but must not be the primary judge input.
+`teacher_full_trace_text` is accepted only after canonicalization through the
+renderer. `teacher_response`/`teacher_answer` should not be used as trace keys.
+ROPD questions must come from explicit task metadata such as
+`task_prompt`, `instruction`, `query`, or `question`. Do not let ROPD fall back
+to the policy/system prompt, and do not silently truncate reward inputs with
+character budgets. If prompt size must be reduced, use the structured trace
+compression switches (`strip_reasoning`, `strip_tool_response`,
+`strip_assistant_response`, `strip_system_prompt`) so the reward contract stays
+auditable.
 The verifier always scores teacher and student answers anonymously in the same
 batch; `reward_group_reference` only controls whether teacher scores enter the
 group baseline. The default V0 path is answer-only LLM rubric/judge reward;
@@ -35,7 +52,11 @@ teacher-anchored baselines are explicit opt-in knobs.
 boolean rubric path, or `answer_process_50_50` when the reward should follow
 the answer-first ROPD design: core answer correctness is 50% of the answer
 score, answer support is the other 50%, and process scores are diagnostics only
-unless a future reward profile explicitly changes that contract.
+unless a future reward profile explicitly changes that contract. The
+answer-process verifier should keep its output compact in formal training:
+numeric answer/process scores plus coarse quality flags are enough; long
+per-criterion rationales and step evidence should be reserved for sampled dumps
+or separate analysis jobs.
 Durable reward variants should select a dedicated reward profile, such as
 `configs/agent_env/rewards/alfworld_ropd_seed.yaml`, instead of copying a full
 env config or exporting semantic reward environment variables.

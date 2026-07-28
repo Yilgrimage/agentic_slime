@@ -14,7 +14,11 @@ from typing import Any
 
 from slime.utils.types import Sample
 
-from examples.agent_env.trace_rendering import TraceCompressionOptions, render_trace_for_reward
+from examples.agent_env.trace_rendering import (
+    TraceCompressionOptions,
+    render_teacher_trace_for_reward,
+    render_trace_for_reward,
+)
 
 
 def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
@@ -138,7 +142,19 @@ def _build_payload(args: argparse.Namespace, row_index: int, row: dict[str, Any]
         payload["policy"]["parallel_tool_calls"] = parallel_tool_calls
     if task_id:
         payload["task_id"] = task_id
-    for key in ("task_ref", "domain", "task_set", "data_source", "dataset_name"):
+    for key in (
+        "task_ref",
+        "domain",
+        "task_set",
+        "data_source",
+        "dataset_name",
+        "query",
+        "task_prompt",
+        "instruction",
+        "question",
+        "task_question",
+        "instruction_text",
+    ):
         value = metadata.get(key, row.get(key))
         if value not in (None, "", []):
             payload[key] = value
@@ -158,9 +174,10 @@ def _teacher_trace_sample(record: dict[str, Any]) -> Sample:
     return Sample(prompt=_row_prompt(record.get("input") if isinstance(record.get("input"), dict) else {}), metadata=metadata)
 
 
-def _teacher_full_trace(record: dict[str, Any], max_chars: int) -> str:
-    text = render_trace_for_reward(
-        _teacher_trace_sample(record),
+def _teacher_traces(record: dict[str, Any], max_chars: int) -> tuple[str, str, dict[str, Any]]:
+    sample = _teacher_trace_sample(record)
+    raw_text = render_trace_for_reward(
+        sample,
         options=TraceCompressionOptions(
             strip_reasoning=False,
             strip_tool_response=False,
@@ -168,7 +185,27 @@ def _teacher_full_trace(record: dict[str, Any], max_chars: int) -> str:
             strip_system_prompt=False,
         ),
     )
-    return _limit_text(text, max_chars)
+    tool_trace = render_teacher_trace_for_reward(
+        sample,
+        options=TraceCompressionOptions(
+            strip_reasoning=True,
+            strip_tool_response=False,
+            strip_assistant_response=True,
+            strip_system_prompt=True,
+        ),
+        check_reasoning_presence=False,
+    )
+    raw_truncated = max_chars > 0 and len(raw_text) > max_chars
+    tool_truncated = max_chars > 0 and len(tool_trace) > max_chars
+    metadata = {
+        "teacher_raw_trace_chars_original": len(raw_text),
+        "teacher_tool_trace_chars_original": len(tool_trace),
+        "teacher_raw_trace_truncated": bool(raw_truncated),
+        "teacher_tool_trace_truncated": bool(tool_truncated),
+    }
+    if max_chars > 0:
+        metadata["teacher_trace_max_chars"] = int(max_chars)
+    return _limit_text(raw_text, max_chars), _limit_text(tool_trace, max_chars), metadata
 
 
 def _record_success(record: dict[str, Any]) -> bool:
@@ -180,14 +217,17 @@ def _teacher_row(record: dict[str, Any], max_chars: int) -> dict[str, Any]:
     result = record.get("result") if isinstance(record.get("result"), dict) else {}
     input_row = record.get("input") if isinstance(record.get("input"), dict) else {}
     input_metadata = _metadata(input_row)
+    result_info = result.get("info") if isinstance(result.get("info"), dict) else {}
     task_id = str(record.get("task_id") or input_metadata.get("task_id") or "")
-    full_trace = _teacher_full_trace(record, max_chars)
+    raw_trace, tool_trace, trace_metadata = _teacher_traces(record, max_chars)
     row: dict[str, Any] = {
         "task_id": task_id,
         "task_index": record.get("task_index"),
         "split": record.get("split"),
-        "teacher_full_trace_text": full_trace,
-        "teacher_response": full_trace,
+        "teacher_raw_trace_text": raw_trace,
+        "teacher_full_trace_text": tool_trace,
+        "teacher_trace": tool_trace,
+        "teacher_tool_trace": tool_trace,
         "teacher_success": _record_success(record),
         "teacher_score": result.get("score"),
         "teacher_status": result.get("status"),
@@ -195,9 +235,23 @@ def _teacher_row(record: dict[str, Any], max_chars: int) -> dict[str, Any]:
         "teacher_request_id": record.get("request_id"),
         "teacher_elapsed_s": record.get("elapsed_s"),
     }
-    for key in ("env", "domain", "task_set", "task_ref", "dataset_name"):
-        if input_metadata.get(key) not in (None, "", []):
-            row[key] = input_metadata[key]
+    row.update(trace_metadata)
+    for key in (
+        "env",
+        "domain",
+        "task_set",
+        "task_ref",
+        "dataset_name",
+        "query",
+        "task_prompt",
+        "instruction",
+        "question",
+        "task_question",
+        "instruction_text",
+    ):
+        value = input_metadata.get(key, input_row.get(key, result_info.get(key)))
+        if value not in (None, "", []):
+            row[key] = value
     return row
 
 

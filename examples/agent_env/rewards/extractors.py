@@ -15,6 +15,14 @@ MAX_TURN_TEXT_CHARS = 400
 MAX_OBSERVATION_CHARS = 400
 MAX_ACTION_CHARS = 160
 MAX_ACTIONS = 40
+TASK_PROMPT_METADATA_KEYS = (
+    "query",
+    "task_prompt",
+    "instruction",
+    "question",
+    "task_question",
+    "instruction_text",
+)
 
 
 def runtime_env(args: Any, name: str, default: str = "") -> str:
@@ -176,6 +184,21 @@ def metadata_values(sample: Sample, keys: tuple[str, ...]) -> Any:
     return None
 
 
+def explicit_task_prompt(sample: Sample) -> str:
+    value = metadata_values(sample, TASK_PROMPT_METADATA_KEYS)
+    if value not in (None, "", []):
+        return str(value)
+    sample_metadata = metadata(sample)
+    for nested in sample_metadata.values():
+        if not isinstance(nested, dict):
+            continue
+        for key in TASK_PROMPT_METADATA_KEYS:
+            value = nested.get(key)
+            if value not in (None, "", []):
+                return str(value)
+    return ""
+
+
 def reference_values(sample: Sample) -> list[str]:
     keys = (
         "reference",
@@ -225,8 +248,11 @@ def prediction_text(sample: Sample) -> str:
 
 
 def task_prompt(sample: Sample) -> str:
+    value = explicit_task_prompt(sample)
+    if value not in (None, "", []):
+        return str(value)
     sample_metadata = metadata(sample)
-    value = metadata_values(sample, ("query", "task_prompt", "instruction", "question", "prompt"))
+    value = metadata_values(sample, ("prompt",))
     if value not in (None, "", []):
         return str(value)
     return str(getattr(sample, "prompt", "") or "")

@@ -5,8 +5,19 @@ import argparse
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
+
+
+def _repo_dir() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+if str(_repo_dir()) not in sys.path:
+    sys.path.insert(0, str(_repo_dir()))
+
+from examples.agent_env.trace_rendering import TraceCompressionOptions, render_teacher_trace_for_reward  # noqa: E402
 
 
 DEFAULT_INPUT = "data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_full_trace.jsonl"
@@ -19,6 +30,13 @@ FORMAT_ERROR_PATTERNS = (
     re.compile(r"(?i)Invalid response format"),
     re.compile(r"(?i)Respond with exactly one markdown Python code block"),
 )
+_TASK_INSTRUCTION_CACHE: dict[str, str] = {}
+TEACHER_TRACE_OPTIONS = TraceCompressionOptions(
+    strip_reasoning=True,
+    strip_tool_response=False,
+    strip_assistant_response=True,
+    strip_system_prompt=True,
+)
 
 
 def _resolve(path: str) -> Path:
@@ -28,6 +46,40 @@ def _resolve(path: str) -> Path:
         return value
     root = Path(os.environ.get("ROOT_DIR") or os.getcwd()).expanduser()
     return root / value
+
+
+def _task_instruction_from_specs(task_id: str) -> str:
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return ""
+    cached = _TASK_INSTRUCTION_CACHE.get(task_id)
+    if cached:
+        return cached
+    root = os.environ.get("APPWORLD_ROOT", "").strip()
+    if not root:
+        root = str(Path(os.environ.get("ROOT_DIR", os.getcwd())).expanduser() / "data" / "appworld")
+    root_path = Path(root).expanduser()
+    candidates = (
+        root_path / "data" / "tasks" / task_id / "specs.json",
+        root_path / "tasks" / task_id / "specs.json",
+    )
+    for specs_path in candidates:
+        if not specs_path.exists():
+            continue
+        specs = json.loads(specs_path.read_text(encoding="utf-8"))
+        instruction = str(specs.get("instruction") or "").strip()
+        if instruction:
+            _TASK_INSTRUCTION_CACHE[task_id] = instruction
+            return instruction
+    return ""
+
+
+def _row_instruction(row: dict[str, Any]) -> str:
+    for key in ("task_prompt", "instruction", "question", "query", "instruction_text"):
+        value = row.get(key)
+        if value not in (None, "", []):
+            return str(value).strip()
+    return ""
 
 
 def _split_turns(text: str) -> tuple[str, list[str]]:
@@ -51,7 +103,7 @@ def _reindex_turns(prefix: str, turns: list[str]) -> str:
     if prefix:
         rendered.append(prefix)
     for idx, turn in enumerate(turns):
-        rendered.append(TURN_HEADER_RE.sub(f"Turn {idx}:", turn, count=1).strip())
+        rendered.append(TURN_HEADER_RE.sub(f"Turn {idx}:\n", turn, count=1).strip())
     return "\n\n".join(part for part in rendered if part).strip()
 
 
@@ -68,7 +120,7 @@ def clean_trace(text: Any) -> tuple[str, dict[str, int]]:
 
 
 def _trace_text(row: dict[str, Any]) -> str:
-    for key in ("teacher_full_trace_text", "teacher_response", "teacher_trace"):
+    for key in ("teacher_raw_trace_text", "teacher_full_trace_text", "teacher_trace", "teacher_tool_trace"):
         value = row.get(key)
         if value not in (None, "", []):
             return str(value)
@@ -84,11 +136,26 @@ def _clean_row(row: dict[str, Any], source_file: str) -> tuple[dict[str, Any], d
         raise ValueError(f"empty cleaned teacher trace for task_id={row.get('task_id')!r}")
     if any(pattern.search(cleaned_trace) for pattern in FORMAT_ERROR_PATTERNS):
         raise ValueError(f"format-error marker survived cleaning for task_id={row.get('task_id')!r}")
+    teacher_tool_trace = render_teacher_trace_for_reward(
+        cleaned_trace,
+        options=TEACHER_TRACE_OPTIONS,
+        check_reasoning_presence=False,
+    )
+    if not teacher_tool_trace:
+        raise ValueError(f"empty canonical teacher tool trace for task_id={row.get('task_id')!r}")
 
     cleaned = dict(row)
+    task_id = str(cleaned.get("task_id") or "").strip()
+    instruction = _row_instruction(cleaned) or _task_instruction_from_specs(task_id)
+    if not instruction:
+        raise ValueError(f"missing AppWorld instruction for task_id={task_id!r}")
+    cleaned["instruction"] = instruction
+    cleaned["task_prompt"] = instruction
     original_format_errors = int(row.get("teacher_format_errors") or 0)
-    cleaned["teacher_full_trace_text"] = cleaned_trace
-    cleaned["teacher_response"] = cleaned_trace
+    cleaned["teacher_raw_trace_text"] = cleaned_trace
+    cleaned["teacher_full_trace_text"] = teacher_tool_trace
+    cleaned["teacher_trace"] = teacher_tool_trace
+    cleaned["teacher_tool_trace"] = teacher_tool_trace
     cleaned["teacher_format_errors_original"] = original_format_errors
     cleaned["teacher_format_errors"] = 0
     if "teacher_turn_count" in cleaned:
@@ -101,6 +168,8 @@ def _clean_row(row: dict[str, Any], source_file: str) -> tuple[dict[str, Any], d
         "original_turn_count": stats["original_turn_count"],
         "cleaned_turn_count": stats["cleaned_turn_count"],
         "original_teacher_format_errors": original_format_errors,
+        "canonical_teacher_trace_chars": len(teacher_tool_trace),
+        "raw_teacher_trace_chars": len(cleaned_trace),
     }
     return cleaned, stats
 

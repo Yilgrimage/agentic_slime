@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -205,6 +206,14 @@ def _step_env(env: Any, action: str) -> tuple[Any, float, bool, dict]:
     return obs, float(reward or 0.0), bool(done), info or {}
 
 
+def _instruction_from_observation(observation: Any) -> str:
+    text = str(observation or "")
+    match = re.search(r"Instruction:\s*(.*?)(?:\n\s*\\[|$)", text, flags=re.S)
+    if not match:
+        return ""
+    return re.sub(r"\s+", " ", match.group(1)).strip()
+
+
 class WebShopBackend:
     def __init__(self, worker_id: str, split: str, config: dict[str, Any]) -> None:
         self.worker_id = worker_id
@@ -298,7 +307,15 @@ class WebShopBackend:
         self.step_count = 0
         self.final_score = 0.0
         self.done = False
-        self.last_info = {"available_actions": _available_actions(self.env)}
+        instruction = _instruction_from_observation(obs)
+        self.last_info = {
+            "available_actions": _available_actions(self.env),
+            "task_id": f"webshop:{self.split}:{self.task_index}",
+            "split": self.split,
+        }
+        if instruction:
+            self.last_info["instruction"] = instruction
+            self.last_info["task_prompt"] = instruction
         return {
             "observation": str(obs),
             "info": self.last_info,
@@ -312,11 +329,16 @@ class WebShopBackend:
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         assert self.env is not None
         action = str(payload.get("action") or "")
+        previous_info = dict(self.last_info)
         obs, reward, done, info = _step_env(self.env, action)
         self.step_count += 1
         self.final_score = float(reward)
         self.done = bool(done)
         self.last_info = dict(info or {})
+        for key in ("task_id", "split", "instruction", "task_prompt"):
+            value = previous_info.get(key)
+            if value not in (None, "", []):
+                self.last_info.setdefault(key, value)
         self.last_info.setdefault("available_actions", _available_actions(self.env, self.last_info))
         self.last_info["done"] = self.done
         return {
@@ -449,6 +471,10 @@ class WebShopBackend:
             "done": status == "completed",
             "success": success,
             "info": last_step.get("info") if isinstance(last_step.get("info"), dict) else {},
+            "task_id": info.get("task_id") or f"webshop:{self.split}:{self.task_index}",
+            "split": self.split,
+            "instruction": info.get("instruction"),
+            "task_prompt": info.get("task_prompt"),
             "task_index": self.task_index,
             "num_tasks": self.num_tasks,
             "reset_count": self.reset_count,

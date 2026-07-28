@@ -27,11 +27,9 @@ ropd:
   luffy_enable: false
   luffy_mode: off
   teacher_answer_keys:
-    - teacher_full_trace_text
     - teacher_trace
-    - teacher_response
-    - teacher_answer
-    - teacher_final_answer
+    - teacher_tool_trace
+    - teacher_full_trace_text
   rubric_keys:
     - ropd_rubric
     - reward_rubric
