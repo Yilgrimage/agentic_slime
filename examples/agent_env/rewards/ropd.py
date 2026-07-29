@@ -221,7 +221,7 @@ RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评估�
 
 请生成两组 rubric：
 1. answer_rubrics：评价最终回答质量。`a1` 必须是核心结论正确性，后续 `a2...` 评价最终回答里的证据、关键细节、边界披露和风险说明。
-2. process_rubrics：评价过程、工具、证据链、取证可靠性和错误处理。该分数暂不进入最终 reward，只用于后续 trace 内部信用分配和诊断。
+2. process_rubrics：评价过程、工具、证据链、取证可靠性和错误处理。该分数会按配置进入最终 reward，同时保留为 trace 内部信用分配和诊断信号。
 
 # 输入数据
 [Question]
@@ -251,7 +251,12 @@ RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评估�
 - `answer_reward = core_score + support_score`，范围 0 到 10。
 - 也就是核心结论正确性占 answer reward 的 50%，其他 answer rubric 加权归一后占 50%。
 
-process score 独立计算为 `weighted_average(p1..pn scores)`，范围 0 到 5，暂不参与 `answer_reward`。
+process score 独立计算为 `weighted_average(p1..pn scores)`，范围 0 到 5。
+
+最终 reward points 的计算方式固定为：
+- `final_reward_points = {answer_weight} * answer_reward + {process_weight} * (process_score * 2)`。
+- `process_score * 2` 是为了把 process 从 0 到 5 映射到 0 到 10 后再和 answer 对齐。
+- `final_reward_points` 范围仍为 0 到 10。
 
 # 核心原则
 - `a1` 必须只评价最终回答是否解决用户核心问题和核心结论是否正确。它允许 0 到 5 的部分分：例如多对象任务里答对部分对象、结论方向正确但缺关键限定、或只完成部分子问题。
@@ -319,10 +324,10 @@ process score 独立计算为 `weighted_average(p1..pn scores)`，范围 0 到 5
     "answer_first": true,
     "answer_core_weight": 0.5,
     "answer_support_weight": 0.5,
-    "answer_weight": 1.0,
-    "process_weight": 0.0,
+    "answer_weight": {answer_weight},
+    "process_weight": {process_weight},
     "process_for_credit_assignment": true,
-    "final_reward_uses": "answer_only",
+    "final_reward_uses": "{final_reward_uses}",
     "rubric_score_range": "0_to_5_per_criterion"
   }
 }
@@ -374,14 +379,14 @@ VERIFIER_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评分专
 - 1：极弱相关或基本不可用。
 - 0：不满足。
 
-# Answer-first 规则
-- 最终 answer 是当前 final reward 的唯一来源。
+# Answer/Process reward 规则
+- 最终 reward 同时使用 answer 和 process：`final_reward_points = {answer_weight} * answer_reward + {process_weight} * (process_score * 2)`，范围仍为 0 到 10。
 - `a1` 是核心结论正确性，必须按最终回答的核心结论给 0 到 5 分。多对象、多子问题任务可以给部分分；没有最终答案、编造核心事实、对象错配或答非所问应接近 0。
 - `a2...` 评价最终回答的证据、关键细节、边界披露和风险说明。它们不应替代 `a1`，也不能因为过程看起来努力就抬高核心结论分。
 - 只有当题目本身允许“无法完成/证据不足”作为合格答案，或 trajectory 已经展示出外部权限、数据不可达、服务限制等非 agent 自身造成的真实阻断时，明确披露阻断点且不编造业务结论才可以获得相应 answer 分。对于有明确可执行解法的任务，格式错误、变量错误、鉴权遗漏、工具选错、参数错误、跳过必要取证、主动放弃或只调用任务结束/提交接口，都不是合格 answer，`a1` 应接近 0，并可设 `fatal_error=true`。
 
 # Process 规则
-- process_rubrics 只用于过程诊断和后续信用分配，不参与当前 final answer reward。
+- process_rubrics 参与当前 final reward，但只能评价可见过程证据，不能替代 answer correctness。
 - process_rubrics 评价工具/skill 选择、证据链、错误处理、是否基于可见证据、是否避免编造工具结果。
 - 如果 trajectory 声称查过工具，但没有可见证据支撑，不能给高 process 分。
 - 如果工具失败但 trajectory 明确披露了非自身造成的真实阻断点且没有编造结论，可以给对应 process 分，但不能因此自动给 answer 分。由 agent 自身错误造成的失败不应因“披露失败”获得高 process 或 answer 分。
@@ -486,6 +491,43 @@ def _cfg_choice(args: Any, cfg_name: str, default: str, choices: set[str]) -> st
 
 def _schema_mode(args: Any) -> str:
     return _cfg_choice(args, "schema_mode", "binary", {"binary", "answer_process_50_50"})
+
+
+def _answer_process_weights(args: Any) -> tuple[float, float]:
+    answer_weight = float_value(_cfg(args, "answer_weight", 1.0), 1.0)
+    process_weight = float_value(_cfg(args, "process_weight", 0.0), 0.0)
+    if answer_weight < 0 or process_weight < 0:
+        raise ValueError("reward.ropd.answer_weight and reward.ropd.process_weight must be non-negative")
+    total = answer_weight + process_weight
+    if total <= 0:
+        raise ValueError("reward.ropd.answer_weight + reward.ropd.process_weight must be positive")
+    return answer_weight / total, process_weight / total
+
+
+def _answer_process_final_reward_uses(args: Any) -> str:
+    _, process_weight = _answer_process_weights(args)
+    return "answer_process_weighted" if process_weight > 0 else "answer_only"
+
+
+def _answer_process_score_policy(args: Any) -> dict[str, Any]:
+    answer_weight, process_weight = _answer_process_weights(args)
+    return {
+        "answer_first": True,
+        "answer_core_weight": 0.5,
+        "answer_support_weight": 0.5,
+        "answer_weight": answer_weight,
+        "process_weight": process_weight,
+        "process_for_credit_assignment": True,
+        "final_reward_uses": _answer_process_final_reward_uses(args),
+        "rubric_score_range": "0_to_5_per_criterion",
+    }
+
+
+def _answer_process_final_score(args: Any, *, answer_score: float, process_score: float) -> float:
+    answer_weight, process_weight = _answer_process_weights(args)
+    process_score_scaled = max(0.0, min(10.0, process_score * 2.0))
+    answer_score_bounded = max(0.0, min(10.0, answer_score))
+    return max(0.0, min(10.0, answer_weight * answer_score_bounded + process_weight * process_score_scaled))
 
 
 def _list_value(value: Any, default: tuple[str, ...] = ()) -> list[str]:
@@ -1148,7 +1190,7 @@ def _normalize_answer_process_items(
     return normalized
 
 
-def _normalize_answer_process_rubric(payload: Any) -> dict[str, Any] | None:
+def _normalize_answer_process_rubric(args: Any, payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     if payload.get("schema_version") != ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
@@ -1189,22 +1231,13 @@ def _normalize_answer_process_rubric(payload: Any) -> dict[str, Any] | None:
             "process": 5,
             "total": 10,
         },
-        "score_policy": {
-            "answer_first": True,
-            "answer_core_weight": 0.5,
-            "answer_support_weight": 0.5,
-            "answer_weight": 1.0,
-            "process_weight": 0.0,
-            "process_for_credit_assignment": True,
-            "final_reward_uses": "answer_only",
-            "rubric_score_range": "0_to_5_per_criterion",
-        },
+        "score_policy": _answer_process_score_policy(args),
     }
 
 
 def _normalize_rubric_for_mode(args: Any, payload: Any) -> dict[str, Any] | None:
     if _schema_mode(args) == "answer_process_50_50":
-        return _normalize_answer_process_rubric(payload)
+        return _normalize_answer_process_rubric(args, payload)
     return _normalize_rubric(payload)
 
 
@@ -1212,7 +1245,7 @@ def _maximum_score(rubric: Any) -> float:
     if isinstance(rubric, dict) and rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
         maximum_scores = rubric.get("maximum_scores")
         if isinstance(maximum_scores, dict):
-            return float_value(maximum_scores.get("answer"), 10.0)
+            return float_value(maximum_scores.get("total"), 10.0)
         return 10.0
     normalized = _normalize_rubric(rubric)
     if normalized is None:
@@ -1241,6 +1274,7 @@ def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: 
         if _schema_mode(args) == "answer_process_50_50"
         else RUBRICATOR_PROMPT_TEMPLATE
     )
+    answer_weight, process_weight = _answer_process_weights(args)
     return _render_template(
         template,
         {
@@ -1259,6 +1293,9 @@ def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: 
                 force_labels=True,
             ),
             "extra_rubric_instructions": _extra_rubric_instructions(args),
+            "answer_weight": f"{answer_weight:.6g}",
+            "process_weight": f"{process_weight:.6g}",
+            "final_reward_uses": _answer_process_final_reward_uses(args),
         },
     )
 
@@ -1285,6 +1322,7 @@ def _build_verifier_prompt(
         template = VERIFIER_PROMPT_TEMPLATE
         rubric_payload = rubric["rubrics"]
         answer_label = "Answer"
+    answer_weight, process_weight = _answer_process_weights(args)
     return _render_template(
         template,
         {
@@ -1297,6 +1335,9 @@ def _build_verifier_prompt(
                 force_labels=True,
             ),
             "extra_scoring_instructions": _extra_scoring_instructions(args),
+            "answer_weight": f"{answer_weight:.6g}",
+            "process_weight": f"{process_weight:.6g}",
+            "final_reward_uses": _answer_process_final_reward_uses(args),
         },
     )
 
@@ -1402,6 +1443,7 @@ def _parse_binary_batch_scores(payload: Any, *, rubric: dict[str, Any], expected
 
 
 def _parse_answer_process_batch_scores(
+    args: Any,
     payload: Any,
     *,
     rubric: dict[str, Any],
@@ -1485,6 +1527,12 @@ def _parse_answer_process_batch_scores(
         answer_support_score = _weighted_average_0_to_5(answer_values[1:], answer_items[1:])
         answer_score = answer_core_score + answer_support_score
         process_score = _weighted_average_0_to_5(process_values, process_items)
+        process_score_scaled = max(0.0, min(10.0, process_score * 2.0))
+        final_score = _answer_process_final_score(
+            args,
+            answer_score=answer_score,
+            process_score=process_score,
+        )
         final_answer_quality = str(item.get("final_answer_quality") or "").strip().lower()
         if final_answer_quality not in {"correct", "mostly_correct", "partial", "wrong", "no_answer"}:
             raise ValueError("ROPD answer-process final_answer_quality mismatch")
@@ -1500,7 +1548,11 @@ def _parse_answer_process_batch_scores(
                 "answer_support_score": answer_support_score,
                 "answer_score": answer_score,
                 "process_score": process_score,
-                "final_score": answer_score,
+                "process_score_scaled": process_score_scaled,
+                "final_score": final_score,
+                "answer_process_answer_weight": _answer_process_weights(args)[0],
+                "answer_process_process_weight": _answer_process_weights(args)[1],
+                "answer_process_final_reward_uses": _answer_process_final_reward_uses(args),
                 "final_answer_quality": final_answer_quality,
                 "fatal_error": bool(item.get("fatal_error", False)),
             }
@@ -1508,9 +1560,9 @@ def _parse_answer_process_batch_scores(
     return scores
 
 
-def _parse_batch_scores(payload: Any, *, rubric: dict[str, Any], expected: int) -> list[dict[str, Any]]:
+def _parse_batch_scores(args: Any, payload: Any, *, rubric: dict[str, Any], expected: int) -> list[dict[str, Any]]:
     if rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
-        return _parse_answer_process_batch_scores(payload, rubric=rubric, expected=expected)
+        return _parse_answer_process_batch_scores(args, payload, rubric=rubric, expected=expected)
     return _parse_binary_batch_scores(payload, rubric=rubric, expected=expected)
 
 
@@ -1785,6 +1837,11 @@ def _result(
         "answer_core_score",
         "answer_support_score",
         "process_score",
+        "process_score_scaled",
+        "final_score",
+        "answer_process_answer_weight",
+        "answer_process_process_weight",
+        "answer_process_final_reward_uses",
         "answer_scores",
         "process_scores",
         "process_step_evidence",
@@ -1854,7 +1911,7 @@ async def _score_bucket(
             "role": "judge",
             "concurrency_limit": _stage_concurrency(args, "judge"),
         }
-        scored_items = _parse_batch_scores(payload, rubric=rubric, expected=len(answer_items))
+        scored_items = _parse_batch_scores(args, payload, rubric=rubric, expected=len(answer_items))
     except Exception as exc:
         details = {"stage": "verifier", "type": type(exc).__name__, "message": str(exc)}
         _dump_artifact(

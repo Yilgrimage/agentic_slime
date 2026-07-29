@@ -30,6 +30,8 @@ ropd:
   strip_tool_response: 120
   strip_assistant_response: true
   strip_system_prompt: true
+  answer_weight: 0.6
+  process_weight: 0.4
   reward_mode: answer_only
   reward_group_reference: students
   luffy_enable: false
