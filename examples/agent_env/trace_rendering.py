@@ -11,13 +11,61 @@ from slime.utils.types import Sample
 logger = logging.getLogger(__name__)
 _MISSING_REASONING_WARNED: set[str] = set()
 
+TracePartSpec = bool | int
+
+
+def _is_strip_spec(value: TracePartSpec) -> bool:
+    return isinstance(value, bool) and value
+
+
+def _truncate_limit(value: TracePartSpec) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _keeps_part(value: TracePartSpec) -> bool:
+    return not _is_strip_spec(value)
+
+
+def _middle_truncate_text(text: Any, max_chars: int, *, label: str = "text") -> str:
+    value = str(text or "")
+    if max_chars <= 0:
+        return ""
+    if len(value) <= max_chars:
+        return value
+    omitted = len(value) - max_chars
+    marker = f"\n...[truncated {omitted} chars from middle of {label}]...\n"
+    if max_chars <= len(marker) + 8:
+        return value[:max_chars]
+    budget = max_chars - len(marker)
+    omitted = len(value) - budget
+    marker = f"\n...[truncated {omitted} chars from middle of {label}]...\n"
+    budget = max_chars - len(marker)
+    head = budget // 2
+    tail = budget - head
+    return value[:head] + marker + value[-tail:]
+
+
+def _compress_part_text(text: Any, spec: TracePartSpec, *, label: str) -> str:
+    value = str(text or "").strip()
+    limit = _truncate_limit(spec)
+    if limit is None:
+        return value
+    return _middle_truncate_text(value, limit, label=label).strip()
+
 
 @dataclass(frozen=True)
 class TraceCompressionOptions:
-    strip_reasoning: bool = True
-    strip_tool_response: bool = False
-    strip_assistant_response: bool = True
-    strip_system_prompt: bool = True
+    strip_reasoning: TracePartSpec = True
+    strip_tool_call: TracePartSpec = False
+    strip_tool_response: TracePartSpec = False
+    strip_assistant_response: TracePartSpec = True
+    strip_system_prompt: TracePartSpec = True
 
 
 def render_answer_for_reward(
@@ -109,7 +157,7 @@ def render_teacher_trace_for_reward(
     structured = _render_structured_teacher_trace(trace, options=options)
     if structured:
         return structured
-    text = _message_text(_drop_structured_reasoning(trace) if options.strip_reasoning else trace)
+    text = _message_text(_apply_structured_reasoning_policy(trace, options.strip_reasoning))
     legacy = _render_legacy_teacher_text(text, options=options)
     if legacy:
         return legacy
@@ -127,17 +175,29 @@ def compress_trace_text(
     options = options or TraceCompressionOptions()
     if check_reasoning_presence:
         _check_reasoning_contract(text, options, context=reasoning_context)
-    raw_value = _drop_structured_reasoning(text) if options.strip_reasoning else text
+    raw_value = _apply_structured_reasoning_policy(text, options.strip_reasoning)
     value = _strip_chat_boundary_tokens(_message_text(raw_value))
-    if options.strip_system_prompt:
+    if _is_strip_spec(options.strip_system_prompt):
         value = _strip_system_prompt_text(value)
-    if options.strip_reasoning:
+    elif (limit := _truncate_limit(options.strip_system_prompt)) is not None:
+        value = _compress_system_prompt_text(value, limit)
+    if _is_strip_spec(options.strip_reasoning):
         value = _strip_reasoning_text(value)
+    elif (limit := _truncate_limit(options.strip_reasoning)) is not None:
+        value = _compress_reasoning_text(value, limit)
     should_strip_assistant = options.strip_assistant_response if strip_assistant_response is None else strip_assistant_response
-    if should_strip_assistant:
+    if _is_strip_spec(should_strip_assistant):
         value = _strip_assistant_response_text(value)
-    if options.strip_tool_response:
+    elif (limit := _truncate_limit(should_strip_assistant)) is not None:
+        value = _compress_assistant_response_text(value, limit)
+    if _is_strip_spec(options.strip_tool_call):
+        value = _strip_tool_call_text(value)
+    elif (limit := _truncate_limit(options.strip_tool_call)) is not None:
+        value = _compress_tool_call_text(value, limit)
+    if _is_strip_spec(options.strip_tool_response):
         value = _strip_tool_response_text(value)
+    elif (limit := _truncate_limit(options.strip_tool_response)) is not None:
+        value = _compress_tool_response_text(value, limit)
     return value.strip()
 
 
@@ -158,10 +218,14 @@ def _render_structured_teacher_trace(trace: Any, *, options: TraceCompressionOpt
 
 def _render_legacy_teacher_text(text: str, *, options: TraceCompressionOptions) -> str:
     value = _strip_chat_boundary_tokens(str(text or ""))
-    if options.strip_system_prompt:
+    if _is_strip_spec(options.strip_system_prompt):
         value = _strip_system_prompt_text(value)
-    if options.strip_reasoning:
+    elif (limit := _truncate_limit(options.strip_system_prompt)) is not None:
+        value = _compress_system_prompt_text(value, limit)
+    if _is_strip_spec(options.strip_reasoning):
         value = _strip_reasoning_text(value)
+    elif (limit := _truncate_limit(options.strip_reasoning)) is not None:
+        value = _compress_reasoning_text(value, limit)
     if not value.strip():
         return ""
     if _looks_like_legacy_turn_transcript(value):
@@ -209,11 +273,23 @@ def _render_legacy_turn_transcript(text: str, *, options: TraceCompressionOption
             continue
         for action, observation in pairs:
             action_text = _normalize_legacy_tool_call(action)
-            if not action_text:
-                continue
-            parts = [f"Step {step}:", "Tool call:", action_text]
-            if observation and not options.strip_tool_response:
-                parts.extend(["Tool response:", observation.strip()])
+            parts = [f"Step {step}:"]
+            if action_text and _keeps_part(options.strip_tool_call):
+                action_text = _compress_part_text(
+                    action_text,
+                    options.strip_tool_call,
+                    label="tool call",
+                )
+                if action_text:
+                    parts.extend(["Tool call:", action_text])
+            if observation and _keeps_part(options.strip_tool_response):
+                observation = _compress_part_text(
+                    observation,
+                    options.strip_tool_response,
+                    label="tool response",
+                )
+                if observation:
+                    parts.extend(["Tool response:", observation])
             lines.append("\n".join(parts))
             step += 1
     return "\n\n".join(lines).strip()
@@ -292,26 +368,38 @@ def _render_turns(
             or turn.get("response_text")
             or (_message_content(assistant_message) if isinstance(assistant_message, dict) else "")
         )
-        if response_text and not options.strip_assistant_response:
+        if response_text and _keeps_part(options.strip_assistant_response):
             response_text = compress_trace_text(
                 response_text,
                 options=options,
                 strip_assistant_response=False,
             )
+            response_text = _compress_part_text(
+                response_text,
+                options.strip_assistant_response,
+                label="assistant response",
+            )
             if response_text:
                 parts.append(f"Assistant response:\n{response_text}")
         action_text = _action_text(turn.get("action"))
-        if action_text:
+        if action_text and _keeps_part(options.strip_tool_call):
             action_text = compress_trace_text(
                 action_text,
                 options=options,
                 strip_assistant_response=False,
             )
+            action_text = _compress_part_text(action_text, options.strip_tool_call, label="tool call")
             if action_text:
                 parts.append(f"Tool call:\n{action_text}")
         observation = _turn_observation(turn)
-        if observation and not options.strip_tool_response:
-            parts.append(f"Tool response:\n{observation}")
+        if observation and _keeps_part(options.strip_tool_response):
+            observation = _compress_part_text(
+                observation,
+                options.strip_tool_response,
+                label="tool response",
+            )
+            if observation:
+                parts.append(f"Tool response:\n{observation}")
         if len(parts) > 1:
             lines.append("\n".join(parts))
     return "\n\n".join(lines).strip()
@@ -374,10 +462,16 @@ def _initial_observation_from_messages(messages: Any, *, options: TraceCompressi
         if role == "assistant":
             break
         if role in {"system", "developer"}:
-            if not options.strip_system_prompt:
+            if _keeps_part(options.strip_system_prompt):
                 text = _message_content(message)
                 if text:
-                    parts.append(f"{role.title()} prompt:\n{text}")
+                    text = _compress_part_text(
+                        text,
+                        options.strip_system_prompt,
+                        label=f"{role} prompt",
+                    )
+                    if text:
+                        parts.append(f"{role.title()} prompt:\n{text}")
             continue
         if role in {"user", "tool"}:
             text = _message_content(message)
@@ -404,10 +498,16 @@ def _render_messages(
         if role == "assistant":
             break
         if role in {"system", "developer"}:
-            if not options.strip_system_prompt:
+            if _keeps_part(options.strip_system_prompt):
                 text = _message_content(message)
                 if text:
-                    initial_parts.append(f"{role.title()} prompt:\n{text}")
+                    text = _compress_part_text(
+                        text,
+                        options.strip_system_prompt,
+                        label=f"{role} prompt",
+                    )
+                    if text:
+                        initial_parts.append(f"{role.title()} prompt:\n{text}")
             cursor += 1
             continue
         if role in {"user", "tool"}:
@@ -428,21 +528,33 @@ def _render_messages(
             observation = final_observation
         parts = [f"Step {step}:"]
         assistant_response = _message_content(message)
-        if assistant_response and not options.strip_assistant_response:
+        if assistant_response and _keeps_part(options.strip_assistant_response):
             assistant_response = compress_trace_text(
                 assistant_response,
                 options=options,
                 strip_assistant_response=False,
             )
+            assistant_response = _compress_part_text(
+                assistant_response,
+                options.strip_assistant_response,
+                label="assistant response",
+            )
             if assistant_response:
                 parts.append(f"Assistant response:\n{assistant_response}")
         action = _assistant_action_text(message)
-        if action:
+        if action and _keeps_part(options.strip_tool_call):
             action = compress_trace_text(action, options=options, strip_assistant_response=False)
+            action = _compress_part_text(action, options.strip_tool_call, label="tool call")
             if action:
                 parts.append(f"Tool call:\n{action}")
-        if observation and not options.strip_tool_response:
-            parts.append(f"Tool response:\n{observation}")
+        if observation and _keeps_part(options.strip_tool_response):
+            observation = _compress_part_text(
+                observation,
+                options.strip_tool_response,
+                label="tool response",
+            )
+            if observation:
+                parts.append(f"Tool response:\n{observation}")
         if len(parts) > 1:
             lines.append("\n".join(parts))
             step += 1
@@ -480,10 +592,13 @@ def _render_token_segments(segments: list[Any], *, options: TraceCompressionOpti
             )
         elif kind == "environment" and pending_action:
             parts = [f"Step {step}:"]
-            if not options.strip_assistant_response:
+            if _keeps_part(options.strip_assistant_response):
                 parts.append(f"Assistant response:\n{pending_action}")
-            parts.append(f"Tool call:\n{pending_action}")
-            if not options.strip_tool_response:
+            if _keeps_part(options.strip_tool_call):
+                action_text = _compress_part_text(pending_action, options.strip_tool_call, label="tool call")
+                if action_text:
+                    parts.append(f"Tool call:\n{action_text}")
+            if _keeps_part(options.strip_tool_response):
                 observation = compress_trace_text(
                     text,
                     options=TraceCompressionOptions(
@@ -493,6 +608,11 @@ def _render_token_segments(segments: list[Any], *, options: TraceCompressionOpti
                         strip_system_prompt=options.strip_system_prompt,
                     ),
                     strip_assistant_response=False,
+                )
+                observation = _compress_part_text(
+                    observation,
+                    options.strip_tool_response,
+                    label="tool response",
                 )
                 if observation:
                     parts.append(f"Tool response:\n{observation}")
@@ -701,6 +821,30 @@ def _strip_system_prompt_text(text: str) -> str:
     )
 
 
+def _compress_system_prompt_text(text: str, max_chars: int) -> str:
+    return _compress_label_blocks(
+        str(text or ""),
+        strip_labels={"SYSTEM", "SYSTEM_PROMPT", "DEVELOPER", "DEVELOPER_PROMPT"},
+        resume_labels={
+            "USER",
+            "ASSISTANT",
+            "ACTION",
+            "ACTIONS",
+            "TOOL",
+            "TOOL_CALL",
+            "TOOL_CALLS",
+            "TOOL_RESPONSE",
+            "TOOL_RESULT",
+            "OBSERVATION",
+            "OBSERVATION_AFTER_ACTION",
+            "STEP",
+            "INITIAL_OBSERVATION",
+        },
+        max_chars=max_chars,
+        label="system prompt",
+    )
+
+
 def _strip_assistant_response_text(text: str) -> str:
     return _strip_label_blocks(
         str(text or ""),
@@ -722,6 +866,70 @@ def _strip_assistant_response_text(text: str) -> str:
     )
 
 
+def _compress_assistant_response_text(text: str, max_chars: int) -> str:
+    return _compress_label_blocks(
+        str(text or ""),
+        strip_labels={"ASSISTANT", "ASSISTANT_RESPONSE", "RESPONSE", "TEACHER_RESPONSE"},
+        resume_labels={
+            "ACTION",
+            "ACTIONS",
+            "TOOL_CALL",
+            "TOOL_CALLS",
+            "TOOL_RESPONSE",
+            "TOOL_RESULT",
+            "TOOL_RESULTS",
+            "OBSERVATION",
+            "OBSERVATION_AFTER_ACTION",
+            "STEP",
+            "INITIAL_OBSERVATION",
+        },
+        resume_prefixes=("<action",),
+        max_chars=max_chars,
+        label="assistant response",
+    )
+
+
+def _strip_tool_call_text(text: str) -> str:
+    return _strip_label_blocks(
+        str(text or ""),
+        strip_labels={"ACTION", "ACTIONS", "TOOL_CALL", "TOOL_CALLS"},
+        resume_labels={
+            "USER",
+            "ASSISTANT",
+            "TOOL",
+            "TOOL_RESPONSE",
+            "TOOL_RESULT",
+            "TOOL_RESULTS",
+            "OBSERVATION",
+            "OBSERVATION_AFTER_ACTION",
+            "STEP",
+            "INITIAL_OBSERVATION",
+        },
+    )
+
+
+def _compress_tool_call_text(text: str, max_chars: int) -> str:
+    return _compress_label_blocks(
+        str(text or ""),
+        strip_labels={"ACTION", "ACTIONS", "TOOL_CALL", "TOOL_CALLS"},
+        resume_labels={
+            "USER",
+            "ASSISTANT",
+            "TOOL",
+            "TOOL_RESPONSE",
+            "TOOL_RESULT",
+            "TOOL_RESULTS",
+            "OBSERVATION",
+            "OBSERVATION_AFTER_ACTION",
+            "STEP",
+            "INITIAL_OBSERVATION",
+        },
+        resume_prefixes=("<tool_response",),
+        max_chars=max_chars,
+        label="tool call",
+    )
+
+
 def _strip_tool_response_text(text: str) -> str:
     value = str(text or "")
     value = re.sub(r"<\|im_start\|>tool\n.*?<\|im_end\|>\n?", "", value, flags=re.S)
@@ -732,6 +940,54 @@ def _strip_tool_response_text(text: str) -> str:
         strip_labels={"TOOL", "TOOL_RESULT", "TOOL_RESULTS", "TOOL_RESPONSE", "TOOL_RESPONSES", "OBSERVATION", "OBSERVATION_AFTER_ACTION"},
         resume_labels={"USER", "ASSISTANT", "ACTION", "ACTIONS", "TOOL_CALL", "TOOL_CALLS", "STEP", "INITIAL_OBSERVATION"},
     )
+
+
+def _compress_tool_response_text(text: str, max_chars: int) -> str:
+    value = str(text or "")
+    value = re.sub(
+        r"(<\|im_start\|>tool\n)(.*?)(<\|im_end\|>\n?)",
+        lambda match: match.group(1)
+        + _middle_truncate_text(match.group(2), max_chars, label="tool response")
+        + match.group(3),
+        value,
+        flags=re.S,
+    )
+    value = re.sub(
+        r"(<tool_response>)(.*?)(</tool_response>)",
+        lambda match: match.group(1)
+        + _middle_truncate_text(match.group(2), max_chars, label="tool response")
+        + match.group(3),
+        value,
+        flags=re.S,
+    )
+    return _compress_label_blocks(
+        value,
+        strip_labels={"TOOL", "TOOL_RESULT", "TOOL_RESULTS", "TOOL_RESPONSE", "TOOL_RESPONSES", "OBSERVATION", "OBSERVATION_AFTER_ACTION"},
+        resume_labels={"USER", "ASSISTANT", "ACTION", "ACTIONS", "TOOL_CALL", "TOOL_CALLS", "STEP", "INITIAL_OBSERVATION"},
+        max_chars=max_chars,
+        label="tool response",
+    )
+
+
+def _compress_reasoning_text(text: str, max_chars: int) -> str:
+    value = str(text or "")
+    value = re.sub(
+        r"(<think\b[^>]*>)(.*?)(</think>)",
+        lambda match: match.group(1)
+        + _middle_truncate_text(match.group(2), max_chars, label="reasoning")
+        + match.group(3),
+        value,
+        flags=re.I | re.S,
+    )
+    value = re.sub(
+        r"(<\|begin_of_thought\|>)(.*?)(<\|end_of_thought\|>)",
+        lambda match: match.group(1)
+        + _middle_truncate_text(match.group(2), max_chars, label="reasoning")
+        + match.group(3),
+        value,
+        flags=re.I | re.S,
+    )
+    return value.strip()
 
 
 def _strip_label_blocks(
@@ -758,16 +1014,60 @@ def _strip_label_blocks(
     return "\n".join(lines).strip()
 
 
+def _compress_label_blocks(
+    text: str,
+    *,
+    strip_labels: set[str],
+    resume_labels: set[str],
+    max_chars: int,
+    label: str,
+    resume_prefixes: tuple[str, ...] = (),
+) -> str:
+    lines = str(text or "").splitlines()
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(lines):
+        line = lines[cursor]
+        line_label, block_header, inline_body = _line_label_header_and_body(line)
+        if line_label not in strip_labels:
+            output.append(line)
+            cursor += 1
+            continue
+        block_lines: list[str] = []
+        if inline_body.strip():
+            block_lines.append(inline_body)
+        cursor += 1
+        while cursor < len(lines):
+            next_line = lines[cursor]
+            next_label = _line_label(next_line)
+            stripped = next_line.strip().lower()
+            if next_label in resume_labels or any(stripped.startswith(prefix) for prefix in resume_prefixes):
+                break
+            block_lines.append(next_line)
+            cursor += 1
+        output.append(block_header)
+        block = "\n".join(block_lines).strip()
+        if block:
+            output.append(_middle_truncate_text(block, max_chars, label=label))
+    return "\n".join(output).strip()
+
+
 def _line_label(line: str) -> str:
+    label, _, _ = _line_label_header_and_body(line)
+    return label
+
+
+def _line_label_header_and_body(line: str) -> tuple[str, str, str]:
     stripped = line.strip()
     if not stripped:
-        return ""
+        return "", line, ""
     if re.match(r"step\s+\d+\s*:?\s*$", stripped, flags=re.I):
-        return "STEP"
-    match = re.match(r"\[?([A-Za-z_ ]+)\]?\s*(?:after action)?\s*:\s*", stripped)
+        return "STEP", line, ""
+    match = re.match(r"(?P<header>\s*\[?(?P<label>[A-Za-z_ ]+)\]?\s*(?:after action)?\s*:\s*)(?P<body>.*)$", line)
     if not match:
-        return ""
-    return re.sub(r"[^A-Z0-9]+", "_", match.group(1).strip().upper()).strip("_")
+        return "", line, ""
+    label = re.sub(r"[^A-Z0-9]+", "_", match.group("label").strip().upper()).strip("_")
+    return label, match.group("header").rstrip(), match.group("body")
 
 
 def _check_sample_reasoning_contract(
@@ -807,9 +1107,9 @@ def _check_reasoning_contract(text: Any, options: TraceCompressionOptions, *, co
 
 
 def _handle_missing_reasoning(options: TraceCompressionOptions, *, context: str) -> None:
-    if not options.strip_reasoning:
+    if not _is_strip_spec(options.strip_reasoning):
         raise ValueError(
-            f"{context} was configured with strip_reasoning=false, but no reasoning/thinking field was present"
+            f"{context} was configured to preserve or truncate reasoning, but no reasoning/thinking field was present"
         )
     if context not in _MISSING_REASONING_WARNED:
         _MISSING_REASONING_WARNED.add(context)
@@ -846,6 +1146,15 @@ _REASONING_FIELD_NAMES = {
 }
 
 
+def _apply_structured_reasoning_policy(value: Any, spec: TracePartSpec) -> Any:
+    if _is_strip_spec(spec):
+        return _drop_structured_reasoning(value)
+    limit = _truncate_limit(spec)
+    if limit is not None:
+        return _truncate_structured_reasoning(value, limit)
+    return value
+
+
 def _drop_structured_reasoning(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -857,4 +1166,21 @@ def _drop_structured_reasoning(value: Any) -> Any:
         return [_drop_structured_reasoning(item) for item in value]
     if isinstance(value, tuple):
         return tuple(_drop_structured_reasoning(item) for item in value)
+    return value
+
+
+def _truncate_structured_reasoning(value: Any, max_chars: int) -> Any:
+    if isinstance(value, dict):
+        output: dict[Any, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in _REASONING_FIELD_NAMES:
+                output[key] = _middle_truncate_text(item, max_chars, label="reasoning")
+            else:
+                output[key] = _truncate_structured_reasoning(item, max_chars)
+        return output
+    if isinstance(value, list):
+        return [_truncate_structured_reasoning(item, max_chars) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_truncate_structured_reasoning(item, max_chars) for item in value)
     return value

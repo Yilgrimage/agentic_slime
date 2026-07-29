@@ -26,7 +26,8 @@ ropd:
   judge_max_tokens: 32768
   answer_mode: trace
   strip_reasoning: true
-  strip_tool_response: false
+  strip_tool_call: 80
+  strip_tool_response: 120
   strip_assistant_response: true
   strip_system_prompt: true
   reward_mode: answer_only

@@ -453,6 +453,28 @@ def _cfg_bool(args: Any, cfg_name: str, default: bool) -> bool:
     return bool_value(_cfg(args, cfg_name, default), default)
 
 
+def _cfg_trace_part_spec(args: Any, cfg_name: str, default: bool | int) -> bool | int:
+    value = _cfg(args, cfg_name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value <= 0:
+            raise ValueError(f"ropd.{cfg_name} must be a boolean or positive integer character limit")
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    try:
+        parsed = int(text)
+    except ValueError as exc:
+        raise ValueError(f"ropd.{cfg_name} must be a boolean or positive integer character limit") from exc
+    if parsed <= 0:
+        raise ValueError(f"ropd.{cfg_name} must be a boolean or positive integer character limit")
+    return parsed
+
+
 def _cfg_int(args: Any, cfg_name: str, default: int) -> int:
     return int_value(_cfg(args, cfg_name, default), default)
 
@@ -872,10 +894,11 @@ def _ropd_question(sample: Sample) -> str:
 
 def _trace_options(args: Any) -> TraceCompressionOptions:
     return TraceCompressionOptions(
-        strip_reasoning=_cfg_bool(args, "strip_reasoning", True),
-        strip_tool_response=_cfg_bool(args, "strip_tool_response", False),
-        strip_assistant_response=_cfg_bool(args, "strip_assistant_response", True),
-        strip_system_prompt=_cfg_bool(args, "strip_system_prompt", True),
+        strip_reasoning=_cfg_trace_part_spec(args, "strip_reasoning", True),
+        strip_tool_call=_cfg_trace_part_spec(args, "strip_tool_call", False),
+        strip_tool_response=_cfg_trace_part_spec(args, "strip_tool_response", False),
+        strip_assistant_response=_cfg_trace_part_spec(args, "strip_assistant_response", True),
+        strip_system_prompt=_cfg_trace_part_spec(args, "strip_system_prompt", True),
     )
 
 
@@ -1753,6 +1776,7 @@ def _result(
         "ropd_luffy_mode": _luffy_mode(args),
         "answer_mode": _answer_mode(args),
         "strip_reasoning": trace_options.strip_reasoning,
+        "strip_tool_call": trace_options.strip_tool_call,
         "strip_tool_response": trace_options.strip_tool_response,
         "strip_assistant_response": trace_options.strip_assistant_response,
         "strip_system_prompt": trace_options.strip_system_prompt,
