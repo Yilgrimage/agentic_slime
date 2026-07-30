@@ -10,6 +10,11 @@ from slime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 _MISSING_REASONING_WARNED: set[str] = set()
+_APPWORLD_OFFICIAL_PROMPT_MARKERS = (
+    "I am your supervisor, and you are an AI Assistant whose job is to complete my day-to-day tasks fully autonomously.",
+    "python REPL environment",
+    "Let's start with the task",
+)
 
 TracePartSpec = bool | int
 
@@ -106,10 +111,14 @@ def render_trace_for_reward(sample: Sample, *, options: TraceCompressionOptions 
             return rendered
     messages = sample_metadata.get("messages")
     if isinstance(messages, list):
+        task_prompt = _task_prompt_from_sample_metadata(sample_metadata)
+        appworld_start = _appworld_episode_start_from_messages(messages, task_prompt)
         rendered = _render_messages(
             messages,
             options=options,
             final_observation=_final_observation(sample_metadata),
+            initial_observation=("Task:\n" + task_prompt) if appworld_start is not None and task_prompt else "",
+            start_index=appworld_start,
         )
         if rendered:
             return rendered
@@ -177,6 +186,7 @@ def compress_trace_text(
         _check_reasoning_contract(text, options, context=reasoning_context)
     raw_value = _apply_structured_reasoning_policy(text, options.strip_reasoning)
     value = _strip_chat_boundary_tokens(_message_text(raw_value))
+    value = _strip_appworld_official_prompt_text(value)
     if _is_strip_spec(options.strip_system_prompt):
         value = _strip_system_prompt_text(value)
     elif (limit := _truncate_limit(options.strip_system_prompt)) is not None:
@@ -406,6 +416,10 @@ def _render_turns(
 
 
 def _initial_observation_from_sample_metadata(sample_metadata: dict[str, Any], *, options: TraceCompressionOptions) -> str:
+    task_prompt = _task_prompt_from_sample_metadata(sample_metadata)
+    if task_prompt and _metadata_contains_appworld_official_prompt(sample_metadata):
+        return "Task:\n" + task_prompt
+
     explicit = _first_metadata_value(sample_metadata, ("reward_initial_observation", "initial_observation"))
     if explicit not in (None, "", []):
         return compress_trace_text(
@@ -414,7 +428,6 @@ def _initial_observation_from_sample_metadata(sample_metadata: dict[str, Any], *
             strip_assistant_response=False,
         )
 
-    task_prompt = _task_prompt_from_sample_metadata(sample_metadata)
     if task_prompt:
         return "Task:\n" + task_prompt
 
@@ -480,43 +493,109 @@ def _initial_observation_from_messages(messages: Any, *, options: TraceCompressi
     return "\n\n".join(parts).strip()
 
 
+def _metadata_contains_appworld_official_prompt(sample_metadata: dict[str, Any]) -> bool:
+    for key in ("reward_initial_observation", "initial_observation", "messages", "prompt", "sample_prompt"):
+        value = sample_metadata.get(key)
+        if value not in (None, "", []) and _contains_appworld_official_prompt(value):
+            return True
+    return False
+
+
+def _contains_appworld_official_prompt(value: Any) -> bool:
+    text = _normalize_search_text(_message_text(value))
+    return all(_normalize_search_text(marker) in text for marker in _APPWORLD_OFFICIAL_PROMPT_MARKERS)
+
+
+def _appworld_episode_start_from_messages(messages: list[Any], task_prompt: str) -> int | None:
+    normalized = [item for item in messages if isinstance(item, dict)]
+    if not normalized or not _contains_appworld_official_prompt(normalized):
+        return None
+    task_prompt = str(task_prompt or "").strip()
+    if not task_prompt:
+        raise ValueError("AppWorld official prompt trace cannot be rendered for reward without task_prompt metadata")
+    task_message_index = _appworld_task_message_index(normalized, task_prompt)
+    if task_message_index is None:
+        raise ValueError(
+            "AppWorld official prompt trace did not contain the task_prompt metadata in any user message; "
+            "refusing to render few-shot prompt demo as reward trajectory"
+        )
+    return task_message_index + 1
+
+
+def _appworld_task_message_index(messages: list[dict[str, Any]], task_prompt: str) -> int | None:
+    needle = _normalize_search_text(task_prompt)
+    if not needle:
+        return None
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if str(message.get("role") or "") != "user":
+            continue
+        content = _normalize_search_text(_message_content(message))
+        if needle in content:
+            return idx
+    return None
+
+
+def _normalize_search_text(text: Any) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip().lower()
+
+
+def _strip_appworld_official_prompt_text(text: str) -> str:
+    value = str(text or "")
+    if not _contains_appworld_official_prompt(value):
+        return value
+    return re.sub(
+        r"(?is)(^|\n)Initial observation\s*:\s*.*?(?=\n\s*Step\s+\d+\s*:|\Z)",
+        r"\1",
+        value,
+        count=1,
+    ).strip()
+
+
 def _render_messages(
     messages: list[Any],
     *,
     options: TraceCompressionOptions,
     final_observation: str = "",
+    initial_observation: str = "",
+    start_index: int | None = None,
 ) -> str:
     normalized = [item for item in messages if isinstance(item, dict)]
     if not normalized:
         return ""
     lines: list[str] = []
-    cursor = 0
-    initial_parts: list[str] = []
-    while cursor < len(normalized):
-        message = normalized[cursor]
-        role = str(message.get("role") or "")
-        if role == "assistant":
-            break
-        if role in {"system", "developer"}:
-            if _keeps_part(options.strip_system_prompt):
+    cursor = max(0, int(start_index)) if start_index is not None else 0
+    if initial_observation:
+        lines.append("Initial observation:\n" + initial_observation.strip())
+        while cursor < len(normalized) and str(normalized[cursor].get("role") or "") != "assistant":
+            cursor += 1
+    else:
+        initial_parts: list[str] = []
+        while cursor < len(normalized):
+            message = normalized[cursor]
+            role = str(message.get("role") or "")
+            if role == "assistant":
+                break
+            if role in {"system", "developer"}:
+                if _keeps_part(options.strip_system_prompt):
+                    text = _message_content(message)
+                    if text:
+                        text = _compress_part_text(
+                            text,
+                            options.strip_system_prompt,
+                            label=f"{role} prompt",
+                        )
+                        if text:
+                            initial_parts.append(f"{role.title()} prompt:\n{text}")
+                cursor += 1
+                continue
+            if role in {"user", "tool"}:
                 text = _message_content(message)
                 if text:
-                    text = _compress_part_text(
-                        text,
-                        options.strip_system_prompt,
-                        label=f"{role} prompt",
-                    )
-                    if text:
-                        initial_parts.append(f"{role.title()} prompt:\n{text}")
+                    initial_parts.append(text)
             cursor += 1
-            continue
-        if role in {"user", "tool"}:
-            text = _message_content(message)
-            if text:
-                initial_parts.append(text)
-        cursor += 1
-    if initial_parts:
-        lines.append("Initial observation:\n" + "\n\n".join(initial_parts).strip())
+        if initial_parts:
+            lines.append("Initial observation:\n" + "\n\n".join(initial_parts).strip())
     step = 1
     while cursor < len(normalized):
         message = normalized[cursor]
