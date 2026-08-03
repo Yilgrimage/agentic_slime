@@ -245,11 +245,12 @@ RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评估�
 - 1：极弱相关或基本不可用。
 - 0：不满足。
 
-最终 answer reward 的计算方式固定为：
+最终 answer reward 的计算方式由配置控制：
 - `core_score = a1.score`，范围 0 到 5。
 - `support_score = weighted_average(a2..an scores)`，范围 0 到 5。
-- `answer_reward = core_score + support_score`，范围 0 到 10。
-- 也就是核心结论正确性占 answer reward 的 50%，其他 answer rubric 加权归一后占 50%。
+- `answer_support_weight_for_reward = {answer_support_weight_for_reward}`。
+- `answer_reward = 2 * (core_score + answer_support_weight_for_reward * support_score) / (1 + answer_support_weight_for_reward)`，范围 0 到 10。
+- 当 `answer_support_weight_for_reward=0` 时，`a2...` 只保留为诊断信号，不进入训练 reward。
 
 process score 独立计算为 `weighted_average(p1..pn scores)`，范围 0 到 5。
 
@@ -322,8 +323,9 @@ process score 独立计算为 `weighted_average(p1..pn scores)`，范围 0 到 5
   },
   "score_policy": {
     "answer_first": true,
-    "answer_core_weight": 0.5,
-    "answer_support_weight": 0.5,
+    "answer_core_weight": {answer_core_weight_for_reward},
+    "answer_support_weight": {answer_support_weight_for_reward_normalized},
+    "answer_support_weight_for_reward": {answer_support_weight_for_reward},
     "answer_weight": {answer_weight},
     "process_weight": {process_weight},
     "process_for_credit_assignment": true,
@@ -381,6 +383,7 @@ VERIFIER_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评分专
 
 # Answer/Process reward 规则
 - 最终 reward 同时使用 answer 和 process：`final_reward_points = {answer_weight} * answer_reward + {process_weight} * (process_score * 2)`，范围仍为 0 到 10。
+- `answer_reward = 2 * (a1.score + {answer_support_weight_for_reward} * support_score) / (1 + {answer_support_weight_for_reward})`。当该 support 权重为 0 时，`a2...` 只作为诊断，不进入训练 reward。
 - `a1` 是核心结论正确性，必须按最终回答的核心结论给 0 到 5 分。多对象、多子问题任务可以给部分分；没有最终答案、编造核心事实、对象错配或答非所问应接近 0。
 - `a2...` 评价最终回答的证据、关键细节、边界披露和风险说明。它们不应替代 `a1`，也不能因为过程看起来努力就抬高核心结论分。
 - 只有当题目本身允许“无法完成/证据不足”作为合格答案，或 trajectory 已经展示出外部权限、数据不可达、服务限制等非 agent 自身造成的真实阻断时，明确披露阻断点且不编造业务结论才可以获得相应 answer 分。对于有明确可执行解法的任务，格式错误、变量错误、鉴权遗漏、工具选错、参数错误、跳过必要取证、主动放弃或只调用任务结束/提交接口，都不是合格 answer，`a1` 应接近 0，并可设 `fatal_error=true`。
@@ -504,6 +507,13 @@ def _answer_process_weights(args: Any) -> tuple[float, float]:
     return answer_weight / total, process_weight / total
 
 
+def _answer_support_weight_for_reward(args: Any) -> float:
+    weight = float_value(_cfg(args, "answer_support_weight_for_reward", 1.0), 1.0)
+    if weight < 0:
+        raise ValueError("reward.ropd.answer_support_weight_for_reward must be non-negative")
+    return weight
+
+
 def _answer_process_final_reward_uses(args: Any) -> str:
     _, process_weight = _answer_process_weights(args)
     return "answer_process_weighted" if process_weight > 0 else "answer_only"
@@ -511,16 +521,25 @@ def _answer_process_final_reward_uses(args: Any) -> str:
 
 def _answer_process_score_policy(args: Any) -> dict[str, Any]:
     answer_weight, process_weight = _answer_process_weights(args)
+    support_weight = _answer_support_weight_for_reward(args)
+    answer_norm = 1.0 + support_weight
     return {
         "answer_first": True,
-        "answer_core_weight": 0.5,
-        "answer_support_weight": 0.5,
+        "answer_core_weight": 1.0 / answer_norm,
+        "answer_support_weight": support_weight / answer_norm,
+        "answer_support_weight_for_reward": support_weight,
         "answer_weight": answer_weight,
         "process_weight": process_weight,
         "process_for_credit_assignment": True,
         "final_reward_uses": _answer_process_final_reward_uses(args),
         "rubric_score_range": "0_to_5_per_criterion",
     }
+
+
+def _answer_process_answer_score(args: Any, *, core_score: float, support_score: float) -> float:
+    support_weight = _answer_support_weight_for_reward(args)
+    raw = float(core_score) + support_weight * float(support_score)
+    return max(0.0, min(10.0, 2.0 * raw / (1.0 + support_weight)))
 
 
 def _answer_process_final_score(args: Any, *, answer_score: float, process_score: float) -> float:
@@ -1275,6 +1294,8 @@ def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: 
         else RUBRICATOR_PROMPT_TEMPLATE
     )
     answer_weight, process_weight = _answer_process_weights(args)
+    support_weight = _answer_support_weight_for_reward(args)
+    answer_norm = 1.0 + support_weight
     return _render_template(
         template,
         {
@@ -1295,6 +1316,9 @@ def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: 
             "extra_rubric_instructions": _extra_rubric_instructions(args),
             "answer_weight": f"{answer_weight:.6g}",
             "process_weight": f"{process_weight:.6g}",
+            "answer_core_weight_for_reward": f"{1.0 / answer_norm:.6g}",
+            "answer_support_weight_for_reward": f"{support_weight:.6g}",
+            "answer_support_weight_for_reward_normalized": f"{support_weight / answer_norm:.6g}",
             "final_reward_uses": _answer_process_final_reward_uses(args),
         },
     )
@@ -1323,6 +1347,7 @@ def _build_verifier_prompt(
         rubric_payload = rubric["rubrics"]
         answer_label = "Answer"
     answer_weight, process_weight = _answer_process_weights(args)
+    support_weight = _answer_support_weight_for_reward(args)
     return _render_template(
         template,
         {
@@ -1337,6 +1362,7 @@ def _build_verifier_prompt(
             "extra_scoring_instructions": _extra_scoring_instructions(args),
             "answer_weight": f"{answer_weight:.6g}",
             "process_weight": f"{process_weight:.6g}",
+            "answer_support_weight_for_reward": f"{support_weight:.6g}",
             "final_reward_uses": _answer_process_final_reward_uses(args),
         },
     )
@@ -1525,7 +1551,11 @@ def _parse_answer_process_batch_scores(
         process_values = [float(score_item["score"]) for score_item in process_score_items]
         answer_core_score = answer_values[0] if answer_values else 0.0
         answer_support_score = _weighted_average_0_to_5(answer_values[1:], answer_items[1:])
-        answer_score = answer_core_score + answer_support_score
+        answer_score = _answer_process_answer_score(
+            args,
+            core_score=answer_core_score,
+            support_score=answer_support_score,
+        )
         process_score = _weighted_average_0_to_5(process_values, process_items)
         process_score_scaled = max(0.0, min(10.0, process_score * 2.0))
         final_score = _answer_process_final_score(
@@ -1552,6 +1582,7 @@ def _parse_answer_process_batch_scores(
                 "final_score": final_score,
                 "answer_process_answer_weight": _answer_process_weights(args)[0],
                 "answer_process_process_weight": _answer_process_weights(args)[1],
+                "answer_support_weight_for_reward": _answer_support_weight_for_reward(args),
                 "answer_process_final_reward_uses": _answer_process_final_reward_uses(args),
                 "final_answer_quality": final_answer_quality,
                 "fatal_error": bool(item.get("fatal_error", False)),
