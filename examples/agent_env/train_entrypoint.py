@@ -109,39 +109,6 @@ def _iter_checkpoint_dirs(save_root: Path) -> list[tuple[int, Path]]:
     return checkpoints
 
 
-def _completed_checkpoint_dirs(save_root: Path) -> list[tuple[int, Path]]:
-    latest_file = save_root / "latest_checkpointed_iteration.txt"
-    latest_iteration = None
-    try:
-        latest_iteration = int(latest_file.read_text().strip())
-    except (OSError, ValueError):
-        pass
-
-    completed = []
-    for iteration, path in _iter_checkpoint_dirs(save_root):
-        if (path / "_SUCCESS").is_file():
-            completed.append((iteration, path))
-        elif latest_iteration is not None and iteration <= latest_iteration and (path / ".metadata").is_file():
-            # Legacy checkpoints made before _SUCCESS existed are considered
-            # complete only when Megatron's tracker advanced past them.
-            completed.append((iteration, path))
-    return completed
-
-
-def _write_checkpoint_success_marker(args, rollout_id: int) -> None:
-    if not _is_global_rank_zero():
-        return
-
-    save_root_raw = getattr(args, "save", None)
-    if not save_root_raw:
-        return
-    marker = Path(save_root_raw) / f"iter_{rollout_id:07d}" / "_SUCCESS"
-    try:
-        marker.write_text("ok\n")
-    except Exception:
-        _LOGGER.warning("Failed to write checkpoint success marker: %s", marker, exc_info=True)
-
-
 def _prune_old_checkpoints(args) -> None:
     limit = _agent_env_max_checkpoints(args)
     if limit is None or not _is_global_rank_zero():
@@ -151,7 +118,7 @@ def _prune_old_checkpoints(args) -> None:
     if not save_root_raw:
         return
     save_root = Path(save_root_raw)
-    checkpoints = _completed_checkpoint_dirs(save_root)
+    checkpoints = _iter_checkpoint_dirs(save_root)
     stale = checkpoints[:-limit]
     for _iteration, path in stale:
         try:
@@ -191,8 +158,6 @@ def _install_agent_env_megatron_actor() -> None:
 
         if force_sync and self.args.async_save:
             maybe_finalize_async_save(blocking=True)
-        if not self.args.async_save or force_sync:
-            _write_checkpoint_success_marker(self.args, rollout_id)
 
         if self.args.save_hf is not None and self.role == "actor":
             actor_module.save_hf_model_to_path(
