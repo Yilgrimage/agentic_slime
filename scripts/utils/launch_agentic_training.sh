@@ -54,6 +54,11 @@ SAVE_DIR=${SAVE_DIR:-}
 RESET_TRAIN_RUNTIME_ON_START=${RESET_TRAIN_RUNTIME_ON_START:-1}
 BENCH_ON_TRAIN_EXIT=${BENCH_ON_TRAIN_EXIT:-1}
 BENCH_ON_LAUNCH_FAILURE=${BENCH_ON_LAUNCH_FAILURE:-1}
+AGENT_ENV_AUTO_RESUME_ON_TRAIN_CRASH=${AGENT_ENV_AUTO_RESUME_ON_TRAIN_CRASH:-1}
+AGENT_ENV_TRAIN_CRASH_MAX_RESTARTS=${AGENT_ENV_TRAIN_CRASH_MAX_RESTARTS:-2}
+AGENT_ENV_TRAIN_CRASH_RETRY_EXIT_CODES=${AGENT_ENV_TRAIN_CRASH_RETRY_EXIT_CODES:-139}
+AGENT_ENV_RESTART_FROM_BASE_ON_NO_CHECKPOINT=${AGENT_ENV_RESTART_FROM_BASE_ON_NO_CHECKPOINT:-1}
+AGENT_ENV_TRAIN_CRASH_RESTART_DELAY_S=${AGENT_ENV_TRAIN_CRASH_RESTART_DELAY_S:-30}
 
 SSH_USER=${SSH_USER:-tiger}
 SSH_PORT=${SSH_PORT:-10413}
@@ -105,6 +110,9 @@ RESOLVED_LAUNCH_KEYS=(
   SOCKET_IFNAME NCCL_SOCKET_IFNAME GLOO_SOCKET_IFNAME TP_SOCKET_IFNAME
   RUN_ROOT LOG_DIR WANDB_DIR SAVE_DIR EXP_PROJECT EXP_NAME
   RESET_TRAIN_RUNTIME_ON_START BENCH_ON_TRAIN_EXIT BENCH_ON_LAUNCH_FAILURE
+  AGENT_ENV_AUTO_RESUME_ON_TRAIN_CRASH AGENT_ENV_TRAIN_CRASH_MAX_RESTARTS
+  AGENT_ENV_TRAIN_CRASH_RETRY_EXIT_CODES AGENT_ENV_RESTART_FROM_BASE_ON_NO_CHECKPOINT
+  AGENT_ENV_TRAIN_CRASH_RESTART_DELAY_S
   SSH_USER SSH_PORT SSH_KEY SSH_IPV6 SSH_JUMP
   AUX_ENDPOINT_PROVIDER AUX_ENDPOINT_MODEL AUX_ENDPOINT_BASE_URL AUX_ENDPOINT_API_KEY_PATH
   AUX_ENDPOINT_TIMEOUT_S AUX_ENDPOINT_MAX_TOKENS AUX_ENDPOINT_TEMPERATURE AUX_ENDPOINT_TOP_P
@@ -875,9 +883,13 @@ start_train_driver() {
     quote_assign TRAIN_LOG "${train_log}"
     quote_assign STATUS_FILE "${status_file}"
     quote_assign BENCH_LOG "${bench_log}"
+    quote_assign SAVE_DIR "${SAVE_DIR}"
     quote_assign BENCH_PYTHON "${BENCH_PYTHON:-${SLIME_PYTHON}}"
     quote_assign RUN_BENCH "${OPS_SCRIPTS_DIR}/run_bench.sh"
     quote_assign_vars \
+      AGENT_ENV_AUTO_RESUME_ON_TRAIN_CRASH AGENT_ENV_TRAIN_CRASH_MAX_RESTARTS \
+      AGENT_ENV_TRAIN_CRASH_RETRY_EXIT_CODES AGENT_ENV_RESTART_FROM_BASE_ON_NO_CHECKPOINT \
+      AGENT_ENV_TRAIN_CRASH_RESTART_DELAY_S \
       BENCH_ON_TRAIN_EXIT ROOT_DIR LOCAL_ENVS_DIR NODES_FILE NODE_INDICES \
       SSH_USER SSH_PORT SSH_KEY SSH_IPV6 SSH_JUMP
     cat <<'EOF'
@@ -901,11 +913,102 @@ trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-printf "state=running\nstart_time=%s\n" "$(date -Is)" > "${STATUS_FILE}"
-bash "${DRIVER}" > "${TRAIN_LOG}" 2>&1
+is_true_value() {
+  case "${1:-0}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+retryable_exit_code() {
+  local code=$1 allowed
+  for allowed in ${AGENT_ENV_TRAIN_CRASH_RETRY_EXIT_CODES}; do
+    [ "${code}" = "${allowed}" ] && return 0
+  done
+  return 1
+}
+
+read_latest_checkpoint_iteration() {
+  local tracker="${SAVE_DIR}/latest_checkpointed_iteration.txt"
+  [ -f "${tracker}" ] || return 1
+  local raw iter dir
+  raw=$(tr -dc '0-9' < "${tracker}" | head -c 16)
+  [ -n "${raw}" ] || return 1
+  iter=$((10#${raw}))
+  dir=$(printf "%s/iter_%07d" "${SAVE_DIR}" "${iter}")
+  [ -d "${dir}" ] || return 1
+  if [ -f "${dir}/_SUCCESS" ] || [ -f "${dir}/.metadata" ]; then
+    printf "%s\n" "${iter}"
+    return 0
+  fi
+  return 1
+}
+
+checkpoint_dir_is_complete() {
+  local dir=$1 iteration=$2 latest=${3:--1}
+  [ -f "${dir}/_SUCCESS" ] && return 0
+  [ "${latest}" -ge "${iteration}" ] && [ -f "${dir}/.metadata" ] && return 0
+  return 1
+}
+
+quarantine_incomplete_checkpoints() {
+  [ -d "${SAVE_DIR}" ] || return 0
+  local latest=-1 dir base iteration target
+  latest=$(read_latest_checkpoint_iteration 2>/dev/null || printf -- "-1")
+  for dir in "${SAVE_DIR}"/iter_*; do
+    [ -d "${dir}" ] || continue
+    base=${dir##*/}
+    case "${base}" in
+      iter_[0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+      *) continue ;;
+    esac
+    iteration=$((10#${base#iter_}))
+    checkpoint_dir_is_complete "${dir}" "${iteration}" "${latest}" && continue
+    target="${dir}.partial.$(date +%Y%m%dT%H%M%S)"
+    echo "[$(date -Is)] quarantining incomplete checkpoint ${dir} -> ${target}" | tee -a "${TRAIN_LOG}"
+    mv "${dir}" "${target}" 2>/dev/null || true
+  done
+}
+
+run_train_attempt() {
+  local latest next
+  if latest=$(read_latest_checkpoint_iteration 2>/dev/null); then
+    next=$((latest + 1))
+    echo "[$(date -Is)] restarting from checkpoint iteration ${latest}; START_ROLLOUT_ID=${next}" | tee -a "${TRAIN_LOG}"
+    AGENT_ENV_SUPERVISOR_RESUME_FROM="${SAVE_DIR}" \
+      AGENT_ENV_SUPERVISOR_START_ROLLOUT_ID="${next}" \
+      bash "${DRIVER}" >> "${TRAIN_LOG}" 2>&1
+  else
+    echo "[$(date -Is)] starting without completed checkpoint" | tee -a "${TRAIN_LOG}"
+    bash "${DRIVER}" >> "${TRAIN_LOG}" 2>&1
+  fi
+}
+
+: > "${TRAIN_LOG}"
+printf "state=running\nstart_time=%s\nattempt=0\n" "$(date -Is)" > "${STATUS_FILE}"
+restart_count=0
+code=0
+while :; do
+  echo "[$(date -Is)] train attempt $((restart_count + 1)) starting" | tee -a "${TRAIN_LOG}"
+  run_train_attempt
+  code=$?
+  echo "[$(date -Is)] train attempt $((restart_count + 1)) exited code=${code}" | tee -a "${TRAIN_LOG}"
+  [ "${code}" -eq 0 ] && break
+  is_true_value "${AGENT_ENV_AUTO_RESUME_ON_TRAIN_CRASH}" || break
+  retryable_exit_code "${code}" || break
+  [ "${restart_count}" -lt "${AGENT_ENV_TRAIN_CRASH_MAX_RESTARTS}" ] || break
+  if ! read_latest_checkpoint_iteration >/dev/null 2>&1 \
+    && ! is_true_value "${AGENT_ENV_RESTART_FROM_BASE_ON_NO_CHECKPOINT}"; then
+    break
+  fi
+  restart_count=$((restart_count + 1))
+  printf "state=restarting\nlast_exit_code=%s\nrestart_count=%s\nlast_update_time=%s\n" \
+    "${code}" "${restart_count}" "$(date -Is)" > "${STATUS_FILE}"
+  quarantine_incomplete_checkpoints
+  sleep "${AGENT_ENV_TRAIN_CRASH_RESTART_DELAY_S}"
+done
+exit "${code}"
 EOF
-    printf 'code=$?\n'
-    printf 'exit "$code"\n'
   } > "${wrapper}"
   chmod +x "${wrapper}"
   tmux_start_local "agent_env_${ENV_NAME}_train" "bash ${wrapper}"

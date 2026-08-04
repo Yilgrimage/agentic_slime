@@ -69,6 +69,14 @@ if [ -n "${TRAIN_PROFILE:-}" ]; then
   set +a
 fi
 
+if [ -n "${AGENT_ENV_SUPERVISOR_RESUME_FROM:-}" ]; then
+  export RESUME_FROM="${AGENT_ENV_SUPERVISOR_RESUME_FROM}"
+  unset LOAD_DIR
+fi
+if [ -n "${AGENT_ENV_SUPERVISOR_START_ROLLOUT_ID:-}" ]; then
+  export START_ROLLOUT_ID="${AGENT_ENV_SUPERVISOR_START_ROLLOUT_ID}"
+fi
+
 if [ -n "${RESUME_FROM:-}" ] && [ -z "${LOAD_DIR:-}" ]; then
   export LOAD_DIR="${RESUME_FROM}"
 fi
