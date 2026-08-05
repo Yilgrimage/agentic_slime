@@ -763,7 +763,7 @@ def _configured_metadata_value(args: Any, sample: Sample, cfg_name: str, default
 
 
 def _teacher_index_path(args: Any) -> Path | None:
-    raw = str(_cfg(args, "teacher_index_path", "") or runtime_env(args, "AGENT_ENV_ROPD_TEACHER_INDEX_PATH", "")).strip()
+    raw = str(runtime_env(args, "AGENT_ENV_ROPD_TEACHER_INDEX_PATH", "") or _cfg(args, "teacher_index_path", "")).strip()
     return resolve_path(args, raw) if raw else None
 
 

@@ -60,6 +60,11 @@ or separate analysis jobs.
 Durable reward variants should select a dedicated reward profile, such as
 `configs/agent_env/rewards/alfworld_ropd_seed.yaml`, instead of copying a full
 env config or exporting semantic reward environment variables.
+For handoff teacher data, `AGENT_ENV_ROPD_TEACHER_INDEX_PATH` may override the
+selected reward profile's `ropd.teacher_index_path` at launch time. This is a
+runtime artifact path override, not a new reward variant; validate the file
+with `examples/agent_env/scripts/validate_teacher_jsonl.py` and keep task
+selection aligned through prompt-data generation.
 
 ## Native Eval
 

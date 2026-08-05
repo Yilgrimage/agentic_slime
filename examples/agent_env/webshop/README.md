@@ -74,6 +74,55 @@ Pack full data with:
 DATASETS=webshop ${ROOT_DIR}/scripts/pack_data.sh
 ```
 
+## ROPD Teacher Data
+
+Do not use the historical
+`${ROOT_DIR}/data/teacher_traces/processed/webshop_official_il_teacher_tool_trace.jsonl`
+as a quality baseline. It was rebuilt from WebShop's official IL trajectories
+by matching normalized instruction text against the current env goals. That
+file is useful only as a smoke artifact:
+
+- it covers only 137 of the current 1021 train goals;
+- 83 of those 137 rows have instruction/price mismatch between the current goal
+  and the teacher trace, because the old matcher removed the price constraint
+  when building the instruction key;
+- it is not a true rollout from the current env config.
+
+Preferred WebShop ROPD teachers should be produced by running a strong policy
+against the exact current WebShop env configuration:
+
+- `items_shuffle.json`
+- `items_ins_v2.json`
+- `num_products=100000`
+- the selected train task ids and split
+
+Each teacher row must include `task_id` or `task_index`, `split`,
+`teacher_tool_trace` or `teacher_trace`, `teacher_success`, and
+`teacher_score`. Store raw rollout outputs separately if needed, but feed ROPD
+the canonical trace rendered through the shared agent-env trace renderer.
+
+Validate before training:
+
+```bash
+python examples/agent_env/scripts/validate_teacher_jsonl.py \
+  --env webshop \
+  --teacher-jsonl "${ROOT_DIR}/data/teacher_traces/processed/webshop_teacher.jsonl" \
+  --expected-count 1021 \
+  --min-coverage 0.9 \
+  --min-success-rate 0.9 \
+  --require-success-only
+```
+
+Launch with the standard WebShop ROPD profile and override only the teacher
+file path:
+
+```bash
+AGENT_ENV_ROPD_TEACHER_INDEX_PATH="${ROOT_DIR}/data/teacher_traces/processed/webshop_teacher.jsonl" \
+PROMPT_DATA_EXTRA_ARGS="--task-id-file ${ROOT_DIR}/data/teacher_traces/processed/webshop_teacher.jsonl" \
+bash scripts/utils/launch_agentic_training.sh \
+  configs/agent_env/runs/webshop_qwen3_4b_ropd_fullasync_3x8_qwen27.env
+```
+
 ## Shared backend direction
 
 The current server starts one `WebAgentTextEnv` per worker process. Each worker

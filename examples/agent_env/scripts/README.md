@@ -11,6 +11,8 @@ single training run profile.
 - `collect_tau2_rollouts.sh` is a tau2 convenience wrapper. It can generate
   tau2 prompt data, calls the generic collector with `--include-trace`, and
   writes both raw rollouts and compact teacher rows.
+- `validate_teacher_jsonl.py` validates externally supplied teacher JSONL files
+  before they are used by ROPD.
 
 The collector does not start aux, env servers, Ray, or Slime training. Start
 the required env server first. For tau2, that env server must already be
@@ -47,3 +49,76 @@ python examples/agent_env/tau2/prompt_data.py \
   --teacher-jsonl /path/to/teacher.jsonl \
   --source areal_synthetic
 ```
+
+## Teacher JSONL Contract
+
+External rollout agents may give agentic Slime a teacher JSONL directly. The
+file should live under `${ROOT_DIR}/data/teacher_traces/processed/` or another
+durable shared path and must be validated before training.
+
+Each row must identify the exact task and contain a canonical trace:
+
+```json
+{
+  "task_id": "webshop:train:42",
+  "task_index": 42,
+  "split": "train",
+  "teacher_tool_trace": "Initial observation...\n\nStep 1:\nTool call:\n...",
+  "teacher_success": true,
+  "teacher_score": 1.0,
+  "teacher_source": "deepseek-v4-flash-best-of-n",
+  "teacher_model": "deepseek-v4-flash",
+  "teacher_env_config": {
+    "env": "webshop",
+    "product_file": "items_shuffle.json",
+    "attr_file": "items_ins_v2.json",
+    "num_products": 100000
+  }
+}
+```
+
+Required fields:
+
+- `task_id` or `task_index`.
+- `split`, normally `train`.
+- One canonical trace field, preferably `teacher_tool_trace`; `teacher_trace`
+  is also accepted.
+- `teacher_success` and `teacher_score`, so failed or low-quality teachers can
+  be filtered before training.
+
+Recommended audit fields:
+
+- policy model/provider, rollout seed, sampling params, token usage, env config
+  identity, product/database hashes for WebShop, raw full trace path, and
+  selection metadata such as best-of-N rank.
+
+Validate a WebShop teacher file before launch:
+
+```bash
+python examples/agent_env/scripts/validate_teacher_jsonl.py \
+  --env webshop \
+  --teacher-jsonl "${ROOT_DIR}/data/teacher_traces/processed/webshop_teacher.jsonl" \
+  --expected-count 1021 \
+  --min-coverage 0.9 \
+  --min-success-rate 0.9 \
+  --require-success-only
+```
+
+For a subset experiment, pass matching prompt data or lower `--min-coverage`
+explicitly and label the run as a subset. Do not silently train ROPD with
+teacher rows that cover a different task set.
+
+To train WebShop ROPD with a new teacher file, keep the standard run profile and
+override only the runtime teacher path:
+
+```bash
+AGENT_ENV_ROPD_TEACHER_INDEX_PATH="${ROOT_DIR}/data/teacher_traces/processed/webshop_teacher.jsonl" \
+PROMPT_DATA_EXTRA_ARGS="--task-id-file ${ROOT_DIR}/data/teacher_traces/processed/webshop_teacher.jsonl" \
+bash scripts/utils/launch_agentic_training.sh \
+  configs/agent_env/runs/webshop_qwen3_4b_ropd_fullasync_3x8_qwen27.env
+```
+
+`AGENT_ENV_ROPD_TEACHER_INDEX_PATH` controls the ROPD teacher index used by the
+reward module. `PROMPT_DATA_EXTRA_ARGS=--task-id-file ...` makes WebShop prompt
+generation select the same task ids as the teacher file; use it whenever the
+teacher file is not full-coverage.
