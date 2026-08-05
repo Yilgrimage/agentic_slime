@@ -105,6 +105,19 @@ def _price(text: Any) -> float | None:
 
 
 def _trace_instruction(trace: str) -> str:
+    text = str(trace or "")
+    if "[SEP]" in text:
+        sep_parts = [part.strip() for part in re.split(r"\s*\[SEP\]\s*", text) if part.strip()]
+        for idx, part in enumerate(sep_parts):
+            lowered = part.lower()
+            if lowered in {"instruction", "instruction:"} and idx + 1 < len(sep_parts):
+                return re.sub(r"\s+", " ", sep_parts[idx + 1]).strip()
+            if lowered.startswith("instruction:"):
+                value = part.split(":", 1)[1].strip()
+                if value:
+                    return re.sub(r"\s+", " ", value).strip()
+                if idx + 1 < len(sep_parts):
+                    return re.sub(r"\s+", " ", sep_parts[idx + 1]).strip()
     match = re.search(r"Instruction:\s*\n?\s*(.*?)(?:\n\[button\]|\Z)", trace, flags=re.S)
     if not match:
         return ""

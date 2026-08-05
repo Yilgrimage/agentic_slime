@@ -208,7 +208,19 @@ def _step_env(env: Any, action: str) -> tuple[Any, float, bool, dict]:
 
 def _instruction_from_observation(observation: Any) -> str:
     text = str(observation or "")
-    match = re.search(r"Instruction:\s*(.*?)(?:\n\s*\\[|$)", text, flags=re.S)
+    if "[SEP]" in text:
+        sep_parts = [part.strip() for part in re.split(r"\s*\[SEP\]\s*", text) if part.strip()]
+        for idx, part in enumerate(sep_parts):
+            lowered = part.lower()
+            if lowered in {"instruction", "instruction:"} and idx + 1 < len(sep_parts):
+                return re.sub(r"\s+", " ", sep_parts[idx + 1]).strip()
+            if lowered.startswith("instruction:"):
+                value = part.split(":", 1)[1].strip()
+                if value:
+                    return re.sub(r"\s+", " ", value).strip()
+                if idx + 1 < len(sep_parts):
+                    return re.sub(r"\s+", " ", sep_parts[idx + 1]).strip()
+    match = re.search(r"Instruction:\s*(.*?)(?:\n\s*\[|$)", text, flags=re.S)
     if not match:
         return ""
     return re.sub(r"\s+", " ", match.group(1)).strip()
