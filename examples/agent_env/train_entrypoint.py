@@ -353,17 +353,17 @@ def _install_config_overrides(args: Any) -> None:
 
 def _install_reward_derived_train_args(args: Any) -> None:
     reward = _mapping(getattr(args, "reward", {}))
-    ropd = _mapping(reward.get("ropd"))
-    luffy_enabled = bool(ropd.get("luffy_enable", False))
-    luffy_mode = str(ropd.get("luffy_mode", "off") or "off").strip().lower()
+    luffy = _mapping(reward.get("luffy"))
+    luffy_enabled = bool(luffy.get("enable", False))
+    luffy_mode = str(luffy.get("mode", "off") or "off").strip().lower()
     if not (luffy_enabled and luffy_mode == "token_loss"):
         return
 
     setattr(args, "use_off_policy_loss", True)
-    setattr(args, "off_policy_loss_coef", float(ropd.get("off_policy_loss_coef", 1.0)))
-    reshape = str(ropd.get("off_policy_reshape", "p_div_p_0.1") or "p_div_p_0.1").strip()
+    setattr(args, "off_policy_loss_coef", float(luffy.get("off_policy_loss_coef", 1.0)))
+    reshape = str(luffy.get("off_policy_reshape", "p_div_p_0.1") or "p_div_p_0.1").strip()
     setattr(args, "off_policy_reshape", reshape)
-    setattr(args, "off_policy_reshape_eps", float(ropd.get("off_policy_reshape_eps", 0.1)))
+    setattr(args, "off_policy_reshape_eps", float(luffy.get("off_policy_reshape_eps", 0.1)))
     _LOGGER.info(
         "Enabled reward-derived off-policy token loss: coef=%s reshape=%s eps=%s",
         getattr(args, "off_policy_loss_coef", None),

@@ -1097,50 +1097,6 @@ def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
     return ()
 
 
-def luffy_token_loss_enabled(args: Any) -> bool:
-    return _luffy_enabled(args) and _luffy_mode(args) == "token_loss"
-
-
-def teacher_index_row_for_sample(args: Any, sample: Sample) -> dict[str, Any] | None:
-    index_path = _teacher_index_path(args)
-    if index_path is None:
-        return None
-    index = _read_teacher_index(args, index_path)
-    for key in _teacher_index_key_candidates(args, sample):
-        row = index.get(key)
-        if row is not None:
-            return row
-    return None
-
-
-def _luffy_teacher_trace_keys(args: Any) -> list[str]:
-    configured = _cfg(args, "luffy_teacher_trace_keys", None)
-    default_keys = tuple(_list_value(_cfg(args, "teacher_answer_keys", None), TEACHER_TRACE_FIELDS))
-    return _list_value(configured, default_keys)
-
-
-def luffy_teacher_trace_text(args: Any, sample: Sample) -> str:
-    keys = _luffy_teacher_trace_keys(args)
-    metadata_value = _metadata_value(sample, keys)
-    if metadata_value not in (None, "", []):
-        if isinstance(metadata_value, (dict, list, tuple)):
-            return json.dumps(metadata_value, ensure_ascii=False, sort_keys=True, default=str)
-        return str(metadata_value).strip()
-
-    row = teacher_index_row_for_sample(args, sample)
-    if row is None:
-        return ""
-    for source in (row, row.get("evidence"), row.get("adapter_result"), row.get("source_row")):
-        if isinstance(source, dict):
-            text = _first_mapping_text(source, keys)
-            if text:
-                status = _teacher_index_row_status(row, has_text=True)
-                if status != "completed":
-                    return ""
-                return text
-    return ""
-
-
 def _extra_rubric_instructions(args: Any) -> str:
     return str(_cfg(args, "extra_rubric_instructions", "") or "")
 
@@ -1680,20 +1636,11 @@ def _score_list_stats(values: list[float]) -> dict[str, Any]:
     }
 
 
-def _luffy_mode(args: Any) -> str:
-    return _cfg_choice(args, "luffy_mode", "off", {"off", "reward_anchor", "token_loss"})
-
-
-def _luffy_enabled(args: Any) -> bool:
-    return _cfg_bool(args, "luffy_enable", False)
-
-
 def _reward_group_reference(args: Any) -> str:
-    default_reference = "teacher_plus_students" if _luffy_enabled(args) and _luffy_mode(args) == "reward_anchor" else "students"
     return _cfg_choice(
         args,
         "reward_group_reference",
-        default_reference,
+        "students",
         {"students", "teacher_plus_students"},
     )
 
@@ -1708,8 +1655,7 @@ def _reward_mode(args: Any) -> str:
 
 
 def _validate_reward_config(args: Any) -> None:
-    if _luffy_enabled(args) and _luffy_mode(args) == "token_loss" and _reward_group_reference(args) != "students":
-        raise RuntimeError("ropd.luffy_mode=token_loss requires ropd.reward_group_reference=students")
+    return None
 
 
 def _group_stats(args: Any, student_scores: list[float], teacher_scores: tuple[float, ...]) -> dict[str, Any]:
@@ -1735,8 +1681,6 @@ def _select_train_score(
     group_stats: dict[str, Any],
 ) -> tuple[float, str]:
     reward_mode = _reward_mode(args)
-    if _luffy_enabled(args) and _luffy_mode(args) == "reward_anchor" and reward_mode == "answer_only":
-        reward_mode = "group_centered"
     if reward_mode == "group_centered":
         return _clip(args, answer_score - float(group_stats.get("mean", 0.0))), reward_mode
     if reward_mode == "group_zscore":
@@ -1896,8 +1840,6 @@ def _result(
         "ropd_teacher_scores": group_stats.get("teacher_scores", []),
         "ropd_train_reward_mode": effective_reward_mode,
         "ropd_reward_mode_requested": _reward_mode(args),
-        "ropd_luffy_enabled": bool(_luffy_enabled(args)),
-        "ropd_luffy_mode": _luffy_mode(args),
         "answer_mode": _answer_mode(args),
         "strip_reasoning": trace_options.strip_reasoning,
         "strip_tool_call": trace_options.strip_tool_call,

@@ -9,7 +9,8 @@ from slime.utils.types import Sample
 
 from examples.agent_env.rollout import arg, metadata, tokenizer
 from examples.agent_env.rewards.config import reward_cfg_path
-from examples.agent_env.rewards.ropd import luffy_teacher_trace_text, luffy_token_loss_enabled
+from examples.agent_env.rewards.extractors import bool_value, float_value
+from examples.agent_env.teacher_data import teacher_trace_text
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,7 @@ class TeacherSegment:
 
 
 def luffy_enabled(args: Any) -> bool:
-    return luffy_token_loss_enabled(args)
+    return bool_value(_cfg(args, "enable", False), False) and _mode(args) == "token_loss"
 
 
 def apply_luffy_teacher_sample(args: Any, group: list[Sample]) -> list[Sample]:
@@ -29,7 +30,13 @@ def apply_luffy_teacher_sample(args: Any, group: list[Sample]) -> list[Sample]:
     if not group:
         return group
     anchor_pos, anchor = _anchor_sample(group)
-    teacher_text = luffy_teacher_trace_text(args, anchor)
+    teacher_text = teacher_trace_text(
+        args,
+        anchor,
+        config_prefix="luffy",
+        env_var="AGENT_ENV_LUFFY_TEACHER_INDEX_PATH",
+        key_config_name="teacher_trace_keys",
+    )
     if not teacher_text:
         raise RuntimeError(f"LUFFY token loss is enabled but no teacher trace matched sample index={anchor.index}")
     segments = _teacher_segments(args, anchor, teacher_text)
@@ -55,29 +62,34 @@ def _anchor_sample(group: list[Sample]) -> tuple[int, Sample]:
 
 
 def _cfg(args: Any, name: str, default: Any = None) -> Any:
-    return reward_cfg_path(args, f"ropd.{name}", default)
+    return reward_cfg_path(args, f"luffy.{name}", default)
 
 
 def _float_cfg(args: Any, name: str, default: float) -> float:
-    try:
-        return float(_cfg(args, name, default))
-    except (TypeError, ValueError):
-        return default
+    return float_value(_cfg(args, name, default), default)
+
+
+def _mode(args: Any) -> str:
+    value = str(_cfg(args, "mode", "off") or "off").strip().lower()
+    valid = {"off", "token_loss"}
+    if value not in valid:
+        raise ValueError(f"Unsupported reward.luffy.mode={value!r}; expected one of {sorted(valid)}")
+    return value
 
 
 def _policy_format(args: Any) -> str:
-    value = str(_cfg(args, "luffy_policy_format", "auto") or "auto").strip().lower()
+    value = str(_cfg(args, "policy_format", "auto") or "auto").strip().lower()
     valid = {"auto", "text_action_xml", "appworld_markdown_code", "appworld_code_tag", "raw"}
     if value not in valid:
-        raise ValueError(f"Unsupported ropd.luffy_policy_format={value!r}; expected one of {sorted(valid)}")
+        raise ValueError(f"Unsupported reward.luffy.policy_format={value!r}; expected one of {sorted(valid)}")
     return value
 
 
 def _insertion_mode(args: Any) -> str:
-    value = str(_cfg(args, "luffy_insertion_mode", "replace_anchor") or "replace_anchor").strip().lower()
+    value = str(_cfg(args, "insertion_mode", "replace_anchor") or "replace_anchor").strip().lower()
     valid = {"replace_anchor", "append"}
     if value not in valid:
-        raise ValueError(f"Unsupported ropd.luffy_insertion_mode={value!r}; expected one of {sorted(valid)}")
+        raise ValueError(f"Unsupported reward.luffy.insertion_mode={value!r}; expected one of {sorted(valid)}")
     return value
 
 
@@ -184,7 +196,16 @@ def _prompt_token_prefix(anchor: Sample) -> list[int]:
     return list(anchor.tokens[:prompt_len])
 
 
-def _teacher_raw_reward(args: Any, anchor: Sample) -> float:
+def _teacher_reward(args: Any, anchor: Sample) -> float:
+    source = str(_cfg(args, "teacher_reward_source", "constant") or "constant").strip().lower()
+    if source == "constant":
+        return _float_cfg(args, "teacher_reward", float_value(reward_cfg_path(args, "outcome", 1.0), 1.0))
+    if source != "ropd_teacher_score":
+        raise ValueError(
+            f"Unsupported reward.luffy.teacher_reward_source={source!r}; "
+            "expected 'constant' or 'ropd_teacher_score'"
+        )
+
     sample_metadata = metadata(anchor)
     raw = sample_metadata.get("judge_raw")
     if raw is None:
@@ -192,14 +213,17 @@ def _teacher_raw_reward(args: Any, anchor: Sample) -> float:
         if isinstance(rm_reward, dict):
             raw = rm_reward.get("raw")
     if not isinstance(raw, dict):
-        raise RuntimeError(f"LUFFY requires ROPD judge raw metadata before teacher injection: sample index={anchor.index}")
+        raise RuntimeError(
+            "reward.luffy.teacher_reward_source=ropd_teacher_score requires ROPD judge raw metadata "
+            f"before teacher injection: sample index={anchor.index}"
+        )
     teacher_scores = raw.get("teacher_scores") or raw.get("ropd_teacher_scores")
     maximum_score = raw.get("maximum_score")
     if not isinstance(teacher_scores, list) or not teacher_scores:
         raise RuntimeError(f"LUFFY requires ROPD teacher_scores in judge raw metadata: sample index={anchor.index}")
     try:
         max_score = float(maximum_score)
-        teacher_score = float(teacher_scores[int(_cfg(args, "luffy_teacher_score_index", 0) or 0)])
+        teacher_score = float(teacher_scores[int(_cfg(args, "teacher_score_index", 0) or 0)])
     except (TypeError, ValueError, IndexError) as exc:
         raise RuntimeError(f"Invalid ROPD teacher score metadata for LUFFY: sample index={anchor.index}") from exc
     if max_score <= 0:
@@ -248,7 +272,7 @@ def _build_teacher_sample(args: Any, anchor: Sample, segments: list[TeacherSegme
         )
 
     anchor_metadata = metadata(anchor)
-    teacher_reward = _teacher_raw_reward(args, anchor)
+    teacher_reward = _teacher_reward(args, anchor)
     if anchor.rollout_id is None:
         if anchor.index is None:
             raise RuntimeError("LUFFY anchor sample must have index or rollout_id")

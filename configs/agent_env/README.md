@@ -26,7 +26,10 @@ concurrency is configured under `ropd.concurrency`; optional
 `ropd.rubric_concurrency` and `ropd.judge_concurrency` override per-stage
 limits, with `0` meaning "follow the global ROPD concurrency".
 ROPD training semantics such as `answer_mode`, `reward_mode`,
-`reward_group_reference`, and `luffy_*` also belong under `ropd.*`.
+and `reward_group_reference` also belong under `ropd.*`. Luffy is an
+independent teacher-token loss extension and belongs under top-level
+`luffy.*`; it may be combined with ROPD or with env reward profiles, but ROPD
+must not own Luffy settings.
 When `ropd.answer_mode=trace`, student inputs must be rendered by the shared
 agent-env trace renderer from structured trajectory fields such as `turns`,
 `messages`, `token_segments`, `reward_trace`, `judge_trace`, or `ropd_trace`.
@@ -64,7 +67,10 @@ For handoff teacher data, `AGENT_ENV_ROPD_TEACHER_INDEX_PATH` may override the
 selected reward profile's `ropd.teacher_index_path` at launch time. This is a
 runtime artifact path override, not a new reward variant; validate the file
 with `examples/agent_env/scripts/validate_teacher_jsonl.py` and keep task
-selection aligned through prompt-data generation.
+selection aligned through prompt-data generation. For Luffy-only or
+Luffy+ROPD runs, `AGENT_ENV_LUFFY_TEACHER_INDEX_PATH` may similarly override
+`luffy.teacher_index_path`; prompt-data task selection still must be aligned
+with the selected teacher file.
 
 ## Native Eval
 

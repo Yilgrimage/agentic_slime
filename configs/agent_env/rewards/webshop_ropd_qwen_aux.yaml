@@ -35,5 +35,3 @@ ropd:
   answer_support_weight_for_reward: 0.0
   reward_mode: answer_only
   reward_group_reference: students
-  luffy_enable: false
-  luffy_mode: off

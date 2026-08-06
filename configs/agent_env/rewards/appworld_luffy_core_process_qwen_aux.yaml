@@ -36,14 +36,20 @@ ropd:
   reward_mode: answer_only
   reward_group_reference: students
 
-  luffy_enable: true
-  luffy_mode: token_loss
-  luffy_teacher_trace_keys:
+luffy:
+  enable: true
+  mode: token_loss
+  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
+  teacher_index_keys:
+    - task_id
+    - task_index
+  teacher_trace_keys:
     - teacher_response
     - teacher_raw_trace_text
-  luffy_policy_format: appworld_markdown_code
-  luffy_insertion_mode: replace_anchor
-  luffy_teacher_score_index: 0
+  policy_format: appworld_markdown_code
+  insertion_mode: replace_anchor
+  teacher_reward_source: ropd_teacher_score
+  teacher_score_index: 0
   off_policy_loss_coef: 1.0
   off_policy_reshape: p_div_p_0.1
   off_policy_reshape_eps: 0.1
