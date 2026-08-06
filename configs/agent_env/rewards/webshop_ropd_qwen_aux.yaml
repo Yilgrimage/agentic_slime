@@ -4,14 +4,15 @@ source: score
 outcome: 10.0
 
 ropd:
+  schema_mode: answer_process_50_50
   join_key: task_id
-  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/webshop_official_il_teacher_tool_trace.jsonl
+  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/webshop_deepseek_v4_flash_bestofn_teacher_score1.jsonl
   teacher_index_keys:
     - task_id
     - task_index
   teacher_answer_keys:
-    - teacher_trace
     - teacher_tool_trace
+    - teacher_trace
     - teacher_full_trace_text
   allow_online_rubric: true
   concurrency: 8
@@ -25,9 +26,13 @@ ropd:
   judge_max_tokens: 8192
   answer_mode: trace
   strip_reasoning: true
-  strip_tool_response: false
+  strip_tool_call: false
+  strip_tool_response: 240
   strip_assistant_response: true
   strip_system_prompt: true
+  answer_weight: 0.6
+  process_weight: 0.4
+  answer_support_weight_for_reward: 0.0
   reward_mode: answer_only
   reward_group_reference: students
   luffy_enable: false
