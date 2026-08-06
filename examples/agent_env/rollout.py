@@ -1648,9 +1648,13 @@ def _group_sort_key(group: list[Sample]) -> int:
 
 def glm_style_pad_groups_filter(args: Any, data: list[list[Sample]]) -> None:
     """Repair kept GRPO groups through Slime's stock rollout sample-filter hook."""
+    from examples.agent_env.luffy import apply_luffy_teacher_sample, luffy_enabled
+
+    inject_luffy = luffy_enabled(args)
     padding_offset = 0
     padded_groups = 0
     padded_samples = 0
+    luffy_groups = 0
     for idx, group in enumerate(data):
         repaired, padding_offset, metrics = _glm_style_pad_group(
             args,
@@ -1664,6 +1668,9 @@ def glm_style_pad_groups_filter(args: Any, data: list[list[Sample]]) -> None:
                 "Ensure dynamic-sampling-filter-path drops groups at or below "
                 "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION before rollout-sample-filter-path runs."
             )
+        if inject_luffy:
+            repaired = apply_luffy_teacher_sample(args, repaired)
+            luffy_groups += 1
         data[idx] = repaired
         padded_groups += int(metrics.get("agent_env/glm_padding/group_padded", 0.0))
         padded_samples += int(metrics.get("agent_env/glm_padding/padded_samples", 0.0))
@@ -1673,3 +1680,5 @@ def glm_style_pad_groups_filter(args: Any, data: list[list[Sample]]) -> None:
             padded_groups,
             padded_samples,
         )
+    if luffy_groups:
+        logger.info("agent-env LUFFY injected teacher samples for groups=%d", luffy_groups)

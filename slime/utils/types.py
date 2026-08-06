@@ -117,6 +117,7 @@ class Sample:
     label: str | None = None
     reward: float | dict[str, Any] | None = None
     loss_mask: list[int] | None = None
+    off_policy_loss_mask: list[int] | None = None
     weight_versions: list[str] = field(default_factory=list)
     rollout_log_probs: list[float] | None = None  # Log probabilities from rollout engine
     # Ragged top-p nucleus token ids replayed from rollout sampling. For response
@@ -418,6 +419,11 @@ class Sample:
     def _validate_response_metadata_lengths(self):
         if self.loss_mask is not None and len(self.loss_mask) != self.response_length:
             raise ValueError(f"loss_mask length {len(self.loss_mask)} != response_length {self.response_length}")
+
+        if self.off_policy_loss_mask is not None and len(self.off_policy_loss_mask) != self.response_length:
+            raise ValueError(
+                f"off_policy_loss_mask length {len(self.off_policy_loss_mask)} != response_length {self.response_length}"
+            )
 
         if self.rollout_log_probs is not None and len(self.rollout_log_probs) != self.response_length:
             raise ValueError(

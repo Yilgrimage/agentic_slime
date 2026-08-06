@@ -351,6 +351,27 @@ def _install_config_overrides(args: Any) -> None:
         _LOGGER.info("Applied agent-env config override: %s=%r", path, value)
 
 
+def _install_reward_derived_train_args(args: Any) -> None:
+    reward = _mapping(getattr(args, "reward", {}))
+    ropd = _mapping(reward.get("ropd"))
+    luffy_enabled = bool(ropd.get("luffy_enable", False))
+    luffy_mode = str(ropd.get("luffy_mode", "off") or "off").strip().lower()
+    if not (luffy_enabled and luffy_mode == "token_loss"):
+        return
+
+    setattr(args, "use_off_policy_loss", True)
+    setattr(args, "off_policy_loss_coef", float(ropd.get("off_policy_loss_coef", 1.0)))
+    reshape = str(ropd.get("off_policy_reshape", "p_div_p_0.1") or "p_div_p_0.1").strip()
+    setattr(args, "off_policy_reshape", reshape)
+    setattr(args, "off_policy_reshape_eps", float(ropd.get("off_policy_reshape_eps", 0.1)))
+    _LOGGER.info(
+        "Enabled reward-derived off-policy token loss: coef=%s reshape=%s eps=%s",
+        getattr(args, "off_policy_loss_coef", None),
+        getattr(args, "off_policy_reshape", None),
+        getattr(args, "off_policy_reshape_eps", None),
+    )
+
+
 def main() -> None:
     megatron_arguments._hf_validate_args = _hf_validate_args
     _install_agent_env_megatron_actor()
@@ -360,6 +381,7 @@ def main() -> None:
         raise ValueError("agent-env training requires --env-server-url; do not rely on Ray env propagation.")
     _install_reward_profile(args)
     _install_config_overrides(args)
+    _install_reward_derived_train_args(args)
 
     if args.agent_env_train_loop == "sync":
         from train import train

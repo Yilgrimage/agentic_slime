@@ -37,6 +37,23 @@ ROLLOUT_TOP_P_TOKEN_KEYS = (
 )
 
 
+def _off_policy_ratio(args: Namespace, log_probs: torch.Tensor) -> torch.Tensor:
+    reshape = str(getattr(args, "off_policy_reshape", "p_div_p") or "p_div_p")
+    if reshape == "p_div_p_0.1":
+        eps = 0.1
+        reshape = "p_div_p"
+    else:
+        eps = float(getattr(args, "off_policy_reshape_eps", 0.1))
+    if reshape == "no_reshape":
+        return log_probs.exp()
+    if reshape == "p_div_p":
+        probs = log_probs.exp()
+        return probs / (probs + eps)
+    if reshape == "logp":
+        return log_probs
+    raise ValueError(f"Unsupported off_policy_reshape={reshape!r}")
+
+
 def get_rollout_top_p_logprob_kwargs(args: Namespace, batch: dict[str, Any]) -> dict[str, Any]:
     if args.rollout_top_p == 1.0:
         return {}
@@ -1043,12 +1060,33 @@ def policy_loss_function(
     pg_clipfrac = sum_of_sample_mean(pg_clipfrac)
     ppo_kl = sum_of_sample_mean(ppo_kl)
 
+    off_policy_pg_loss = None
+    off_policy_prob = None
+    if args.use_off_policy_loss:
+        if "off_policy_loss_masks" not in batch or "off_policy_mask_sums" not in batch:
+            raise RuntimeError(
+                "--use-off-policy-loss requires rollout data with off_policy_loss_masks and off_policy_mask_sums"
+            )
+        off_policy_reducer = get_sum_of_sample_mean(
+            total_lengths,
+            response_lengths,
+            batch["off_policy_loss_masks"],
+            batch["off_policy_mask_sums"],
+            args.calculate_per_token_loss,
+        )
+        off_policy_ratio = _off_policy_ratio(args, log_probs)
+        off_policy_losses = -advantages * off_policy_ratio
+        off_policy_pg_loss = off_policy_reducer(off_policy_losses)
+        off_policy_prob = off_policy_reducer(log_probs.exp())
+
     # entropy loss
     entropy = log_probs_and_entropy["entropy"]
     entropy = torch.cat(entropy, dim=0)
     entropy_loss = sum_of_sample_mean(entropy)
 
     loss = pg_loss - args.entropy_coef * entropy_loss
+    if off_policy_pg_loss is not None:
+        loss = loss + args.off_policy_loss_coef * off_policy_pg_loss
 
     if args.use_kl_loss:
         ref_log_probs = batch["ref_log_probs"]
@@ -1086,6 +1124,15 @@ def policy_loss_function(
 
     if train_rollout_logprob_abs_diff is not None:
         reported_loss["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff.clone().detach()
+
+    if off_policy_pg_loss is not None:
+        reported_loss["off_policy_pg_loss"] = off_policy_pg_loss.clone().detach()
+        reported_loss["off_policy_prob"] = off_policy_prob.clone().detach()
+        reported_loss["off_policy_loss_coef"] = torch.tensor(
+            float(args.off_policy_loss_coef),
+            dtype=loss.dtype,
+            device=loss.device,
+        )
 
     if args.use_kl_loss:
         reported_loss["kl_loss"] = kl_loss.clone().detach()
@@ -1251,7 +1298,13 @@ def loss_function(
         - `logging_dict` has keys "keys" (list of str metric names) and
           "values" (1D tensor: [count, metric1, metric2, ...]).
     """
-    num_tokens = sum([torch.clamp_min(loss_mask.sum(), 1) for loss_mask in batch["loss_masks"]])
+    token_masks = batch["loss_masks"]
+    if args.use_off_policy_loss and "off_policy_loss_masks" in batch:
+        token_masks = [
+            loss_mask + off_policy_mask
+            for loss_mask, off_policy_mask in zip(batch["loss_masks"], batch["off_policy_loss_masks"], strict=False)
+        ]
+    num_tokens = sum([torch.clamp_min(loss_mask.sum(), 1) for loss_mask in token_masks])
 
     sum_of_sample_mean = get_sum_of_sample_mean(
         batch["total_lengths"],

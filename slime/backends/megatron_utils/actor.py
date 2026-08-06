@@ -238,10 +238,18 @@ class MegatronTrainRayActor(TrainRayActor):
         rollout_data["loss_masks"] = [
             t.to(device=device, dtype=torch.int, non_blocking=True) for t in rollout_data["loss_masks"]
         ]
+        if "off_policy_loss_masks" in rollout_data:
+            rollout_data["off_policy_loss_masks"] = [
+                t.to(device=device, dtype=torch.int, non_blocking=True) for t in rollout_data["off_policy_loss_masks"]
+            ]
         if "rollout_mask_sums" in rollout_data:
             # Promote precomputed per-rollout mask totals to GPU tensors here
             # (matching loss_masks) so the loss reducer can just divide.
             rollout_data["rollout_mask_sums"] = rollout_data["rollout_mask_sums"].to(
+                device=device, dtype=torch.float32, non_blocking=True
+            )
+        if "off_policy_mask_sums" in rollout_data:
+            rollout_data["off_policy_mask_sums"] = rollout_data["off_policy_mask_sums"].to(
                 device=device, dtype=torch.float32, non_blocking=True
             )
         if "multimodal_train_inputs" in rollout_data:

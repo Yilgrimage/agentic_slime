@@ -1097,6 +1097,50 @@ def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
     return ()
 
 
+def luffy_token_loss_enabled(args: Any) -> bool:
+    return _luffy_enabled(args) and _luffy_mode(args) == "token_loss"
+
+
+def teacher_index_row_for_sample(args: Any, sample: Sample) -> dict[str, Any] | None:
+    index_path = _teacher_index_path(args)
+    if index_path is None:
+        return None
+    index = _read_teacher_index(args, index_path)
+    for key in _teacher_index_key_candidates(args, sample):
+        row = index.get(key)
+        if row is not None:
+            return row
+    return None
+
+
+def _luffy_teacher_trace_keys(args: Any) -> list[str]:
+    configured = _cfg(args, "luffy_teacher_trace_keys", None)
+    default_keys = tuple(_list_value(_cfg(args, "teacher_answer_keys", None), TEACHER_TRACE_FIELDS))
+    return _list_value(configured, default_keys)
+
+
+def luffy_teacher_trace_text(args: Any, sample: Sample) -> str:
+    keys = _luffy_teacher_trace_keys(args)
+    metadata_value = _metadata_value(sample, keys)
+    if metadata_value not in (None, "", []):
+        if isinstance(metadata_value, (dict, list, tuple)):
+            return json.dumps(metadata_value, ensure_ascii=False, sort_keys=True, default=str)
+        return str(metadata_value).strip()
+
+    row = teacher_index_row_for_sample(args, sample)
+    if row is None:
+        return ""
+    for source in (row, row.get("evidence"), row.get("adapter_result"), row.get("source_row")):
+        if isinstance(source, dict):
+            text = _first_mapping_text(source, keys)
+            if text:
+                status = _teacher_index_row_status(row, has_text=True)
+                if status != "completed":
+                    return ""
+                return text
+    return ""
+
+
 def _extra_rubric_instructions(args: Any) -> str:
     return str(_cfg(args, "extra_rubric_instructions", "") or "")
 
@@ -1664,11 +1708,8 @@ def _reward_mode(args: Any) -> str:
 
 
 def _validate_reward_config(args: Any) -> None:
-    if _luffy_enabled(args) and _luffy_mode(args) == "token_loss":
-        raise RuntimeError(
-            "ropd.luffy_mode=token_loss requires actor-side off-policy teacher-token loss integration. "
-            "The agentic Slime ROPD reward module can only provide scalar rewards."
-        )
+    if _luffy_enabled(args) and _luffy_mode(args) == "token_loss" and _reward_group_reference(args) != "students":
+        raise RuntimeError("ropd.luffy_mode=token_loss requires ropd.reward_group_reference=students")
 
 
 def _group_stats(args: Any, student_scores: list[float], teacher_scores: tuple[float, ...]) -> dict[str, Any]:

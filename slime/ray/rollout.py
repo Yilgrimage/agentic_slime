@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 _ROLLOUT_DATA_TENSOR_DTYPES = {
     "tokens": torch.long,
     "loss_masks": torch.int,
+    "off_policy_loss_masks": torch.int,
     "rollout_log_probs": torch.float32,
     "rollout_top_p_token_ids": torch.int32,
     "rollout_top_p_token_offsets": torch.int32,
@@ -99,6 +100,12 @@ def _tensorize_rollout_data_for_training(rollout_data: dict[str, Any]) -> None:
     if "rollout_mask_sums" in rollout_data:
         rollout_data["rollout_mask_sums"] = _cpu_tensor(
             rollout_data["rollout_mask_sums"],
+            dtype=torch.float32,
+        )
+
+    if "off_policy_mask_sums" in rollout_data:
+        rollout_data["off_policy_mask_sums"] = _cpu_tensor(
+            rollout_data["off_policy_mask_sums"],
             dtype=torch.float32,
         )
 
@@ -755,6 +762,24 @@ class RolloutManager:
             rollout_total_mask[rid] = rollout_total_mask.get(rid, 0) + ms
         train_data["rollout_mask_sums"] = [rollout_total_mask[rid] for rid in rollout_id_list]
 
+        if any(sample.off_policy_loss_mask is not None for sample in samples):
+            off_policy_masks = []
+            for sample in samples:
+                mask = sample.off_policy_loss_mask
+                if mask is None:
+                    mask = [0] * sample.response_length
+                assert len(mask) == sample.response_length, (
+                    f"off-policy loss mask length {len(mask)} != response length {sample.response_length}"
+                )
+                off_policy_masks.append(mask)
+            train_data["off_policy_loss_masks"] = off_policy_masks
+
+            off_policy_mask_sums = [sum(m) for m in off_policy_masks]
+            off_policy_total_mask: dict[int, int] = {}
+            for rid, ms in zip(rollout_id_list, off_policy_mask_sums, strict=True):
+                off_policy_total_mask[rid] = off_policy_total_mask.get(rid, 0) + ms
+            train_data["off_policy_mask_sums"] = [off_policy_total_mask[rid] for rid in rollout_id_list]
+
         # Overwrite raw_reward when available. Mixed-source batches may only
         # populate this field for a subset of samples (e.g. SWE but not code).
         if any(sample.metadata and "raw_reward" in sample.metadata for sample in samples):
@@ -768,8 +793,11 @@ class RolloutManager:
             train_data["round_number"] = [sample.metadata["round_number"] for sample in samples]
 
         # Add rollout log probabilities for off-policy correction
-        if samples[0].rollout_log_probs is not None:
-            train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
+        if any(sample.rollout_log_probs is not None for sample in samples):
+            train_data["rollout_log_probs"] = [
+                sample.rollout_log_probs if sample.rollout_log_probs is not None else [0.0] * sample.response_length
+                for sample in samples
+            ]
 
         if getattr(self.args, "rollout_top_p", 1.0) != 1.0:
             for sample in samples:
@@ -847,6 +875,8 @@ class RolloutManager:
                 "sample_indices",
                 "rollout_ids",
                 "rollout_mask_sums",
+                "off_policy_loss_masks",
+                "off_policy_mask_sums",
                 "rollout_log_probs",
                 "rollout_top_p_token_ids",
                 "rollout_top_p_token_offsets",

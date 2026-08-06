@@ -1046,6 +1046,34 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "If not set, we will use the logprobs from the actor model."
                 ),
             )
+            parser.add_argument(
+                "--use-off-policy-loss",
+                action="store_true",
+                default=False,
+                help="Enable an additional token-level loss over samples that provide off_policy_loss_masks.",
+            )
+            parser.add_argument(
+                "--off-policy-loss-coef",
+                type=float,
+                default=1.0,
+                help="Coefficient for the additional off-policy token loss.",
+            )
+            parser.add_argument(
+                "--off-policy-reshape",
+                type=str,
+                default="p_div_p",
+                choices=["no_reshape", "p_div_p", "p_div_p_0.1", "logp"],
+                help=(
+                    "Transform applied to current-policy token probabilities in the off-policy loss. "
+                    "p_div_p uses p/(p+eps); p_div_p_0.1 is the LUFFY default p/(p+0.1)."
+                ),
+            )
+            parser.add_argument(
+                "--off-policy-reshape-eps",
+                type=float,
+                default=0.1,
+                help="Epsilon used by --off-policy-reshape=p_div_p.",
+            )
             # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
             parser.add_argument(
                 "--use-tis",
