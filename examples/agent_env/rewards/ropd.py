@@ -38,6 +38,8 @@ RUBRIC_SCHEMA_VERSION = "ropd.rubric.v1"
 BATCH_VERIFIER_SCHEMA_VERSION = "ropd.batch_verifier.v2"
 ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION = "ropd.answer_process_rubric.v1"
 ANSWER_PROCESS_VERIFIER_SCHEMA_VERSION = "ropd.answer_process_compact_batch_verifier.v1"
+RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION = "ropd.rubric_shaping_rubric.v1"
+RUBRIC_SHAPING_VERIFIER_SCHEMA_VERSION = "ropd.rubric_shaping_batch_verifier.v1"
 TEACHER_TRACE_FIELDS = (
     "teacher_tool_trace",
     "teacher_trace",
@@ -211,6 +213,123 @@ criterion 内部没有部分分。每条 criterion 只能是 true 或 false。
 - 每个回答的 `judgement` 长度必须等于 rubric criterion 数量。
 - `final_score` 必须等于该回答所有 `true` criterion 对应 points 的总和。
 - 最终只输出 JSON object，不要输出解释、Markdown 或其他文本。
+"""
+
+RUBRICATOR_SHAPING_PROMPT_TEMPLATE = """你是一名 agentic trajectory 评估专家。你的任务是为同一道任务生成一套共享 trajectory-quality rubric。
+
+这套 rubric 只用于给未成功轨迹提供弱 shaping 信号；任务最终是否成功由外部环境 verifier 的 env_success 决定，不由你判断。因此不要生成“最终答案正确”“任务已经完成”“complete_task 调用成功”等核心正确性 rubric。
+
+# 输入数据
+[Question]
+{question}
+
+[Teacher Trajectory]
+{teacher_response}
+
+[Student Trajectory]
+{student_response}
+
+[Additional Instructions]
+{extra_rubric_instructions}
+
+# rubric 目标
+请生成 2 到 6 条可观察、可打分、可泛化的过程质量标准。优先覆盖：
+- 是否选择了与任务相关的工具/API/action。
+- 是否使用了工具返回的可见证据，而不是编造结果。
+- 是否遵守任务约束、用户偏好和环境反馈。
+- 是否能在失败、空结果、报错或不确定时做合理修正。
+- 是否避免重复无效动作、无关探索和过早宣布完成。
+
+# 禁止项
+- 不要奖励轨迹仅仅声称任务完成。
+- 不要把 teacher 的具体文本、具体参数或具体中间值写成唯一正确答案。
+- 不要把格式整洁、篇幅长、礼貌表达作为主要得分点。
+- 不要要求 verifier 访问外部知识或环境真值；只能基于给定 trajectory 打分。
+
+# 输出格式
+返回一个 JSON 对象，结构如下：
+```json
+{
+  "schema_version": "ropd.rubric_shaping_rubric.v1",
+  "rubrics": [
+    {
+      "criterion_id": "r1",
+      "category": "Evidence-Grounded Tool Use",
+      "criterion": "The trajectory uses visible tool/API/action observations to justify the next step instead of inventing unavailable results.",
+      "max_score": 5,
+      "weight": 1.0
+    }
+  ],
+  "score_policy": {
+    "score_range": "0_to_5_per_criterion",
+    "env_success_overrides_reward": true,
+    "failure_reward_scale_beta": {shaping_beta}
+  }
+}
+```
+
+# 输出约束
+- `schema_version` 必须严格等于 `ropd.rubric_shaping_rubric.v1`。
+- `rubrics[].criterion_id` 必须为 `r1`, `r2`, ...
+- 每条 rubric 的 `max_score` 必须等于 5。
+- 每条 rubric 的 `weight` 必须是正数。
+- 只返回 JSON 对象本身，不要输出 Markdown 或解释。
+"""
+
+VERIFIER_SHAPING_PROMPT_TEMPLATE = """你是一名 agentic trajectory 评分专家。你的任务是基于共享 rubric 给多个匿名 trajectory 打分。
+
+任务最终是否成功由外部环境 verifier 的 env_success 决定，不由你判断。你只评价 trajectory 的可观察过程质量，用于给失败轨迹提供弱 shaping 信号。
+
+[Question]
+{question}
+
+[Rubrics]
+{rubrics}
+
+[Trajectories]
+{answers}
+
+[Additional Scoring Instructions]
+{extra_scoring_instructions}
+
+# 打分规则
+- 对每条 rubric 给 0 到 5 分：
+  - 5：完全满足。
+  - 4：基本满足，只有轻微遗漏。
+  - 3：部分满足，但缺少重要细节。
+  - 2：只有少量相关内容。
+  - 1：极弱相关或基本不可用。
+  - 0：不满足。
+- 不要因为 trajectory 调用了 `complete_task`、声明任务完成、或工具调用本身返回 execution successful 就给高分；这些只说明动作被执行，不说明任务成功。
+- 如果 trajectory 编造工具结果、跳过必要证据、使用明显错误的工具/API/action，相关 rubric 应低分。
+- 如果 trajectory 为空、严重损坏、无法看出任何有效动作，`fatal_error=true` 且总分为 0。
+- 每条 trajectory 独立评分，不要互相比高低。
+
+# 输出格式
+返回一个 JSON 对象：
+```json
+{
+  "schema_version": "ropd.rubric_shaping_batch_verifier.v1",
+  "answers": [
+    {
+      "answer_index": 1,
+      "rubric_scores": [
+        {"criterion_id": "r1", "score": 4, "rationale": "short reason"}
+      ],
+      "trajectory_quality": "partial",
+      "fatal_error": false
+    }
+  ]
+}
+```
+
+# 输出约束
+- `schema_version` 必须严格等于 `ropd.rubric_shaping_batch_verifier.v1`。
+- `answers` 必须按输入顺序覆盖所有 trajectory。
+- `rubric_scores` 长度和顺序必须与 rubric 完全一致。
+- 所有 `score` 必须是 0 到 5 的数字。
+- `trajectory_quality` 必须是 `strong`, `useful`, `partial`, `weak`, `invalid` 之一。
+- 只返回 JSON 对象本身。
 """
 
 RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评估专家。你的任务是为同一道业务问题生成一套 answer-first 的共享评分细则。
@@ -493,7 +612,18 @@ def _cfg_choice(args: Any, cfg_name: str, default: str, choices: set[str]) -> st
 
 
 def _schema_mode(args: Any) -> str:
-    return _cfg_choice(args, "schema_mode", "binary", {"binary", "answer_process_50_50"})
+    value = str(_cfg(args, "schema_mode", "binary") or "binary").strip().lower()
+    choices = {"binary", "answer_process_50_50", "rubric_shaping"}
+    if value not in choices:
+        raise ValueError(f"Unsupported reward.ropd.schema_mode={value!r}; expected one of {sorted(choices)}")
+    return value
+
+
+def _rubric_shaping_beta(args: Any) -> float:
+    beta = float_value(_cfg(args, "shaping_beta", 0.2), 0.2)
+    if beta < 0:
+        raise ValueError("reward.ropd.shaping_beta must be non-negative")
+    return beta
 
 
 def _answer_process_weights(args: Any) -> tuple[float, float]:
@@ -1254,13 +1384,56 @@ def _normalize_answer_process_rubric(args: Any, payload: Any) -> dict[str, Any] 
     }
 
 
+def _normalize_rubric_shaping_rubric(args: Any, payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION:
+        return None
+    items = payload.get("rubrics")
+    if not isinstance(items, list):
+        return None
+    normalized_items: list[dict[str, Any]] = []
+    for idx, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        criterion = str(item.get("criterion") or item.get("description") or "").strip()
+        if not criterion:
+            continue
+        normalized_items.append(
+            {
+                "criterion_id": f"r{idx}",
+                "category": str(item.get("category") or "Trajectory Quality").strip() or "Trajectory Quality",
+                "criterion": criterion,
+                "max_score": 5,
+                "weight": _positive_float(item.get("weight", 1.0), 1.0),
+            }
+        )
+    if not normalized_items:
+        return None
+    return {
+        "schema_version": RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION,
+        "rubrics": normalized_items,
+        "maximum_score": 1.0,
+        "score_policy": {
+            "score_range": "0_to_5_per_criterion",
+            "env_success_overrides_reward": True,
+            "failure_reward_scale_beta": _rubric_shaping_beta(args),
+        },
+    }
+
+
 def _normalize_rubric_for_mode(args: Any, payload: Any) -> dict[str, Any] | None:
-    if _schema_mode(args) == "answer_process_50_50":
+    schema_mode = _schema_mode(args)
+    if schema_mode == "answer_process_50_50":
         return _normalize_answer_process_rubric(args, payload)
+    if schema_mode == "rubric_shaping":
+        return _normalize_rubric_shaping_rubric(args, payload)
     return _normalize_rubric(payload)
 
 
 def _maximum_score(rubric: Any) -> float:
+    if isinstance(rubric, dict) and rubric.get("schema_version") == RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION:
+        return 1.0
     if isinstance(rubric, dict) and rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
         maximum_scores = rubric.get("maximum_scores")
         if isinstance(maximum_scores, dict):
@@ -1288,11 +1461,13 @@ def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: 
     question_max_chars = _cfg_int(args, "question_max_chars", 0)
     student_max_chars = _cfg_int(args, "student_rubric_max_chars", 0)
     reference_max_chars = _cfg_int(args, "reference_max_chars", 0)
-    template = (
-        RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE
-        if _schema_mode(args) == "answer_process_50_50"
-        else RUBRICATOR_PROMPT_TEMPLATE
-    )
+    schema_mode = _schema_mode(args)
+    if schema_mode == "answer_process_50_50":
+        template = RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE
+    elif schema_mode == "rubric_shaping":
+        template = RUBRICATOR_SHAPING_PROMPT_TEMPLATE
+    else:
+        template = RUBRICATOR_PROMPT_TEMPLATE
     answer_weight, process_weight = _answer_process_weights(args)
     support_weight = _answer_support_weight_for_reward(args)
     answer_norm = 1.0 + support_weight
@@ -1320,6 +1495,7 @@ def _build_rubricator_prompt(args: Any, samples: list[Sample], teacher_answers: 
             "answer_support_weight_for_reward": f"{support_weight:.6g}",
             "answer_support_weight_for_reward_normalized": f"{support_weight / answer_norm:.6g}",
             "final_reward_uses": _answer_process_final_reward_uses(args),
+            "shaping_beta": f"{_rubric_shaping_beta(args):.6g}",
         },
     )
 
@@ -1339,6 +1515,13 @@ def _build_verifier_prompt(
             "answer_rubrics": rubric.get("answer_rubrics", []),
             "process_rubrics": rubric.get("process_rubrics", []),
             "maximum_scores": rubric.get("maximum_scores", {}),
+            "score_policy": rubric.get("score_policy", {}),
+        }
+        answer_label = "Trajectory"
+    elif isinstance(rubric, dict) and rubric.get("schema_version") == RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION:
+        template = VERIFIER_SHAPING_PROMPT_TEMPLATE
+        rubric_payload = {
+            "rubrics": rubric.get("rubrics", []),
             "score_policy": rubric.get("score_policy", {}),
         }
         answer_label = "Trajectory"
@@ -1591,9 +1774,65 @@ def _parse_answer_process_batch_scores(
     return scores
 
 
+def _parse_rubric_shaping_batch_scores(
+    payload: Any,
+    *,
+    rubric: dict[str, Any],
+    expected: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        raise ValueError("ROPD rubric-shaping verifier response must be a JSON object")
+    if payload.get("schema_version") != RUBRIC_SHAPING_VERIFIER_SCHEMA_VERSION:
+        raise ValueError("ROPD rubric-shaping verifier schema_version mismatch")
+    answers = payload.get("answers")
+    if not isinstance(answers, list) or len(answers) != expected:
+        raise ValueError(
+            f"ROPD rubric-shaping verifier returned "
+            f"{0 if not isinstance(answers, list) else len(answers)} scores for {expected} answers"
+        )
+    rubric_items = list(rubric.get("rubrics", []))
+    rubric_ids = [str(item.get("criterion_id")) for item in rubric_items]
+    scores: list[dict[str, Any]] = []
+    for expected_index, item in enumerate(answers, start=1):
+        if not isinstance(item, dict):
+            raise ValueError("ROPD rubric-shaping answer item must be an object")
+        if int(item.get("answer_index", -1)) != expected_index:
+            raise ValueError("ROPD rubric-shaping answer_index must cover 1..n in order")
+        raw_scores = item.get("rubric_scores")
+        if not isinstance(raw_scores, list) or len(raw_scores) != len(rubric_items):
+            raise ValueError("ROPD rubric-shaping rubric_scores length mismatch")
+        score_items = [
+            _score_item(raw, criterion_id=criterion_id)
+            for raw, criterion_id in zip(raw_scores, rubric_ids, strict=True)
+        ]
+        for score_item, criterion_id in zip(score_items, rubric_ids, strict=True):
+            if score_item["criterion_id"] != criterion_id:
+                raise ValueError("ROPD rubric-shaping criterion_id mismatch")
+        quality = str(item.get("trajectory_quality") or "").strip().lower()
+        if quality not in {"strong", "useful", "partial", "weak", "invalid"}:
+            raise ValueError("ROPD rubric-shaping trajectory_quality mismatch")
+        fatal_error = bool(item.get("fatal_error", False))
+        rubric_score = _weighted_average_0_to_5([float(score_item["score"]) for score_item in score_items], rubric_items)
+        normalized_score = 0.0 if fatal_error else max(0.0, min(1.0, rubric_score / 5.0))
+        scores.append(
+            {
+                "answer_index": expected_index,
+                "rubric_scores": score_items,
+                "rubric_score": normalized_score,
+                "rubric_score_0_to_5": rubric_score,
+                "final_score": normalized_score,
+                "trajectory_quality": quality,
+                "fatal_error": fatal_error,
+            }
+        )
+    return scores
+
+
 def _parse_batch_scores(args: Any, payload: Any, *, rubric: dict[str, Any], expected: int) -> list[dict[str, Any]]:
     if rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
         return _parse_answer_process_batch_scores(args, payload, rubric=rubric, expected=expected)
+    if rubric.get("schema_version") == RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION:
+        return _parse_rubric_shaping_batch_scores(payload, rubric=rubric, expected=expected)
     return _parse_binary_batch_scores(payload, rubric=rubric, expected=expected)
 
 
@@ -1658,6 +1897,13 @@ def _validate_reward_config(args: Any) -> None:
     return None
 
 
+def _env_success_for_shaping(sample: Sample) -> bool:
+    sample_metadata = metadata(sample)
+    if "env_success" not in sample_metadata:
+        raise ValueError("reward.ropd.schema_mode=rubric_shaping requires sample.metadata.env_success")
+    return bool(sample_metadata.get("env_success"))
+
+
 def _group_stats(args: Any, student_scores: list[float], teacher_scores: tuple[float, ...]) -> dict[str, Any]:
     reference_values_for_stats = list(student_scores)
     reference = _reward_group_reference(args)
@@ -1677,9 +1923,15 @@ def _group_stats(args: Any, student_scores: list[float], teacher_scores: tuple[f
 def _select_train_score(
     args: Any,
     *,
+    sample: Sample,
     answer_score: float,
     group_stats: dict[str, Any],
 ) -> tuple[float, str]:
+    if _schema_mode(args) == "rubric_shaping":
+        if _env_success_for_shaping(sample):
+            return 1.0, "env_success_else_rubric_shaping"
+        shaped = _rubric_shaping_beta(args) * max(0.0, min(1.0, answer_score))
+        return max(0.0, min(1.0, shaped)), "env_success_else_rubric_shaping"
     reward_mode = _reward_mode(args)
     if reward_mode == "group_centered":
         return _clip(args, answer_score - float(group_stats.get("mean", 0.0))), reward_mode
@@ -1814,22 +2066,23 @@ def _result(
         bounded = max(0.0, min(1.0, float(student_score) / maximum_score))
     train_score, effective_reward_mode = _select_train_score(
         args,
+        sample=sample,
         answer_score=bounded,
         group_stats=group_stats,
     )
     trace_options = _trace_options(args)
     weighted = train_score * _weight(args)
+    schema_mode = _schema_mode(args)
     raw = {
         "rubric": rubric,
         "rubric_hash": _rubric_hash(rubric),
-        "ropd_schema_mode": _schema_mode(args),
+        "ropd_schema_mode": schema_mode,
         "rubric_source": rubric_source,
         "judge": student_item,
         "student_score": float(student_score),
         "teacher_scores": [float(score) for score in teacher_scores],
         "maximum_score": float(maximum_score),
         "reward_score": float(train_score),
-        "answer_score": float(bounded),
         "student_answer_position": int(student_position),
         "teacher_below_student": bool(teacher_below_student),
         "group_teacher_below_any_student": bool(teacher_below_any_student),
@@ -1847,12 +2100,21 @@ def _result(
         "strip_assistant_response": trace_options.strip_assistant_response,
         "strip_system_prompt": trace_options.strip_system_prompt,
     }
+    if schema_mode == "rubric_shaping":
+        raw["rubric_score"] = float(bounded)
+        raw["env_success_for_reward"] = _env_success_for_shaping(sample)
+        raw["ropd_shaping_beta"] = _rubric_shaping_beta(args)
+    else:
+        raw["answer_score"] = float(bounded)
     for key in (
         "answer_core_score",
         "answer_support_score",
         "process_score",
         "process_score_scaled",
         "final_score",
+        "rubric_score",
+        "rubric_score_0_to_5",
+        "rubric_scores",
         "answer_process_answer_weight",
         "answer_process_process_weight",
         "answer_process_final_reward_uses",
@@ -1860,6 +2122,7 @@ def _result(
         "process_scores",
         "process_step_evidence",
         "final_answer_quality",
+        "trajectory_quality",
         "fatal_error",
     ):
         if key in student_item:
@@ -1874,7 +2137,7 @@ def _result(
         score=weighted,
         components={
             "rubric_task_success": weighted,
-            "ropd_answer_score": bounded,
+            ("ropd_rubric_score" if schema_mode == "rubric_shaping" else "ropd_answer_score"): bounded,
         },
         raw=raw,
         reason="",

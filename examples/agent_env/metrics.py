@@ -80,6 +80,8 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ropd_teacher_points: list[float] = []
     ropd_answer_scores: list[float] = []
     ropd_teacher_answer_scores: list[float] = []
+    ropd_rubric_scores: list[float] = []
+    ropd_teacher_rubric_scores: list[float] = []
     ropd_train_scores: list[float] = []
     ropd_rubric_sizes: list[float] = []
     ropd_answer_rubric_sizes: list[float] = []
@@ -92,6 +94,8 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ropd_final_answer_quality: dict[str, int] = {}
     ropd_teacher_below_student = 0
     ropd_teacher_below_student_seen = False
+    ropd_env_success_for_reward = 0
+    ropd_env_success_for_reward_seen = False
 
     for sample in real_samples:
         sample_metadata = getattr(sample, "metadata", None) or {}
@@ -100,6 +104,7 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         if score is not None:
             rm_scores.append(score)
         raw = _as_dict(rm_reward.get("raw"))
+        schema_mode = str(raw.get("ropd_schema_mode") or "")
         fallback = raw.get("fallback")
         if fallback:
             fallback_reasons[str(fallback)] = fallback_reasons.get(str(fallback), 0) + 1
@@ -118,6 +123,9 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         answer_score = _float_or_none(raw.get("answer_score"))
         if answer_score is not None:
             ropd_answer_scores.append(answer_score)
+        rubric_score = _float_or_none(raw.get("rubric_score"))
+        if rubric_score is not None:
+            ropd_rubric_scores.append(rubric_score)
         reward_score = _float_or_none(raw.get("reward_score"))
         if reward_score is not None:
             ropd_train_scores.append(reward_score)
@@ -146,11 +154,18 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
                     continue
                 ropd_teacher_points.append(teacher_score)
                 if maximum_score is not None and maximum_score > 0:
-                    ropd_teacher_answer_scores.append(max(0.0, min(1.0, teacher_score / maximum_score)))
+                    normalized_teacher_score = max(0.0, min(1.0, teacher_score / maximum_score))
+                    if schema_mode == "rubric_shaping":
+                        ropd_teacher_rubric_scores.append(normalized_teacher_score)
+                    else:
+                        ropd_teacher_answer_scores.append(normalized_teacher_score)
         if "teacher_below_student" in raw:
             ropd_teacher_below_student_seen = True
         if raw.get("teacher_below_student"):
             ropd_teacher_below_student += 1
+        if "env_success_for_reward" in raw:
+            ropd_env_success_for_reward_seen = True
+            ropd_env_success_for_reward += int(bool(raw.get("env_success_for_reward")))
         rubric = _as_dict(raw.get("rubric"))
         rubric_items = rubric.get("rubrics")
         if isinstance(rubric_items, list):
@@ -177,6 +192,10 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics["reward/ropd/teacher_points_mean"] = _mean(ropd_teacher_points)
     if ropd_answer_scores:
         metrics["reward/ropd/answer_score_mean"] = _mean(ropd_answer_scores)
+    if ropd_rubric_scores:
+        metrics["reward/ropd/rubric_score_mean"] = _mean(ropd_rubric_scores)
+    if ropd_teacher_rubric_scores:
+        metrics["reward/ropd/teacher_rubric_score_mean"] = _mean(ropd_teacher_rubric_scores)
     if ropd_teacher_answer_scores:
         metrics["reward/ropd/teacher_answer_score_mean"] = _mean(ropd_teacher_answer_scores)
     if ropd_train_scores:
@@ -199,6 +218,8 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics[f"reward/ropd/final_answer_quality_{quality}_rate"] = count / total
     if ropd_teacher_below_student_seen:
         metrics["reward/ropd/teacher_below_student_rate"] = ropd_teacher_below_student / total
+    if ropd_env_success_for_reward_seen:
+        metrics["reward/ropd/env_success_for_reward_rate"] = ropd_env_success_for_reward / total
     _reward_call_metrics(metrics, role="judge", calls=judge_calls, sample_count=total)
     _reward_call_metrics(metrics, role="rubric", calls=rubric_calls, sample_count=total)
     return metrics
