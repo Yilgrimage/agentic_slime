@@ -89,7 +89,7 @@ RESOLVED_TRAIN_EXTRA_KEYS=(
   AGENT_ENV_CONFIG_OVERRIDES_JSON AGENT_ENV_MAX_CHECKPOINTS
   AGENT_ENV_ROLLOUT_DUMP_N AGENT_ENV_ROLLOUT_DUMP_DISCARD_N AGENT_ENV_ROLLOUT_DUMP_FORMAT_N
   AGENT_ENV_ROLLOUT_DUMP_TOTAL_N AGENT_ENV_ROLLOUT_DUMP_TRACE
-  AGENT_ENV_ROPD_TEACHER_INDEX_PATH
+  AGENT_ENV_ROPD_TEACHER_INDEX_PATH AGENT_ENV_LUFFY_TEACHER_INDEX_PATH
   AGENT_ENV_ROPD_DUMP_N AGENT_ENV_ROPD_DUMP_TOTAL_N AGENT_ENV_ROPD_DUMP_DIR
 )
 
@@ -878,21 +878,61 @@ start_train_driver() {
     quote_assign BENCH_LOG "${bench_log}"
     quote_assign BENCH_PYTHON "${BENCH_PYTHON:-${SLIME_PYTHON}}"
     quote_assign RUN_BENCH "${OPS_SCRIPTS_DIR}/run_bench.sh"
+    quote_assign AUX_ENDPOINT_MANAGER "${REPO_DIR}/scripts/utils/aux_endpoint.sh"
     quote_assign_vars \
       BENCH_ON_TRAIN_EXIT ROOT_DIR LOCAL_ENVS_DIR NODES_FILE NODE_INDICES \
+      AUX_ENV_FILE AUX_NODES_FILE AUX_NODE_INDICES \
+      AUX_ENDPOINT_STARTED_LOCAL AUX_ENDPOINT_NODES_FILE AUX_ENDPOINT_NODE_INDICES AUX_ENDPOINT_SESSION \
       SSH_USER SSH_PORT SSH_KEY SSH_IPV6 SSH_JUMP
     cat <<'EOF'
+run_bench_start() {
+  local nodes_file=$1
+  local node_selector=${2:-}
+  [ -n "${nodes_file}" ] || return 0
+  [ -f "${RUN_BENCH}" ] || return 0
+  bench_args=(start --nodes "${nodes_file}")
+  [ -z "${node_selector}" ] || bench_args+=(--node "${node_selector}")
+  ROOT_DIR="${ROOT_DIR}" LOCAL_ENVS_DIR="${LOCAL_ENVS_DIR}" BENCH_PYTHON="${BENCH_PYTHON}" SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" \
+    SSH_KEY="${SSH_KEY}" SSH_IPV6="${SSH_IPV6}" SSH_JUMP="${SSH_JUMP}" \
+    bash "${RUN_BENCH}" "${bench_args[@]}"
+}
+
+stop_aux_endpoint_if_local() {
+  [ -n "${AUX_ENV_FILE:-}" ] || return 0
+  [ -f "${AUX_ENV_FILE}" ] || return 0
+  [ -f "${AUX_ENDPOINT_MANAGER}" ] || return 0
+  set -a
+  # shellcheck disable=SC1090
+  source "${AUX_ENV_FILE}"
+  set +a
+  [ "${AUX_ENDPOINT_STARTED_LOCAL:-0}" = "1" ] || return 0
+  echo "[$(date -Is)] stopping aux endpoint from ${AUX_ENV_FILE}"
+  aux_args=(stop --env-file "${AUX_ENV_FILE}")
+  aux_nodes="${AUX_ENDPOINT_NODES_FILE:-${AUX_NODES_FILE:-}}"
+  aux_selector="${AUX_ENDPOINT_NODE_INDICES:-${AUX_NODE_INDICES:-}}"
+  [ -z "${aux_nodes}" ] || aux_args+=(--nodes "${aux_nodes}")
+  [ -z "${aux_selector}" ] || aux_args+=(--node-index "${aux_selector}")
+  ROOT_DIR="${ROOT_DIR}" LOCAL_ENVS_DIR="${LOCAL_ENVS_DIR}" SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" \
+    SSH_KEY="${SSH_KEY}" SSH_IPV6="${SSH_IPV6}" SSH_JUMP="${SSH_JUMP}" \
+    bash "${AUX_ENDPOINT_MANAGER}" "${aux_args[@]}"
+}
+
 finish() {
   local code=$?
   printf "exit_code=%s\nend_time=%s\n" "${code}" "$(date -Is)" > "${STATUS_FILE}"
-  if [ "${BENCH_ON_TRAIN_EXIT}" = "1" ] && [ -n "${NODES_FILE}" ] && [ -f "${RUN_BENCH}" ]; then
+  {
+    stop_aux_endpoint_if_local
+  } >> "${BENCH_LOG}" 2>&1 || true
+  if [ "${BENCH_ON_TRAIN_EXIT}" = "1" ] && [ -f "${RUN_BENCH}" ]; then
     {
-      echo "[$(date -Is)] train exited code=${code}; running run_bench start --nodes ${NODES_FILE} --node ${NODE_INDICES}"
-      bench_args=(start --nodes "${NODES_FILE}")
-      [ -z "${NODE_INDICES}" ] || bench_args+=(--node "${NODE_INDICES}")
-      ROOT_DIR="${ROOT_DIR}" LOCAL_ENVS_DIR="${LOCAL_ENVS_DIR}" BENCH_PYTHON="${BENCH_PYTHON}" SSH_USER="${SSH_USER}" SSH_PORT="${SSH_PORT}" \
-        SSH_KEY="${SSH_KEY}" SSH_IPV6="${SSH_IPV6}" SSH_JUMP="${SSH_JUMP}" \
-        bash "${RUN_BENCH}" "${bench_args[@]}"
+      echo "[$(date -Is)] train exited code=${code}; starting bench on train nodes=${NODES_FILE:-} selector=${NODE_INDICES:-}"
+      run_bench_start "${NODES_FILE:-}" "${NODE_INDICES:-}"
+      aux_nodes="${AUX_ENDPOINT_NODES_FILE:-${AUX_NODES_FILE:-}}"
+      aux_selector="${AUX_ENDPOINT_NODE_INDICES:-${AUX_NODE_INDICES:-}}"
+      if [ "${AUX_ENDPOINT_STARTED_LOCAL:-0}" = "1" ] && [ -n "${aux_nodes}" ]; then
+        echo "[$(date -Is)] starting bench on aux nodes=${aux_nodes} selector=${aux_selector:-}"
+        run_bench_start "${aux_nodes}" "${aux_selector:-}"
+      fi
     } >> "${BENCH_LOG}" 2>&1 || true
   fi
   exit "${code}"
