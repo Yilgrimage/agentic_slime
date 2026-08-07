@@ -88,6 +88,29 @@ Use `EVAL_SPLITS` and `EVAL_PROMPT_NUM_TASKS` only as explicit experiment
 overrides. Formal comparisons must evaluate the full intended split and record
 the generated prompt-data files with the run artifacts.
 
+For checkpoint sweeps, use the same launcher in eval-sweep mode rather than
+writing a wrapper. Env-specific eval datasets, custom generate functions, and
+sampling defaults live in `examples/agent_env/<env>/eval_config.yaml`; the
+sweep launcher only fans out checkpoints to nodes and applies explicit
+command-line overrides.
+
+Example:
+
+```bash
+EVAL_SOURCE_RUN=/mnt/bn/.../runs/Qwen3-4B_appworld_ropd_grpo/run-name \
+EVAL_CKPT_STEPS="49 99 149 199" \
+EVAL_NODE_INDICES="0 1 2 3" \
+bash scripts/utils/launch_agentic_training.sh \
+  configs/agent_env/runs/appworld_qwen3_4b_grpo_fullasync_4x8_success.env \
+  --eval-sweep
+```
+
+This starts one native eval run per checkpoint. Each child run still goes
+through `launch_agentic_training.sh`, generates eval prompt-data, loads the
+checkpoint via `LOAD_DIR`, and writes resolved configs and logs under the sweep
+directory. Override `EVAL_SPLITS`, `EVAL_ROOT`, or specific `EVAL_*` variables
+only when the env eval config is intentionally insufficient.
+
 ## Rules
 
 - Do not create a copied profile to change one scalar for a one-off run. Change

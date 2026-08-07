@@ -20,6 +20,7 @@ RUN_PROFILE=${RUN_PROFILE:-}
 INTERNAL_ROLE=
 RESOLVED_CONFIG=
 DRY_RUN=0
+EVAL_SWEEP=0
 
 ENV_NAME=${ENV_NAME:-}
 ENV_CONFIG=${ENV_CONFIG:-}
@@ -122,10 +123,13 @@ usage() {
   cat <<'EOF'
 Usage:
   launch_agentic_training.sh <run-profile.env> [--dry-run]
+  launch_agentic_training.sh <run-profile.env> --eval-sweep
   launch_agentic_training.sh --internal-role head --resolved RUN_ROOT/logs/resolved_launch.env
   launch_agentic_training.sh --internal-role worker --resolved RUN_ROOT/logs/resolved_launch.env --head-address HOST
 
 The public entrypoint resolves profiles once; internal roles consume resolved_launch.env.
+For --eval-sweep, set EVAL_SOURCE_RUN and EVAL_CKPT_STEPS. Optionally set
+EVAL_NODE_INDICES, EVAL_SPLITS, and EVAL_ROOT.
 EOF
 }
 
@@ -140,6 +144,7 @@ while [ $# -gt 0 ]; do
     --internal-role) INTERNAL_ROLE=$2; shift 2 ;;
     --resolved) RESOLVED_CONFIG=$2; shift 2 ;;
     --head-address) HEAD_ADDRESS=$2; shift 2 ;;
+    --eval-sweep) EVAL_SWEEP=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
@@ -377,6 +382,7 @@ safe_label() {
   value=${value//:/_}
   value=${value//./_}
   value=${value//\//_}
+  value=${value// /_}
   printf '%s\n' "${value}"
 }
 
@@ -1197,9 +1203,144 @@ main_launch() {
   trap - EXIT
 }
 
+split_words() {
+  printf '%s\n' "$1" | tr ',' ' '
+}
+
+resolve_eval_ckpt_token() {
+  local token=$1
+  EVAL_CKPT_ITER=
+  EVAL_CKPT_STEP=
+  EVAL_CKPT_DIR=
+
+  if [ -d "${token}" ]; then
+    EVAL_CKPT_DIR=$(cd "${token}" && pwd -P)
+    EVAL_CKPT_ITER=$(basename "${EVAL_CKPT_DIR}")
+  elif [[ "${token}" =~ ^iter_[0-9]{7}$ ]]; then
+    EVAL_CKPT_ITER="${token}"
+    EVAL_CKPT_DIR="${EVAL_SOURCE_RUN}/checkpoints/${EVAL_CKPT_ITER}"
+  elif [[ "${token}" =~ ^[0-9]+$ ]]; then
+    EVAL_CKPT_STEP=$((10#${token}))
+    EVAL_CKPT_ITER=$(printf 'iter_%07d' "${EVAL_CKPT_STEP}")
+    EVAL_CKPT_DIR="${EVAL_SOURCE_RUN}/checkpoints/${EVAL_CKPT_ITER}"
+  else
+    echo "Invalid eval checkpoint token: ${token}" >&2
+    echo "Use a step number, iter_0000000 name, or checkpoint directory." >&2
+    exit 1
+  fi
+
+  if [[ "${EVAL_CKPT_ITER}" =~ ^iter_([0-9]{7})$ ]]; then
+    EVAL_CKPT_STEP=$((10#${BASH_REMATCH[1]}))
+  else
+    echo "Checkpoint directory name must be iter_0000000: ${EVAL_CKPT_DIR}" >&2
+    exit 1
+  fi
+  [ -d "${EVAL_CKPT_DIR}" ] || { echo "Missing checkpoint: ${EVAL_CKPT_DIR}" >&2; exit 1; }
+}
+
+main_eval_sweep() {
+  load_run_profiles
+  ENV_NAME=${ENV_NAME:?Set ENV_NAME in run profile}
+  NODES_FILE=$(resolve_path "${NODES_FILE:?Set NODES_FILE through topology profile}")
+
+  EVAL_SOURCE_RUN=${EVAL_SOURCE_RUN:-${SOURCE_RUN:-}}
+  EVAL_CKPT_STEPS=${EVAL_CKPT_STEPS:-${EVAL_CKPT_LIST:-}}
+  [ -n "${EVAL_SOURCE_RUN}" ] || { echo "Set EVAL_SOURCE_RUN to the training run directory." >&2; exit 1; }
+  [ -n "${EVAL_CKPT_STEPS}" ] || { echo "Set EVAL_CKPT_STEPS, for example: 49 99 149 199." >&2; exit 1; }
+  EVAL_SOURCE_RUN=$(cd "${EVAL_SOURCE_RUN}" && pwd -P)
+  [ -d "${EVAL_SOURCE_RUN}/checkpoints" ] || { echo "Missing checkpoints dir: ${EVAL_SOURCE_RUN}/checkpoints" >&2; exit 1; }
+
+  local eval_splits="${EVAL_SPLITS:-}"
+  local eval_node_indices="${EVAL_NODE_INDICES:-${NODE_INDICES:-}}"
+  [ -n "${eval_node_indices}" ] || { echo "Set EVAL_NODE_INDICES or NODE_INDICES for eval sweep." >&2; exit 1; }
+
+  local steps nodes
+  read -r -a steps <<< "$(split_words "${EVAL_CKPT_STEPS}")"
+  read -r -a nodes <<< "$(split_words "${eval_node_indices}")"
+  [ "${#steps[@]}" -gt 0 ] || { echo "No eval checkpoints requested." >&2; exit 1; }
+  [ "${#nodes[@]}" -gt 0 ] || { echo "No eval nodes requested." >&2; exit 1; }
+  if [ "${#steps[@]}" -gt "${#nodes[@]}" ] && [ "${ALLOW_NODE_REUSE:-0}" != "1" ]; then
+    echo "EVAL_CKPT_STEPS has ${#steps[@]} entries but EVAL_NODE_INDICES has ${#nodes[@]}." >&2
+    echo "Use one node per checkpoint, or set ALLOW_NODE_REUSE=1 if reuse is intentional." >&2
+    exit 1
+  fi
+
+  local eval_splits_label
+  eval_splits_label=$(safe_label "${eval_splits:-default}")
+  local eval_root="${EVAL_ROOT:-${EVAL_SOURCE_RUN}/eval/${eval_splits_label}/native_ckpt_sweep_$(date +%Y%m%dT%H%M%S)}"
+  local eval_project="${EVAL_PROJECT:-${MODEL_BASENAME:-model}_${ENV_NAME}_eval}"
+  local eval_name_prefix="${EVAL_NAME_PREFIX:-$(basename "${EVAL_SOURCE_RUN}")}"
+  mkdir -p "${eval_root}/logs" "${eval_root}/load_views"
+  mkdir -p "${EVAL_SOURCE_RUN}/eval/${eval_splits_label}"
+  printf '%s\n' "${eval_root}" > "${EVAL_SOURCE_RUN}/eval/${eval_splits_label}/latest_native_ckpt_sweep_path.txt"
+
+  local i token node load_view run_root out
+  for i in "${!steps[@]}"; do
+    token=${steps[$i]}
+    node=${nodes[$((i % ${#nodes[@]}))]}
+    resolve_eval_ckpt_token "${token}"
+
+    load_view="${eval_root}/load_views/${EVAL_CKPT_ITER}"
+    rm -rf "${load_view}"
+    mkdir -p "${load_view}"
+    ln -s "${EVAL_CKPT_DIR}" "${load_view}/${EVAL_CKPT_ITER}"
+    printf '%s\n' "${EVAL_CKPT_STEP}" > "${load_view}/latest_checkpointed_iteration.txt"
+
+    run_root="${eval_root}/${EVAL_CKPT_ITER}"
+    mkdir -p "${run_root}/logs"
+    out="${eval_root}/logs/launcher_node${node}_${EVAL_CKPT_ITER}.out"
+    echo "Launching native eval ${EVAL_CKPT_ITER} on node ${node}; log=${out}"
+    if [ "${DRY_RUN}" = "1" ]; then
+      echo "+ NODE_INDICES=${node} LOAD_DIR=${load_view} RUN_ROOT=${run_root} ${SCRIPT_DIR}/launch_agentic_training.sh ${RUN_PROFILE_PATH} [native eval-only]"
+      continue
+    fi
+    local child_cmd=(
+      env -u LOG_DIR -u SAVE_DIR -u WANDB_DIR
+      "ROOT_DIR=${ROOT_DIR}"
+      "REPO_DIR=${REPO_DIR}"
+      "NODES_FILE=${NODES_FILE}"
+      "NODE_INDICES=${node}"
+      "RUN_ROOT=${run_root}"
+      "EXP_PROJECT=${eval_project}"
+      "EXP_NAME=${eval_name_prefix}-${EVAL_CKPT_ITER}-${eval_splits_label}-native-node${node}"
+      "LOAD_DIR=${load_view}"
+      TOTAL_NUM_STEPS=0 NUM_STEPS=0 NUM_ROLLOUT=0 LR_DECAY_ITERS=1
+      AGENT_ENV_TRAIN_LOOP=sync COLOCATE=1
+      "ACTOR_NUM_NODES=${EVAL_ACTOR_NUM_NODES:-1}"
+      "ACTOR_GPUS=${EVAL_ACTOR_GPUS:-8}"
+      "ROLLOUT_GPUS=${EVAL_ROLLOUT_GPUS:-8}"
+      "NUM_GPUS=${EVAL_NUM_GPUS:-8}"
+      "TP_SIZE=${EVAL_TP_SIZE:-8}"
+      "CP_SIZE=${EVAL_CP_SIZE:-1}"
+      "EVAL_INTERVAL=${EVAL_INTERVAL:-1}"
+      "ENABLE_WANDB=${EVAL_ENABLE_WANDB:-0}"
+      "USE_WANDB=${EVAL_USE_WANDB:-${EVAL_ENABLE_WANDB:-0}}"
+      NO_LOAD_OPTIM=1 NO_LOAD_RNG=1 FINETUNE=1
+      BENCH_ON_TRAIN_EXIT=1 RESET_TRAIN_RUNTIME_ON_START=1
+    )
+    [ -z "${eval_splits}" ] || child_cmd+=("EVAL_SPLITS=${eval_splits}")
+    [ -z "${EVAL_MAX_RESPONSE_LEN:-}" ] || child_cmd+=("EVAL_MAX_RESPONSE_LEN=${EVAL_MAX_RESPONSE_LEN}")
+    [ -z "${EVAL_TEMPERATURE:-}" ] || child_cmd+=("EVAL_TEMPERATURE=${EVAL_TEMPERATURE}")
+    [ -z "${EVAL_TOP_P:-}" ] || child_cmd+=("EVAL_TOP_P=${EVAL_TOP_P}")
+    [ -z "${EVAL_TOP_K:-}" ] || child_cmd+=("EVAL_TOP_K=${EVAL_TOP_K}")
+    child_cmd+=(bash "${SCRIPT_DIR}/launch_agentic_training.sh" "${RUN_PROFILE_PATH}")
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "${child_cmd[@]}" > "${out}" 2>&1 < /dev/null &
+    else
+      nohup "${child_cmd[@]}" > "${out}" 2>&1 < /dev/null &
+    fi
+    echo $! > "${run_root}/launcher.pid"
+  done
+  echo "EVAL_ROOT=${eval_root}"
+}
+
 case "${INTERNAL_ROLE}" in
   "")
-    main_launch
+    if [ "${EVAL_SWEEP}" = "1" ]; then
+      main_eval_sweep
+    else
+      main_launch
+    fi
     ;;
   head)
     [ -n "${RESOLVED_CONFIG}" ] || { echo "--resolved is required for internal head" >&2; exit 1; }

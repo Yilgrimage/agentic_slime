@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _WANDB_REWARD_METRICS_DEFINED = False
 _GENERATED_ENV_PREFIX = "agent_env/generated/env/"
@@ -381,16 +384,70 @@ def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_ext
     return True
 
 
+def _sample_response_length(sample: Any) -> float:
+    for attr in ("effective_response_length", "response_length"):
+        value = _float_or_none(getattr(sample, attr, None))
+        if value is not None:
+            return value
+    tokens = getattr(sample, "tokens", None)
+    return float(len(tokens)) if tokens is not None else 0.0
+
+
+def _sample_is_truncated(sample: Any) -> bool:
+    status = getattr(sample, "status", None)
+    name = str(getattr(status, "name", status))
+    return name.upper() == "TRUNCATED"
+
+
+def _eval_generation_metrics(samples: list[Any]) -> dict[str, float]:
+    from slime.utils.metric_utils import compute_statistics, dict_add_prefix, has_repetition
+
+    if not samples:
+        return {}
+    response_lengths = [_sample_response_length(sample) for sample in samples]
+    metrics = dict_add_prefix(compute_statistics(response_lengths), "response_len/")
+    metrics["repetition_frac"] = _mean([float(has_repetition(str(getattr(sample, "response", "") or ""))) for sample in samples])
+    metrics["truncated_ratio"] = _mean([float(_sample_is_truncated(sample)) for sample in samples])
+    return metrics
+
+
 def log_eval_rollout_data_for_env(prefix: str, rollout_id, args, data, extra_metrics) -> bool:
-    if extra_metrics is None:
-        return False
+    from slime.utils import logging_utils
+    from slime.utils.metric_utils import compute_pass_rate, compute_rollout_step, dict_add_prefix
+
+    log_dict = {**(extra_metrics or {})}
     for name, info in data.items():
+        rewards = info.get("rewards") or []
+        if rewards:
+            log_dict[f"eval/{name}"] = sum(rewards) / len(rewards)
+
         samples = info.get("samples") or []
-        for key, value in environment_metrics(samples, prefix=prefix).items():
-            extra_metrics[f"eval/{name}/{key.removeprefix(prefix + '/')}"] = value
-        for key, value in reward_metrics(samples).items():
-            extra_metrics[f"eval/{name}/{key}"] = value
-    return False
+        if samples:
+            log_dict |= dict_add_prefix(_eval_generation_metrics(samples), f"eval/{name}/")
+            for key, value in environment_metrics(samples, prefix=prefix).items():
+                log_dict[f"eval/{name}/{key.removeprefix(prefix + '/')}"] = value
+            for key, value in reward_metrics(samples).items():
+                log_dict[f"eval/{name}/{key}"] = value
+
+        truncated = info.get("truncated")
+        if truncated:
+            log_dict[f"eval/{name}-truncated_ratio"] = sum(truncated) / len(truncated)
+
+        if rewards and bool(getattr(args, "log_passrate", False)):
+            log_dict |= dict_add_prefix(
+                compute_pass_rate(
+                    flat_rewards=rewards,
+                    group_size=getattr(args, "n_samples_per_eval_prompt", 1),
+                ),
+                f"eval/{name}-",
+            )
+
+    logger.info("eval %s: %s", rollout_id, log_dict)
+
+    step = compute_rollout_step(args, rollout_id)
+    log_dict["eval/step"] = step
+    logging_utils.log(args, log_dict, step_key="eval/step")
+    return True
 
 
 def _define_reward_wandb_metrics(args: Any) -> None:
