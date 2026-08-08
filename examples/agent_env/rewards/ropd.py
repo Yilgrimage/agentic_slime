@@ -1909,10 +1909,35 @@ def _validate_reward_config(args: Any) -> None:
     return None
 
 
+def _is_hard_discard_sample(sample: Sample) -> bool:
+    sample_metadata = metadata(sample)
+    if sample.status == Sample.Status.ABORTED:
+        return True
+    if bool(getattr(sample, "remove_sample", False)) or bool(sample_metadata.get("discard_sample", False)):
+        return True
+    return False
+
+
+def _hard_discard_details(sample: Sample) -> dict[str, Any]:
+    sample_metadata = metadata(sample)
+    return {
+        "status": str(getattr(sample.status, "value", sample.status)),
+        "remove_sample": bool(getattr(sample, "remove_sample", False)),
+        "discard_sample": bool(sample_metadata.get("discard_sample", False)),
+        "discard_reason": sample_metadata.get("discard_reason") or "",
+        "error": sample_metadata.get("error") or "",
+    }
+
+
 def _env_success_for_shaping(sample: Sample) -> bool:
     sample_metadata = metadata(sample)
     if "env_success" not in sample_metadata:
-        raise ValueError("reward.ropd.schema_mode=rubric_shaping requires sample.metadata.env_success")
+        raise ValueError(
+            "reward.ropd.schema_mode=rubric_shaping requires sample.metadata.env_success "
+            f"for active sample index={sample.index} group_index={sample.group_index} "
+            f"status={getattr(sample.status, 'value', sample.status)} "
+            f"discard_reason={sample_metadata.get('discard_reason')!r}"
+        )
     return bool(sample_metadata.get("env_success"))
 
 
@@ -2312,11 +2337,27 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
         raise RuntimeError("reward.impl=ropd requires reward.judge_mode=aux")
     _validate_reward_config(args)
 
-    buckets: dict[str, list[int]] = {}
+    results: list[RewardResult | None] = [None] * len(samples)
+    active_indices: list[int] = []
     for idx, sample in enumerate(samples):
+        if _is_hard_discard_sample(sample):
+            results[idx] = _fallback_result(
+                args,
+                sample,
+                "discarded_sample",
+                "discarded",
+                details=_hard_discard_details(sample),
+            )
+            continue
+        if _schema_mode(args) == "rubric_shaping":
+            _env_success_for_shaping(sample)
+        active_indices.append(idx)
+
+    buckets: dict[str, list[int]] = {}
+    for idx in active_indices:
+        sample = samples[idx]
         buckets.setdefault(_join_value(args, sample), []).append(idx)
 
-    results: list[RewardResult | None] = [None] * len(samples)
     bucket_items = list(buckets.items())
     rubric_infos = await asyncio.gather(
         *[
