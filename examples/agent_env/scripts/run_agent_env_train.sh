@@ -600,6 +600,11 @@ case "${USE_CHECKPOINT_OPT_PARAM_SCHEDULER:-0}" in
     CKPT_ARGS+=(--use-checkpoint-opt-param-scheduler)
     ;;
 esac
+case "${OVERRIDE_OPT_PARAM_SCHEDULER:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    CKPT_ARGS+=(--override-opt-param-scheduler)
+    ;;
+esac
 USE_KL_LOSS=${USE_KL_LOSS:-0}
 KL_LOSS_ENABLED=0
 if is_true_value "${USE_KL_LOSS}"; then
