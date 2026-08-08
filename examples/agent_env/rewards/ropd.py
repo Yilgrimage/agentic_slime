@@ -774,6 +774,18 @@ def _role_api_key_path(args: Any, role: str) -> str | None:
     return str(resolve_path(args, path)) if path else None
 
 
+def _role_endpoint_pool_path(args: Any, role: str) -> str | None:
+    upper = role.upper()
+    for key in (f"AUX_{upper}_POOL_PATH", f"AUX_{upper}_ENDPOINT_POOL_PATH", "AUX_ENDPOINT_POOL_PATH"):
+        path = runtime_env(args, key, "").strip()
+        if path:
+            return str(resolve_path(args, path))
+    value = _role_cfg(args, role, "endpoint_pool_path", None)
+    if value:
+        return str(resolve_path(args, value))
+    return None
+
+
 def _role_endpoint(args: Any, role: str) -> dict[str, str]:
     upper = role.upper()
     values: dict[str, str] = {}
@@ -1968,6 +1980,7 @@ async def _rubric_for_bucket(
             prompt,
             system_prompt=RUBRIC_SYSTEM_PROMPT,
             api_key_path=_role_api_key_path(args, "rubric"),
+            endpoint_pool_path=_role_endpoint_pool_path(args, "rubric"),
             **_role_request_options(args, "rubric", default_max_tokens=32768),
             **_role_endpoint(args, "rubric"),
         )
@@ -2180,6 +2193,7 @@ async def _score_bucket(
             prompt,
             system_prompt=JUDGE_SYSTEM_PROMPT,
             api_key_path=_role_api_key_path(args, "judge"),
+            endpoint_pool_path=_role_endpoint_pool_path(args, "judge"),
             **_role_request_options(args, "judge", default_max_tokens=32768),
             **_role_endpoint(args, "judge"),
         )
