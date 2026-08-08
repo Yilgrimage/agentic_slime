@@ -10,7 +10,6 @@ ropd:
   teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
   teacher_index_keys:
     - task_id
-    - task_index
   teacher_answer_keys:
     - teacher_trace
     - teacher_tool_trace

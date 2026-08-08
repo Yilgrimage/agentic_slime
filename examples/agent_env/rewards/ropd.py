@@ -924,8 +924,9 @@ def _candidate_values_from_mapping(mapping: dict[str, Any], keys: list[str]) -> 
 
 def _teacher_index_key_candidates(args: Any, sample: Sample) -> list[str]:
     sample_metadata = metadata(sample)
+    configured_keys = _cfg(args, "teacher_index_keys", None)
     keys = _list_value(
-        _cfg(args, "teacher_index_keys", None),
+        configured_keys,
         (
             "teacher_trace_key",
             "teacher_index_key",
@@ -945,9 +946,10 @@ def _teacher_index_key_candidates(args: Any, sample: Sample) -> list[str]:
     source_row = sample_metadata.get("source_row")
     if isinstance(source_row, dict):
         candidates.extend(_candidate_values_from_mapping(source_row, keys))
-    sample_index = getattr(sample, "index", None)
-    if sample_index is not None:
-        candidates.append(str(sample_index))
+    if configured_keys in (None, "", []):
+        sample_index = getattr(sample, "index", None)
+        if sample_index is not None:
+            candidates.append(str(sample_index))
     join_value = _join_value(args, sample)
     if join_value:
         candidates.append(join_value)

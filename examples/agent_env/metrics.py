@@ -241,6 +241,7 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     format_error_counts = []
     max_response_tokens_hit_counts = []
     success_count = 0
+    env_scores = []
     env_rewards = []
     user_model_call_counts = []
     user_model_usage_totals: list[dict[str, Any]] = []
@@ -256,6 +257,8 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         format_error_counts.append(format_errors)
         max_response_tokens_hit_counts.append(max_response_tokens_hits)
         success_count += int(bool(metadata.get("env_success", False)))
+        if "env_score" in metadata:
+            env_scores.append(float(metadata["env_score"]))
         if "env_reward" in metadata:
             env_rewards.append(float(metadata["env_reward"]))
         usage_totals = _as_dict(metadata.get("user_model_usage_totals"))
@@ -286,6 +289,8 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         f"{prefix}/success_rate": success_count / len(real_samples),
         f"{prefix}/turn_count_mean": total_turns / len(real_samples),
     }
+    if env_scores:
+        metrics[f"{prefix}/env_score_mean"] = sum(env_scores) / len(env_scores)
     if env_rewards:
         metrics[f"{prefix}/env_reward_mean"] = sum(env_rewards) / len(env_rewards)
     if user_model_call_counts:

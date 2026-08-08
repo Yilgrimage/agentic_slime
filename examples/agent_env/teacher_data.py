@@ -101,14 +101,16 @@ def teacher_index_key_candidates(
     join_value: str | None = None,
 ) -> list[str]:
     sample_metadata = metadata(sample)
-    keys = list_value(config_value(args, config_prefix, "teacher_index_keys", None), DEFAULT_TEACHER_INDEX_KEYS)
+    configured_keys = config_value(args, config_prefix, "teacher_index_keys", None)
+    keys = list_value(configured_keys, DEFAULT_TEACHER_INDEX_KEYS)
     candidates = candidate_values_from_mapping(sample_metadata, keys)
     source_row = sample_metadata.get("source_row")
     if isinstance(source_row, dict):
         candidates.extend(candidate_values_from_mapping(source_row, keys))
-    sample_index = getattr(sample, "index", None)
-    if sample_index is not None:
-        candidates.append(str(sample_index))
+    if configured_keys in (None, "", []):
+        sample_index = getattr(sample, "index", None)
+        if sample_index is not None:
+            candidates.append(str(sample_index))
     if join_value:
         candidates.append(join_value)
     return list(dict.fromkeys(value for value in candidates if value))

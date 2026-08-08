@@ -10,7 +10,6 @@ ropd:
   teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/webshop_deepseek_v4_flash_bestofn_teacher_score1.jsonl
   teacher_index_keys:
     - task_id
-    - task_index
   teacher_answer_keys:
     - teacher_tool_trace
     - teacher_trace
