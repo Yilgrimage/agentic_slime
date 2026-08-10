@@ -1564,7 +1564,9 @@ def _is_hard_discard_sample(sample: Sample) -> bool:
         return True
     if bool(getattr(sample, "remove_sample", False)) or bool(sample_metadata.get("discard_sample", False)):
         return True
-    if sample.loss_mask is not None and sum(int(value) for value in sample.loss_mask) <= 0:
+    off_policy_mask = getattr(sample, "off_policy_loss_mask", None)
+    off_policy_mask_sum = sum(int(value) for value in off_policy_mask) if off_policy_mask is not None else 0
+    if sample.loss_mask is not None and sum(int(value) for value in sample.loss_mask) <= 0 and off_policy_mask_sum <= 0:
         return True
     return False
 

@@ -8,7 +8,7 @@ from slime.rollout.filter_hub.base_types import DynamicFilterOutput
 from slime.utils.types import Sample
 
 from examples.agent_env import credit_assignment
-from examples.agent_env.rollout import arg, metadata
+from examples.agent_env.rollout import _is_hard_discard_sample, arg, metadata
 
 
 def _float_value(value: Any, default: float = 0.0) -> float:
@@ -27,6 +27,15 @@ def _runtime_env(args: Any, name: str, default: str = "") -> str:
         value = train_env_vars.get(name)
         if value:
             return str(value)
+    return default
+
+
+def _runtime_bool(args: Any, name: str, default: bool) -> bool:
+    value = _runtime_env(args, name, "1" if default else "0").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
     return default
 
 
@@ -53,33 +62,6 @@ def _reward_value(args: Any, sample: Sample) -> float:
     return 0.0
 
 
-def _off_policy_mask_sum(sample: Sample) -> int:
-    mask = getattr(sample, "off_policy_loss_mask", None)
-    if mask is None:
-        return 0
-    return sum(int(value) for value in mask)
-
-
-def _is_off_policy_sample(sample: Sample) -> bool:
-    sample_metadata = metadata(sample)
-    return bool(sample_metadata.get("off_policy_sample", False)) or _off_policy_mask_sum(sample) > 0
-
-
-def _is_hard_discard_sample(sample: Sample) -> bool:
-    sample_metadata = metadata(sample)
-    if sample.status == Sample.Status.ABORTED:
-        return True
-    if bool(getattr(sample, "remove_sample", False)) or bool(sample_metadata.get("discard_sample", False)):
-        return True
-    if (
-        sample.loss_mask is not None
-        and sum(int(value) for value in sample.loss_mask) <= 0
-        and _off_policy_mask_sum(sample) <= 0
-    ):
-        return True
-    return False
-
-
 def check_reward_nonzero_std(args: Any, samples: list[Sample], **_: Any) -> DynamicFilterOutput:
     """Drop groups that cannot produce useful GRPO signal or safe GLM padding."""
 
@@ -91,6 +73,9 @@ def check_reward_nonzero_std(args: Any, samples: list[Sample], **_: Any) -> Dyna
     min_valid_fraction = _float_value(_runtime_env(args, "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "0.5"), 0.5)
     if len(active) <= group_size * min_valid_fraction:
         return DynamicFilterOutput(keep=False, reason="too_few_active_samples")
+
+    if not _runtime_bool(args, "AGENT_ENV_DYNAMIC_DROP_ZERO_STD", True):
+        return DynamicFilterOutput(keep=True, reason=None)
 
     rewards = [_reward_value(args, sample) for sample in active]
     mean = sum(rewards) / len(rewards)

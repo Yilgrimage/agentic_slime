@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import math
+import os
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from slime.utils.types import Sample
 
+from examples.agent_env import dump
 from examples.agent_env.rollout import arg, metadata
 from examples.agent_env.rewards.config import reward_cfg_path
 from examples.agent_env.rewards.extractors import bool_value, float_value, int_value
@@ -54,6 +59,24 @@ def step_index_base(args: Any) -> int:
     if value not in (0, 1):
         raise ValueError("reward.credit_assignment.step_index_base must be 0 or 1")
     return value
+
+
+def _dump_per_step_limit(args: Any) -> int:
+    return dump.int_runtime_env(args, "AGENT_ENV_CREDIT_DUMP_N", "0")
+
+
+def _dump_total_limit(args: Any) -> int:
+    return dump.int_runtime_env(args, "AGENT_ENV_CREDIT_DUMP_TOTAL_N", "0")
+
+
+def _dump_dir(args: Any) -> Path:
+    raw = dump.runtime_env(args, "AGENT_ENV_CREDIT_DUMP_DIR", "").strip()
+    if raw:
+        return Path(raw)
+    run_root = dump.runtime_env(args, "RUN_ROOT", "").strip()
+    if run_root:
+        return Path(run_root) / "reward_artifacts" / "credit_assignment"
+    return Path(os.getcwd()) / "reward_artifacts" / "credit_assignment"
 
 
 def _off_policy_mask_sum(sample: Sample) -> int:
@@ -180,6 +203,107 @@ def _segment_records_for_sample(args: Any, sample_index: int, sample: Sample) ->
     return records
 
 
+def _sample_identifier(sample: Sample) -> dict[str, Any]:
+    sample_metadata = metadata(sample)
+    return {
+        "index": getattr(sample, "index", None),
+        "group_index": getattr(sample, "group_index", None),
+        "rollout_id": getattr(sample, "rollout_id", None),
+        "task_id": sample_metadata.get("task_id"),
+        "task_ref": sample_metadata.get("task_ref"),
+        "data_source": sample_metadata.get("data_source"),
+    }
+
+
+def _credit_record_payload(
+    *,
+    args: Any,
+    sample_index: int,
+    sample: Sample,
+    records: list[SegmentCreditRecord],
+    advantages: list[float],
+) -> dict[str, Any]:
+    sample_metadata = metadata(sample)
+    rm_reward = sample_metadata.get("rm_reward") if isinstance(sample_metadata.get("rm_reward"), dict) else {}
+    raw = rm_reward.get("raw") if isinstance(rm_reward.get("raw"), dict) else {}
+    process_evidence = raw.get("process_step_evidence")
+    return {
+        "schema_version": "agent_env.credit_assignment_audit.v1",
+        "time": time.time(),
+        "pid": os.getpid(),
+        "dump_step": dump.sample_dump_step_label(sample),
+        "sample_index_in_batch": sample_index,
+        "sample": _sample_identifier(sample),
+        "is_student_train_sample": _is_student_train_sample(sample),
+        "response_length": len(advantages),
+        "rm_reward": {
+            "score": rm_reward.get("score"),
+            "source": rm_reward.get("source"),
+            "reason": raw.get("reward_reason") or raw.get("reason"),
+            "reward_score": raw.get("reward_score"),
+            "rubric_score": raw.get("rubric_score"),
+            "env_success_for_reward": raw.get("env_success_for_reward"),
+            "ropd_schema_mode": raw.get("ropd_schema_mode"),
+        },
+        "env": {
+            "env_success": sample_metadata.get("env_success"),
+            "env_score": sample_metadata.get("env_score"),
+            "env_reward": sample_metadata.get("env_reward"),
+        },
+        "credit_assignment": sample_metadata.get("credit_assignment"),
+        "step_marks": _sample_step_marks(sample),
+        "process_step_evidence": process_evidence if isinstance(process_evidence, list) else [],
+        "segments": [
+            {
+                "start": record.start,
+                "end": record.end,
+                "raw_step_value": record.value,
+                "advantage_value": advantages[record.start] if 0 <= record.start < len(advantages) else 0.0,
+                "marked": record.marked,
+            }
+            for record in records
+        ],
+    }
+
+
+def _maybe_dump_credit_assignment(
+    args: Any,
+    samples: list[Sample],
+    *,
+    sample_advantages: list[list[float]],
+    sample_records: list[list[SegmentCreditRecord]],
+) -> None:
+    per_step_limit = _dump_per_step_limit(args)
+    if per_step_limit <= 0:
+        return
+    out_dir = _dump_dir(args)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"credit_assignment_pid{os.getpid()}.jsonl"
+    total_limit = _dump_total_limit(args)
+    with out_path.open("a", encoding="utf-8") as handle:
+        for idx, sample in enumerate(samples):
+            slot = dump.reserve_dump_slot(
+                namespace="credit_assignment",
+                stage="mask",
+                dump_step=dump.sample_dump_step_label(sample),
+                per_step_limit=per_step_limit,
+                total_limit=total_limit,
+            )
+            if slot is None:
+                continue
+            index_in_step, total_index = slot
+            payload = _credit_record_payload(
+                args=args,
+                sample_index=idx,
+                sample=sample,
+                records=sample_records[idx],
+                advantages=sample_advantages[idx],
+            )
+            payload["index_in_step"] = index_in_step
+            payload["index"] = total_index
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
 def _group_indices(args: Any, samples: list[Sample]) -> dict[int, list[int]]:
     n_samples = max(1, int(arg(args, "n_samples_per_prompt", 1) or 1))
     grouped: dict[int, list[int]] = {}
@@ -213,9 +337,11 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
         return
 
     sample_advantages: list[list[float]] = []
+    sample_records: list[list[SegmentCreditRecord]] = []
     for sample in samples:
         response_length = int(getattr(sample, "response_length", 0) or 0)
         sample_advantages.append([0.0] * max(0, response_length))
+        sample_records.append([])
 
     cfg_clip = clip(args)
     for indices in _group_indices(args, samples).values():
@@ -225,6 +351,8 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
             if not _is_student_train_sample(sample):
                 continue
             records.extend(_segment_records_for_sample(args, idx, sample))
+        for record in records:
+            sample_records[record.sample_index].append(record)
         if len(records) <= 1:
             continue
         values = [record.value for record in records]
@@ -250,3 +378,5 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
             "response_length": len(values),
             "nonzero_token_rate": (nonzero / len(values)) if values else 0.0,
         }
+
+    _maybe_dump_credit_assignment(args, samples, sample_advantages=sample_advantages, sample_records=sample_records)
