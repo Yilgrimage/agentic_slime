@@ -4,7 +4,7 @@ source: score
 outcome: 10.0
 
 ropd:
-  schema_mode: rubric_shaping
+  schema_mode: ca_compact
   shaping_beta: 0.2
   join_key: task_id
   teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
@@ -14,19 +14,16 @@ ropd:
     - teacher_trace
     - teacher_tool_trace
     - teacher_full_trace_text
-  allow_online_rubric: true
   concurrency: 8
-  rubric_concurrency: 4
   judge_concurrency: 8
   max_attempts: 4
   rate_limit_backoff_s: 10
   retry_backoff_s: 1
   response_format: json_object
-  rubric_max_tokens: 8192
-  judge_max_tokens: 16384
+  judge_max_tokens: 4096
   answer_mode: trace
   strip_reasoning: true
-  strip_tool_call: 80
+  strip_tool_call: 256
   strip_tool_response: 120
   strip_assistant_response: true
   strip_system_prompt: true

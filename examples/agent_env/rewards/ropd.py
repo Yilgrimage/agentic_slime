@@ -41,6 +41,8 @@ ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION = "ropd.answer_process_rubric.v1"
 ANSWER_PROCESS_VERIFIER_SCHEMA_VERSION = "ropd.answer_process_compact_batch_verifier.v1"
 RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION = "ropd.rubric_shaping_rubric.v1"
 RUBRIC_SHAPING_VERIFIER_SCHEMA_VERSION = "ropd.rubric_shaping_batch_verifier.v1"
+CA_COMPACT_RUBRIC_SCHEMA_VERSION = "ropd.ca_compact_rubric.v1"
+CA_COMPACT_VERIFIER_SCHEMA_VERSION = "ropd.ca_compact_batch_verifier.v1"
 TEACHER_TRACE_FIELDS = (
     "teacher_tool_trace",
     "teacher_trace",
@@ -335,6 +337,74 @@ VERIFIER_SHAPING_PROMPT_TEMPLATE = """你是一名 agentic trajectory 评分专�
 - 只返回 JSON 对象本身。
 """
 
+CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-assignment judge。请一次性完成 behavior mining 和 step-index 标注。
+
+目标：为同一道任务生成少量 good/bad behavior，并立刻标出每条 trajectory 命中这些 behavior 的 Step 编号。
+
+# 关键口径
+- T0_REFERENCE 是高质量参考轨迹，但不保证完美；可以帮助发现 good behavior。
+- 不判断最终任务是否真实成功；最终成功由外部 env verifier 决定。你只评价可观察过程质量。
+- `complete_task()` 只是结束 episode。任何只显示 complete_task、fail、Execution successful、或没有可见具体 API/action 参数的 step，都不得作为 good behavior 命中。
+- 如果 step 文本被 `[truncated ...]` 裁到看不清实际 API/action、参数或证据来源，宁可不给 good hit。
+- good hit 必须能从该 Step 的可见 tool call / tool response 直接确认；不要根据意图文字、成功声明或隐含猜测标注。
+- bad hit 可以标注：无关/错误 API、编造结果、忽略 observation、重复无效动作、过早 complete_task、参数明显不合理。
+- 每条 behavior 必须可以通过具体 Step N 判断命中。
+- 只返回紧凑 JSON，不要 rationale，不要 evidence 句子，不要 Markdown。
+
+[Question]
+{question}
+
+[Trajectories]
+{answers}
+
+[Additional Scoring Instructions]
+{extra_scoring_instructions}
+
+# 输出格式
+返回一个 JSON object：
+```json
+{
+  "schema_version": "ropd.ca_compact_batch_verifier.v1",
+  "behaviors": [
+    {
+      "behavior_id": "g1",
+      "polarity": "good",
+      "description": "one concise observable behavior",
+      "weight": 1.0,
+      "hits_by_trajectory": [
+        {"trajectory_id": "T0_REFERENCE", "step_indices": [1, 3]},
+        {"trajectory_id": "S0_STUDENT", "step_indices": []}
+      ]
+    },
+    {
+      "behavior_id": "b1",
+      "polarity": "bad",
+      "description": "one concise observable failure behavior",
+      "weight": 1.0,
+      "hits_by_trajectory": [
+        {"trajectory_id": "T0_REFERENCE", "step_indices": []},
+        {"trajectory_id": "S0_STUDENT", "step_indices": [2]}
+      ]
+    }
+  ],
+  "trajectory_scores": [
+    {"trajectory_id": "T0_REFERENCE", "process_score": 0.0, "quality": "strong"}
+  ]
+}
+```
+
+# 输出约束
+- `schema_version` 必须严格等于 `ropd.ca_compact_batch_verifier.v1`。
+- 生成 3 到 8 条 behavior，good 和 bad 都至少 1 条。
+- `behavior_id` 必须以 `g` 或 `b` 开头并唯一；`polarity` 只能是 `good` 或 `bad`。
+- 每条 `hits_by_trajectory` 必须覆盖所有输入 trajectory_id。
+- Step 编号只能来自对应 trajectory 文本里的 `Step N`。
+- `process_score` 是 0 到 1 的粗略过程质量分；good hits 多且 bad hits 少则高。
+- `quality` 必须是 `strong`, `useful`, `partial`, `weak`, `invalid` 之一。
+- 输出字段只能是 schema 中出现的字段。
+- 只返回 JSON object，不要输出解释、Markdown 或其他文本。
+"""
+
 RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评估专家。你的任务是为同一道业务问题生成一套 answer-first 的共享评分细则。
 
 输入包含：
@@ -616,7 +686,7 @@ def _cfg_choice(args: Any, cfg_name: str, default: str, choices: set[str]) -> st
 
 def _schema_mode(args: Any) -> str:
     value = str(_cfg(args, "schema_mode", "binary") or "binary").strip().lower()
-    choices = {"binary", "answer_process_50_50", "rubric_shaping"}
+    choices = {"binary", "answer_process_50_50", "rubric_shaping", "ca_compact"}
     if value not in choices:
         raise ValueError(f"Unsupported reward.ropd.schema_mode={value!r}; expected one of {sorted(choices)}")
     return value
@@ -1464,17 +1534,37 @@ def _normalize_rubric_shaping_rubric(args: Any, payload: Any) -> dict[str, Any] 
     }
 
 
+def _ca_compact_rubric(args: Any) -> dict[str, Any]:
+    return {
+        "schema_version": CA_COMPACT_RUBRIC_SCHEMA_VERSION,
+        "maximum_score": 1.0,
+        "score_policy": {
+            "score_range": "0_to_1_process_score",
+            "env_success_overrides_reward": True,
+            "failure_reward_scale_beta": _rubric_shaping_beta(args),
+            "single_call_behavior_mining": True,
+        },
+    }
+
+
 def _normalize_rubric_for_mode(args: Any, payload: Any) -> dict[str, Any] | None:
     schema_mode = _schema_mode(args)
     if schema_mode == "answer_process_50_50":
         return _normalize_answer_process_rubric(args, payload)
     if schema_mode == "rubric_shaping":
         return _normalize_rubric_shaping_rubric(args, payload)
+    if schema_mode == "ca_compact":
+        if isinstance(payload, dict) and payload.get("schema_version") == CA_COMPACT_RUBRIC_SCHEMA_VERSION:
+            return _ca_compact_rubric(args)
+        return None
     return _normalize_rubric(payload)
 
 
 def _maximum_score(rubric: Any) -> float:
-    if isinstance(rubric, dict) and rubric.get("schema_version") == RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION:
+    if isinstance(rubric, dict) and rubric.get("schema_version") in {
+        RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION,
+        CA_COMPACT_RUBRIC_SCHEMA_VERSION,
+    }:
         return 1.0
     if isinstance(rubric, dict) and rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
         maximum_scores = rubric.get("maximum_scores")
@@ -1625,6 +1715,51 @@ def _anonymous_answer_items(
                 str(item["text"]),
             ),
         )
+    )
+
+
+def _trajectory_id(item: dict[str, Any]) -> str:
+    source = str(item.get("source") or "")
+    source_index = int(item.get("source_index", 0) or 0)
+    if source == "teacher":
+        return f"T{source_index}_REFERENCE"
+    if source == "student":
+        return f"S{source_index}_STUDENT"
+    return f"X{source_index}_UNKNOWN"
+
+
+def _render_ca_compact_trajectory_block(answer_items: tuple[dict[str, Any], ...]) -> str:
+    blocks = []
+    for item in answer_items:
+        blocks.append(
+            f"[{_trajectory_id(item)} | answer_index={item.get('answer_index')}]\n"
+            f"{item.get('text')}"
+        )
+    return "\n\n".join(blocks)
+
+
+def _build_ca_compact_verifier_prompt(
+    args: Any,
+    sample: Sample,
+    *,
+    answer_items: tuple[dict[str, Any], ...],
+) -> str:
+    question_max_chars = _cfg_int(args, "question_max_chars", 0)
+    answer_max_chars = _cfg_int(args, "verifier_answer_max_chars", 0)
+    limited_items = tuple(
+        {
+            **item,
+            "text": _limit_reward_text(args, item.get("text"), answer_max_chars, field="verifier_answer"),
+        }
+        for item in answer_items
+    )
+    return _render_template(
+        CA_COMPACT_VERIFIER_PROMPT_TEMPLATE,
+        {
+            "question": _limit_reward_text(args, _ropd_question(sample), question_max_chars, field="question"),
+            "answers": _render_ca_compact_trajectory_block(limited_items),
+            "extra_scoring_instructions": _extra_scoring_instructions(args),
+        },
     )
 
 
@@ -1836,6 +1971,139 @@ def _parse_step_indices(raw: Any) -> list[int]:
     return list(dict.fromkeys(values))
 
 
+def _step_numbers(text: str) -> set[int]:
+    return {int(value) for value in re.findall(r"(?m)^Step\s+(\d+)\b", str(text or ""))}
+
+
+def _quality(value: Any, *, field: str) -> str:
+    quality = str(value or "").strip().lower()
+    if quality not in {"strong", "useful", "partial", "weak", "invalid"}:
+        raise ValueError(f"ROPD compact CA {field} quality mismatch")
+    return quality
+
+
+def _score_0_to_1(value: Any) -> float:
+    return max(0.0, min(1.0, float_value(value, 0.0)))
+
+
+def _parse_ca_compact_batch_scores(
+    args: Any,
+    payload: Any,
+    *,
+    answer_items: tuple[dict[str, Any], ...],
+) -> list[dict[str, Any]]:
+    del args
+    if not isinstance(payload, dict):
+        raise ValueError("ROPD compact CA verifier response must be a JSON object")
+    if payload.get("schema_version") != CA_COMPACT_VERIFIER_SCHEMA_VERSION:
+        raise ValueError("ROPD compact CA verifier schema_version mismatch")
+    expected_ids = [_trajectory_id(item) for item in answer_items]
+    valid_steps = {_trajectory_id(item): _step_numbers(str(item.get("text") or "")) for item in answer_items}
+
+    raw_behaviors = payload.get("behaviors")
+    if not isinstance(raw_behaviors, list) or not (3 <= len(raw_behaviors) <= 8):
+        raise ValueError("ROPD compact CA behaviors must contain 3..8 items")
+    seen_behavior_ids: set[str] = set()
+    polarities: set[str] = set()
+    behavior_items: list[dict[str, Any]] = []
+    evidence_by_trajectory = {trajectory_id: [] for trajectory_id in expected_ids}
+    for index, raw_behavior in enumerate(raw_behaviors, start=1):
+        if not isinstance(raw_behavior, dict):
+            raise ValueError("ROPD compact CA behavior item must be an object")
+        behavior_id = str(raw_behavior.get("behavior_id") or "").strip()
+        polarity = str(raw_behavior.get("polarity") or "").strip().lower()
+        if polarity not in {"good", "bad"}:
+            raise ValueError("ROPD compact CA behavior polarity must be good or bad")
+        if not re.fullmatch(r"[gb][1-9][0-9]*", behavior_id):
+            raise ValueError("ROPD compact CA behavior_id must match gN or bN")
+        if behavior_id in seen_behavior_ids:
+            raise ValueError("ROPD compact CA behavior_id must be unique")
+        seen_behavior_ids.add(behavior_id)
+        polarities.add(polarity)
+        description = str(raw_behavior.get("description") or "").strip()
+        if not description:
+            raise ValueError("ROPD compact CA behavior description is required")
+        weight = _positive_float(raw_behavior.get("weight", 1.0), 1.0)
+        hits = raw_behavior.get("hits_by_trajectory")
+        if not isinstance(hits, list):
+            raise ValueError("ROPD compact CA hits_by_trajectory must be a list")
+        hit_map: dict[str, list[int]] = {}
+        for hit in hits:
+            if not isinstance(hit, dict):
+                raise ValueError("ROPD compact CA hit item must be an object")
+            trajectory_id = str(hit.get("trajectory_id") or "").strip()
+            if trajectory_id not in valid_steps:
+                raise ValueError(f"ROPD compact CA unknown trajectory_id={trajectory_id!r}")
+            step_indices = _parse_step_indices(hit.get("step_indices", []))
+            invalid_steps = [step for step in step_indices if step not in valid_steps[trajectory_id]]
+            if invalid_steps:
+                raise ValueError(
+                    f"ROPD compact CA step indices do not exist for {trajectory_id}: {invalid_steps}"
+                )
+            hit_map[trajectory_id] = step_indices
+        missing_ids = [trajectory_id for trajectory_id in expected_ids if trajectory_id not in hit_map]
+        if missing_ids:
+            raise ValueError(f"ROPD compact CA hits missing trajectories: {missing_ids}")
+        behavior_item = {
+            "criterion_id": behavior_id,
+            "behavior_id": behavior_id,
+            "polarity": polarity,
+            "description": description,
+            "weight": weight,
+            "hits_by_trajectory": [
+                {"trajectory_id": trajectory_id, "step_indices": hit_map[trajectory_id]}
+                for trajectory_id in expected_ids
+            ],
+        }
+        behavior_items.append(behavior_item)
+        for trajectory_id, steps in hit_map.items():
+            evidence_by_trajectory[trajectory_id].append(
+                {
+                    "criterion_id": behavior_id,
+                    "positive_step_indices": steps if polarity == "good" else [],
+                    "negative_step_indices": steps if polarity == "bad" else [],
+                }
+            )
+    if polarities != {"good", "bad"}:
+        raise ValueError("ROPD compact CA must include both good and bad behaviors")
+
+    raw_scores = payload.get("trajectory_scores")
+    if not isinstance(raw_scores, list):
+        raise ValueError("ROPD compact CA trajectory_scores must be a list")
+    score_map: dict[str, dict[str, Any]] = {}
+    for raw_score in raw_scores:
+        if not isinstance(raw_score, dict):
+            raise ValueError("ROPD compact CA trajectory score item must be an object")
+        trajectory_id = str(raw_score.get("trajectory_id") or "").strip()
+        if trajectory_id not in valid_steps:
+            raise ValueError(f"ROPD compact CA unknown score trajectory_id={trajectory_id!r}")
+        score_map[trajectory_id] = raw_score
+    missing_scores = [trajectory_id for trajectory_id in expected_ids if trajectory_id not in score_map]
+    if missing_scores:
+        raise ValueError(f"ROPD compact CA missing trajectory_scores: {missing_scores}")
+
+    scores: list[dict[str, Any]] = []
+    for expected_index, item in enumerate(answer_items, start=1):
+        trajectory_id = _trajectory_id(item)
+        raw_score = score_map[trajectory_id]
+        process_score = _score_0_to_1(raw_score.get("process_score"))
+        quality = _quality(raw_score.get("quality"), field=trajectory_id)
+        scores.append(
+            {
+                "answer_index": expected_index,
+                "trajectory_id": trajectory_id,
+                "process_score": process_score,
+                "rubric_score": process_score,
+                "final_score": process_score,
+                "trajectory_quality": quality,
+                "fatal_error": quality == "invalid",
+                "process_step_evidence": evidence_by_trajectory[trajectory_id],
+                "behaviors": behavior_items,
+            }
+        )
+    return scores
+
+
 def _parse_rubric_shaping_evidence(
     args: Any,
     item: dict[str, Any],
@@ -1992,8 +2260,11 @@ def _reward_mode(args: Any) -> str:
 
 
 def _validate_reward_config(args: Any) -> None:
-    if credit_assignment.enabled(args) and _schema_mode(args) != "rubric_shaping":
-        raise ValueError("reward.credit_assignment.enable currently requires reward.ropd.schema_mode=rubric_shaping")
+    if credit_assignment.enabled(args) and _schema_mode(args) not in {"rubric_shaping", "ca_compact"}:
+        raise ValueError(
+            "reward.credit_assignment.enable currently requires "
+            "reward.ropd.schema_mode in {rubric_shaping, ca_compact}"
+        )
     return None
 
 
@@ -2021,7 +2292,7 @@ def _env_success_for_shaping(sample: Sample) -> bool:
     sample_metadata = metadata(sample)
     if "env_success" not in sample_metadata:
         raise ValueError(
-            "reward.ropd.schema_mode=rubric_shaping requires sample.metadata.env_success "
+            "reward.ropd.schema_mode with env-success override requires sample.metadata.env_success "
             f"for active sample index={sample.index} group_index={sample.group_index} "
             f"status={getattr(sample.status, 'value', sample.status)} "
             f"discard_reason={sample_metadata.get('discard_reason')!r}"
@@ -2052,11 +2323,13 @@ def _select_train_score(
     answer_score: float,
     group_stats: dict[str, Any],
 ) -> tuple[float, str]:
-    if _schema_mode(args) == "rubric_shaping":
+    schema_mode = _schema_mode(args)
+    if schema_mode in {"rubric_shaping", "ca_compact"}:
+        reason = f"env_success_else_{schema_mode}"
         if _env_success_for_shaping(sample):
-            return 1.0, "env_success_else_rubric_shaping"
+            return 1.0, reason
         shaped = _rubric_shaping_beta(args) * max(0.0, min(1.0, answer_score))
-        return max(0.0, min(1.0, shaped)), "env_success_else_rubric_shaping"
+        return max(0.0, min(1.0, shaped)), reason
     reward_mode = _reward_mode(args)
     if reward_mode == "group_centered":
         return _clip(args, answer_score - float(group_stats.get("mean", 0.0))), reward_mode
@@ -2076,6 +2349,8 @@ async def _rubric_for_bucket(
     teacher_answers = _teacher_answers(args, sample)
     if not teacher_answers:
         return None, "missing_teacher", None, ()
+    if _schema_mode(args) == "ca_compact":
+        return _ca_compact_rubric(args), "ca_compact", None, teacher_answers
 
     existing = _existing_rubric(args, sample)
     existing_rubric = _normalize_rubric_for_mode(args, existing)
@@ -2226,7 +2501,7 @@ def _result(
         "strip_assistant_response": trace_options.strip_assistant_response,
         "strip_system_prompt": trace_options.strip_system_prompt,
     }
-    if schema_mode == "rubric_shaping":
+    if schema_mode in {"rubric_shaping", "ca_compact"}:
         raw["rubric_score"] = float(bounded)
         raw["env_success_for_reward"] = _env_success_for_shaping(sample)
         raw["ropd_shaping_beta"] = _rubric_shaping_beta(args)
@@ -2250,6 +2525,8 @@ def _result(
         "final_answer_quality",
         "trajectory_quality",
         "fatal_error",
+        "trajectory_id",
+        "behaviors",
     ):
         if key in student_item:
             raw[key] = student_item[key]
@@ -2263,7 +2540,7 @@ def _result(
         score=weighted,
         components={
             "rubric_task_success": weighted,
-            ("ropd_rubric_score" if schema_mode == "rubric_shaping" else "ropd_answer_score"): bounded,
+            ("ropd_rubric_score" if schema_mode in {"rubric_shaping", "ca_compact"} else "ropd_answer_score"): bounded,
         },
         raw=raw,
         reason="",
@@ -2290,12 +2567,17 @@ async def _score_bucket(
         student_answers=student_answers,
     )
     answers = tuple(str(item["text"]) for item in answer_items)
-    prompt = _build_verifier_prompt(args, samples[0], rubric=rubric, answers=answers)
+    compact_mode = rubric.get("schema_version") == CA_COMPACT_RUBRIC_SCHEMA_VERSION
+    if compact_mode:
+        prompt = _build_ca_compact_verifier_prompt(args, samples[0], answer_items=answer_items)
+    else:
+        prompt = _build_verifier_prompt(args, samples[0], rubric=rubric, answers=answers)
     answer_item_records = [
         {
             "answer_index": idx,
             "source": item["source"],
             "source_index": item["source_index"],
+            "trajectory_id": _trajectory_id(item),
             "text": item["text"],
         }
         for idx, item in enumerate(answer_items, start=1)
@@ -2315,7 +2597,10 @@ async def _score_bucket(
             "role": "judge",
             "concurrency_limit": _stage_concurrency(args, "judge"),
         }
-        scored_items = _parse_batch_scores(args, payload, rubric=rubric, expected=len(answer_items))
+        if compact_mode:
+            scored_items = _parse_ca_compact_batch_scores(args, payload, answer_items=answer_items)
+        else:
+            scored_items = _parse_batch_scores(args, payload, rubric=rubric, expected=len(answer_items))
     except Exception as exc:
         details = {"stage": "verifier", "type": type(exc).__name__, "message": str(exc)}
         _dump_artifact(
@@ -2437,7 +2722,7 @@ async def score(args: Any, samples: list[Sample], *, single: bool = False) -> li
                 details=_hard_discard_details(sample),
             )
             continue
-        if _schema_mode(args) == "rubric_shaping":
+        if _schema_mode(args) in {"rubric_shaping", "ca_compact"}:
             _env_success_for_shaping(sample)
         active_indices.append(idx)
 
