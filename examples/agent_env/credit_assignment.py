@@ -1,0 +1,252 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Any
+
+from slime.utils.types import Sample
+
+from examples.agent_env.rollout import arg, metadata
+from examples.agent_env.rewards.config import reward_cfg_path
+from examples.agent_env.rewards.extractors import bool_value, float_value, int_value
+
+
+@dataclass(frozen=True)
+class SegmentCreditRecord:
+    sample_index: int
+    start: int
+    end: int
+    value: float
+    marked: bool
+
+
+def config(args: Any) -> dict[str, Any]:
+    value = reward_cfg_path(args, "credit_assignment", {})
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def enabled(args: Any) -> bool:
+    return bool_value(config(args).get("enable", False), False)
+
+
+def request_process_step_evidence(args: Any) -> bool:
+    if not enabled(args):
+        return False
+    return bool_value(config(args).get("request_process_step_evidence", True), True)
+
+
+def beta(args: Any) -> float:
+    value = float_value(config(args).get("beta", 0.05), 0.05)
+    if value < 0:
+        raise ValueError("reward.credit_assignment.beta must be non-negative")
+    return value
+
+
+def clip(args: Any) -> float:
+    value = float_value(config(args).get("clip", 2.0), 2.0)
+    if value <= 0:
+        raise ValueError("reward.credit_assignment.clip must be positive")
+    return value
+
+
+def step_index_base(args: Any) -> int:
+    value = int_value(config(args).get("step_index_base", 1), 1)
+    if value not in (0, 1):
+        raise ValueError("reward.credit_assignment.step_index_base must be 0 or 1")
+    return value
+
+
+def _off_policy_mask_sum(sample: Sample) -> int:
+    mask = getattr(sample, "off_policy_loss_mask", None)
+    if mask is None:
+        return 0
+    return sum(int(value) for value in mask)
+
+
+def _is_student_train_sample(sample: Sample) -> bool:
+    sample_metadata = metadata(sample)
+    if bool(sample_metadata.get("off_policy_sample", False)) or _off_policy_mask_sum(sample) > 0:
+        return False
+    if bool(getattr(sample, "remove_sample", False)) or sample.status == Sample.Status.ABORTED:
+        return False
+    mask = getattr(sample, "loss_mask", None)
+    return bool(mask) and sum(int(value) for value in mask) > 0
+
+
+def _rm_raw(sample: Sample) -> dict[str, Any]:
+    sample_metadata = metadata(sample)
+    rm_reward = sample_metadata.get("rm_reward")
+    if isinstance(rm_reward, dict):
+        raw = rm_reward.get("raw")
+        if isinstance(raw, dict):
+            return raw
+    raw = sample_metadata.get("judge_raw")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _step_list(value: Any) -> list[int]:
+    if value in (None, "", []):
+        return []
+    if not isinstance(value, list):
+        value = [value]
+    steps: list[int] = []
+    for item in value:
+        try:
+            step = int(item)
+        except (TypeError, ValueError):
+            continue
+        if step >= 0:
+            steps.append(step)
+    return list(dict.fromkeys(steps))
+
+
+def _sample_step_marks(sample: Sample) -> dict[int, float]:
+    raw = _rm_raw(sample)
+    evidence = raw.get("process_step_evidence")
+    if not isinstance(evidence, list):
+        return {}
+    marks: dict[int, float] = {}
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        positive_steps = _step_list(item.get("positive_step_indices"))
+        negative_steps = _step_list(item.get("negative_step_indices"))
+        legacy_steps = _step_list(item.get("step_indices"))
+        if legacy_steps:
+            if bool(item.get("satisfied", True)):
+                positive_steps.extend(step for step in legacy_steps if step not in positive_steps)
+            else:
+                negative_steps.extend(step for step in legacy_steps if step not in negative_steps)
+        for step in positive_steps:
+            marks[step] = marks.get(step, 0.0) + 1.0
+        for step in negative_steps:
+            marks[step] = marks.get(step, 0.0) - 1.0
+    return {step: max(-1.0, min(1.0, value)) for step, value in marks.items()}
+
+
+def _segment_turn(segment: dict[str, Any]) -> int | None:
+    try:
+        return int(segment.get("turn"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _segment_records_for_sample(args: Any, sample_index: int, sample: Sample) -> list[SegmentCreditRecord]:
+    sample_metadata = metadata(sample)
+    segments = sample_metadata.get("token_segments")
+    if not isinstance(segments, list):
+        return []
+    marks = _sample_step_marks(sample)
+    base = step_index_base(args)
+    records: list[SegmentCreditRecord] = []
+    response_cursor = 0
+    response_length = int(getattr(sample, "response_length", 0) or 0)
+    for raw_segment in segments:
+        if not isinstance(raw_segment, dict):
+            continue
+        try:
+            token_count = int(raw_segment.get("token_count", 0) or 0)
+        except (TypeError, ValueError):
+            token_count = 0
+        if token_count <= 0:
+            continue
+        kind = str(raw_segment.get("kind") or "")
+        start = response_cursor
+        end = min(response_length, response_cursor + token_count)
+        if kind != "initial_prompt":
+            response_cursor += token_count
+        if kind != "assistant" or end <= start:
+            continue
+        try:
+            loss_mask_sum = int(raw_segment.get("loss_mask_sum", 0) or 0)
+        except (TypeError, ValueError):
+            loss_mask_sum = 0
+        if loss_mask_sum <= 0:
+            continue
+        turn = _segment_turn(raw_segment)
+        if turn is None:
+            continue
+        rendered_step = turn + base
+        value = marks.get(rendered_step, 0.0)
+        records.append(
+            SegmentCreditRecord(
+                sample_index=sample_index,
+                start=start,
+                end=end,
+                value=value,
+                marked=abs(value) > 0,
+            )
+        )
+    return records
+
+
+def _group_indices(args: Any, samples: list[Sample]) -> dict[int, list[int]]:
+    n_samples = max(1, int(arg(args, "n_samples_per_prompt", 1) or 1))
+    grouped: dict[int, list[int]] = {}
+    for idx, sample in enumerate(samples):
+        group_key = int(sample.group_index) if sample.group_index is not None else idx // n_samples
+        grouped.setdefault(group_key, []).append(idx)
+    return grouped
+
+
+def group_has_process_credit_signal(args: Any, samples: list[Sample]) -> bool:
+    if not enabled(args):
+        return False
+    for indices in _group_indices(args, samples).values():
+        values: list[float] = []
+        for idx in indices:
+            sample = samples[idx]
+            if not _is_student_train_sample(sample):
+                continue
+            values.extend(record.value for record in _segment_records_for_sample(args, idx, sample))
+        if len(values) <= 1:
+            continue
+        mean = sum(values) / len(values)
+        variance = sum((value - mean) ** 2 for value in values) / max(1, len(values) - 1)
+        if math.sqrt(max(variance, 0.0)) > 1e-6:
+            return True
+    return False
+
+
+def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
+    if not enabled(args):
+        return
+
+    sample_advantages: list[list[float]] = []
+    for sample in samples:
+        response_length = int(getattr(sample, "response_length", 0) or 0)
+        sample_advantages.append([0.0] * max(0, response_length))
+
+    cfg_clip = clip(args)
+    for indices in _group_indices(args, samples).values():
+        records: list[SegmentCreditRecord] = []
+        for idx in indices:
+            sample = samples[idx]
+            if not _is_student_train_sample(sample):
+                continue
+            records.extend(_segment_records_for_sample(args, idx, sample))
+        if len(records) <= 1:
+            continue
+        values = [record.value for record in records]
+        mean = sum(values) / len(values)
+        variance = sum((value - mean) ** 2 for value in values) / max(1, len(values) - 1)
+        std = math.sqrt(max(variance, 0.0))
+        if std <= 1e-6:
+            continue
+        for record in records:
+            normalized = max(-cfg_clip, min(cfg_clip, (record.value - mean) / (std + 1e-6)))
+            target = sample_advantages[record.sample_index]
+            for offset in range(record.start, min(record.end, len(target))):
+                target[offset] = normalized
+
+    for sample, values in zip(samples, sample_advantages, strict=True):
+        sample_metadata = metadata(sample)
+        nonzero = sum(1 for value in values if abs(value) > 0)
+        sample_metadata["process_advantages"] = values
+        sample_metadata["credit_assignment"] = {
+            "enabled": True,
+            "beta": beta(args),
+            "nonzero_tokens": nonzero,
+            "response_length": len(values),
+            "nonzero_token_rate": (nonzero / len(values)) if values else 0.0,
+        }

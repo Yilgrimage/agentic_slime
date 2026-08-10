@@ -353,6 +353,18 @@ def _install_config_overrides(args: Any) -> None:
 
 def _install_reward_derived_train_args(args: Any) -> None:
     reward = _mapping(getattr(args, "reward", {}))
+    credit_assignment = _mapping(reward.get("credit_assignment"))
+    if bool(credit_assignment.get("enable", False)):
+        path = "examples.agent_env.advantage.segment_credit_assignment_advantage"
+        existing = str(getattr(args, "custom_advantage_function_path", "") or "").strip()
+        if existing and existing != path:
+            raise ValueError(
+                "reward.credit_assignment.enable requires custom_advantage_function_path="
+                f"{path!r}, but got {existing!r}"
+            )
+        setattr(args, "custom_advantage_function_path", path)
+        _LOGGER.info("Enabled reward-derived segment credit assignment advantage: %s", path)
+
     luffy = _mapping(reward.get("luffy"))
     luffy_enabled = bool(luffy.get("enable", False))
     luffy_mode = str(luffy.get("mode", "off") or "off").strip().lower()

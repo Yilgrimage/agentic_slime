@@ -96,9 +96,19 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ropd_teacher_below_student_seen = False
     ropd_env_success_for_reward = 0
     ropd_env_success_for_reward_seen = False
+    ca_nonzero_tokens: list[float] = []
+    ca_nonzero_token_rates: list[float] = []
 
     for sample in real_samples:
         sample_metadata = getattr(sample, "metadata", None) or {}
+        ca = _as_dict(sample_metadata.get("credit_assignment"))
+        if ca:
+            nonzero_tokens = _float_or_none(ca.get("nonzero_tokens"))
+            if nonzero_tokens is not None:
+                ca_nonzero_tokens.append(nonzero_tokens)
+            nonzero_rate = _float_or_none(ca.get("nonzero_token_rate"))
+            if nonzero_rate is not None:
+                ca_nonzero_token_rates.append(nonzero_rate)
         rm_reward = _as_dict(sample_metadata.get("rm_reward"))
         score = _float_or_none(rm_reward.get("score"))
         if score is not None:
@@ -220,6 +230,10 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics["reward/ropd/teacher_below_student_rate"] = ropd_teacher_below_student / total
     if ropd_env_success_for_reward_seen:
         metrics["reward/ropd/env_success_for_reward_rate"] = ropd_env_success_for_reward / total
+    if ca_nonzero_tokens:
+        metrics["reward/credit_assignment/nonzero_tokens_mean"] = _mean(ca_nonzero_tokens)
+    if ca_nonzero_token_rates:
+        metrics["reward/credit_assignment/nonzero_token_rate_mean"] = _mean(ca_nonzero_token_rates)
     _reward_call_metrics(metrics, role="judge", calls=judge_calls, sample_count=total)
     _reward_call_metrics(metrics, role="rubric", calls=rubric_calls, sample_count=total)
     return metrics

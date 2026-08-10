@@ -11,6 +11,7 @@ from typing import Any
 
 from slime.utils.types import Sample
 
+from examples.agent_env import credit_assignment
 from examples.agent_env.dump import record_dump_step_label, reserve_dump_slot, sample_dump_step_label
 from examples.agent_env.trace_rendering import (
     TraceCompressionOptions,
@@ -291,6 +292,7 @@ VERIFIER_SHAPING_PROMPT_TEMPLATE = """你是一名 agentic trajectory 评分专�
 
 [Additional Scoring Instructions]
 {extra_scoring_instructions}
+{process_step_evidence_instructions}
 
 # 打分规则
 - 对每条 rubric 给 0 到 5 分：
@@ -327,6 +329,7 @@ VERIFIER_SHAPING_PROMPT_TEMPLATE = """你是一名 agentic trajectory 评分专�
 - `schema_version` 必须严格等于 `ropd.rubric_shaping_batch_verifier.v1`。
 - `answers` 必须按输入顺序覆盖所有 trajectory。
 - `rubric_scores` 长度和顺序必须与 rubric 完全一致。
+- 如果要求输出 `process_step_evidence`，其长度和顺序必须与 rubric 完全一致；step 编号必须使用 trajectory 文本里的 `Step N` 编号。
 - 所有 `score` 必须是 0 到 5 的数字。
 - `trajectory_quality` 必须是 `strong`, `useful`, `partial`, `weak`, `invalid` 之一。
 - 只返回 JSON 对象本身。
@@ -1249,6 +1252,31 @@ def _extra_scoring_instructions(args: Any) -> str:
     return str(_cfg(args, "extra_scoring_instructions", "") or "")
 
 
+def _process_step_evidence_instructions(args: Any) -> str:
+    if not credit_assignment.request_process_step_evidence(args):
+        return ""
+    return """
+
+# Process step evidence
+同时为每个 trajectory 输出 `process_step_evidence`，用于把过程质量信号定位到具体 action step。
+每条 evidence 必须与 rubric_scores 一一对应，结构如下：
+```json
+{
+  "criterion_id": "r1",
+  "positive_step_indices": [2],
+  "negative_step_indices": [4],
+  "evidence": "short evidence"
+}
+```
+规则：
+- `positive_step_indices` 只填满足对应 rubric 的关键 Step N。
+- `negative_step_indices` 只填明显违反对应 rubric 的关键 Step N。
+- step 编号必须严格使用 trajectory 文本中的 `Step N` 编号；没有可定位证据就返回空数组。
+- 不要把同一个 step 同时放入 positive 和 negative。
+- `evidence` 只写一句短证据，不要长篇解释。
+"""
+
+
 def _rubric_items(rubric: Any) -> list[dict[str, Any]]:
     if isinstance(rubric, dict):
         items = rubric.get("rubrics")
@@ -1557,6 +1585,7 @@ def _build_verifier_prompt(
                 force_labels=True,
             ),
             "extra_scoring_instructions": _extra_scoring_instructions(args),
+            "process_step_evidence_instructions": _process_step_evidence_instructions(args),
             "answer_weight": f"{answer_weight:.6g}",
             "process_weight": f"{process_weight:.6g}",
             "answer_support_weight_for_reward": f"{support_weight:.6g}",
@@ -1788,7 +1817,60 @@ def _parse_answer_process_batch_scores(
     return scores
 
 
+def _parse_step_indices(raw: Any) -> list[int]:
+    if raw in (None, "", []):
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("ROPD rubric-shaping step indices must be a list")
+    values: list[int] = []
+    for item in raw:
+        if isinstance(item, int):
+            step = item
+        elif isinstance(item, str) and item.strip().isdigit():
+            step = int(item.strip())
+        else:
+            raise ValueError("ROPD rubric-shaping step indices must be integers")
+        if step < 0:
+            raise ValueError("ROPD rubric-shaping step indices must be non-negative")
+        values.append(step)
+    return list(dict.fromkeys(values))
+
+
+def _parse_rubric_shaping_evidence(
+    args: Any,
+    item: dict[str, Any],
+    rubric_ids: list[str],
+) -> list[dict[str, Any]]:
+    raw_evidence = item.get("process_step_evidence")
+    if raw_evidence in (None, ""):
+        if credit_assignment.request_process_step_evidence(args):
+            raise ValueError("ROPD rubric-shaping process_step_evidence is required by credit assignment")
+        return []
+    if not isinstance(raw_evidence, list) or len(raw_evidence) != len(rubric_ids):
+        raise ValueError("ROPD rubric-shaping process_step_evidence length mismatch")
+    parsed: list[dict[str, Any]] = []
+    for raw_item, criterion_id in zip(raw_evidence, rubric_ids, strict=True):
+        if not isinstance(raw_item, dict):
+            raise ValueError("ROPD rubric-shaping evidence item must be an object")
+        if str(raw_item.get("criterion_id") or criterion_id) != criterion_id:
+            raise ValueError("ROPD rubric-shaping evidence criterion_id mismatch")
+        positive = _parse_step_indices(raw_item.get("positive_step_indices", []))
+        negative = _parse_step_indices(raw_item.get("negative_step_indices", []))
+        if set(positive).intersection(negative):
+            raise ValueError("ROPD rubric-shaping evidence cannot mark the same step positive and negative")
+        parsed.append(
+            {
+                "criterion_id": criterion_id,
+                "positive_step_indices": positive,
+                "negative_step_indices": negative,
+                "evidence": str(raw_item.get("evidence") or "").strip(),
+            }
+        )
+    return parsed
+
+
 def _parse_rubric_shaping_batch_scores(
+    args: Any,
     payload: Any,
     *,
     rubric: dict[str, Any],
@@ -1826,12 +1908,14 @@ def _parse_rubric_shaping_batch_scores(
         if quality not in {"strong", "useful", "partial", "weak", "invalid"}:
             raise ValueError("ROPD rubric-shaping trajectory_quality mismatch")
         fatal_error = bool(item.get("fatal_error", False))
+        evidence_items = _parse_rubric_shaping_evidence(args, item, rubric_ids)
         rubric_score = _weighted_average_0_to_5([float(score_item["score"]) for score_item in score_items], rubric_items)
         normalized_score = 0.0 if fatal_error else max(0.0, min(1.0, rubric_score / 5.0))
         scores.append(
             {
                 "answer_index": expected_index,
                 "rubric_scores": score_items,
+                "process_step_evidence": evidence_items,
                 "rubric_score": normalized_score,
                 "rubric_score_0_to_5": rubric_score,
                 "final_score": normalized_score,
@@ -1846,7 +1930,7 @@ def _parse_batch_scores(args: Any, payload: Any, *, rubric: dict[str, Any], expe
     if rubric.get("schema_version") == ANSWER_PROCESS_RUBRIC_SCHEMA_VERSION:
         return _parse_answer_process_batch_scores(args, payload, rubric=rubric, expected=expected)
     if rubric.get("schema_version") == RUBRIC_SHAPING_RUBRIC_SCHEMA_VERSION:
-        return _parse_rubric_shaping_batch_scores(payload, rubric=rubric, expected=expected)
+        return _parse_rubric_shaping_batch_scores(args, payload, rubric=rubric, expected=expected)
     return _parse_binary_batch_scores(payload, rubric=rubric, expected=expected)
 
 
@@ -1908,6 +1992,8 @@ def _reward_mode(args: Any) -> str:
 
 
 def _validate_reward_config(args: Any) -> None:
+    if credit_assignment.enabled(args) and _schema_mode(args) != "rubric_shaping":
+        raise ValueError("reward.credit_assignment.enable currently requires reward.ropd.schema_mode=rubric_shaping")
     return None
 
 
