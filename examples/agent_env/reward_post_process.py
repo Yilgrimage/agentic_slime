@@ -7,7 +7,6 @@ from typing import Any
 from slime.rollout.filter_hub.base_types import DynamicFilterOutput
 from slime.utils.types import Sample
 
-from examples.agent_env import credit_assignment
 from examples.agent_env.rollout import _is_hard_discard_sample, arg, metadata
 
 
@@ -81,8 +80,6 @@ def check_reward_nonzero_std(args: Any, samples: list[Sample], **_: Any) -> Dyna
     mean = sum(rewards) / len(rewards)
     variance = sum((reward - mean) ** 2 for reward in rewards) / max(1, len(rewards) - 1)
     keep = math.sqrt(variance) > 1e-6
-    if not keep and credit_assignment.group_has_process_credit_signal(args, active):
-        keep = True
     return DynamicFilterOutput(
         keep=keep,
         reason=None if keep else "zero_std",

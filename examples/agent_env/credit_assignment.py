@@ -399,21 +399,6 @@ def _group_indices(args: Any, samples: list[Sample]) -> dict[int, list[int]]:
     return grouped
 
 
-def group_has_process_credit_signal(args: Any, samples: list[Sample]) -> bool:
-    if not enabled(args):
-        return False
-    if beta(args) == 0:
-        return False
-    for indices in _group_indices(args, samples).values():
-        for idx in indices:
-            sample = samples[idx]
-            if not _is_student_train_sample(sample):
-                continue
-            if any(record.marked for record in _segment_records_for_sample(args, idx, sample)):
-                return True
-    return False
-
-
 def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
     if not enabled(args):
         return
