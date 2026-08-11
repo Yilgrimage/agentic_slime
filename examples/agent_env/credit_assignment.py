@@ -81,6 +81,13 @@ def negative_reward(args: Any) -> float:
     return float_value(config(args).get("negative_reward", 0.0), 0.0)
 
 
+def success_milestone_tail_steps(args: Any) -> int:
+    value = int_value(config(args).get("success_milestone_tail_steps", 1), 1)
+    if value < 0:
+        raise ValueError("reward.credit_assignment.success_milestone_tail_steps must be non-negative")
+    return value
+
+
 def step_index_base(args: Any) -> int:
     value = int_value(config(args).get("step_index_base", 1), 1)
     if value not in (0, 1):
@@ -150,39 +157,73 @@ def _step_list(value: Any) -> list[int]:
     return list(dict.fromkeys(steps))
 
 
+def _mark_milestone(
+    *,
+    marks: dict[int, float],
+    step: int,
+    available_steps: list[int],
+    milestone_value: float,
+    predecessor_value: float,
+) -> None:
+    marks[step] = max(marks.get(step, 0.0), milestone_value)
+    for previous_step in available_steps:
+        if previous_step >= step:
+            break
+        marks[previous_step] = max(marks.get(previous_step, 0.0), predecessor_value)
+
+
+def _success_tail_milestone_steps(args: Any, sample: Sample, available_steps: list[int]) -> list[int]:
+    if not bool(metadata(sample).get("env_success", False)):
+        return []
+    tail_steps = success_milestone_tail_steps(args)
+    if tail_steps <= 0:
+        return []
+    return available_steps[-tail_steps:]
+
+
 def _sample_step_marks(args: Any, sample: Sample, *, available_steps: list[int] | None = None) -> dict[int, float]:
     shaping_mode(args)
     raw = _rm_raw(sample)
     evidence = raw.get("process_step_evidence")
-    if not isinstance(evidence, list):
-        return {}
     available = sorted(dict.fromkeys(step for step in (available_steps or []) if step >= 0))
     milestone_value = milestone_reward(args)
     predecessor_value = predecessor_reward(args)
     negative_value = negative_reward(args)
     marks: dict[int, float] = {}
-    for item in evidence:
-        if not isinstance(item, dict):
-            continue
-        positive_steps = _step_list(item.get("positive_step_indices"))
-        negative_steps = _step_list(item.get("negative_step_indices"))
-        legacy_steps = _step_list(item.get("step_indices"))
-        if legacy_steps:
-            if bool(item.get("satisfied", True)):
-                positive_steps.extend(step for step in legacy_steps if step not in positive_steps)
-            else:
-                negative_steps.extend(step for step in legacy_steps if step not in negative_steps)
-        for step in positive_steps:
-            marks[step] = max(marks.get(step, 0.0), milestone_value)
-            for previous_step in available:
-                if previous_step >= step:
-                    break
-                marks[previous_step] = max(marks.get(previous_step, 0.0), predecessor_value)
-        if negative_value != 0.0:
-            for step in negative_steps:
-                if step in marks and marks[step] > 0:
-                    continue
-                marks[step] = min(marks.get(step, 0.0), negative_value)
+    if isinstance(evidence, list):
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            positive_steps = _step_list(item.get("positive_step_indices"))
+            negative_steps = _step_list(item.get("negative_step_indices"))
+            legacy_steps = _step_list(item.get("step_indices"))
+            if legacy_steps:
+                if bool(item.get("satisfied", True)):
+                    positive_steps.extend(step for step in legacy_steps if step not in positive_steps)
+                else:
+                    negative_steps.extend(step for step in legacy_steps if step not in negative_steps)
+            for step in positive_steps:
+                _mark_milestone(
+                    marks=marks,
+                    step=step,
+                    available_steps=available,
+                    milestone_value=milestone_value,
+                    predecessor_value=predecessor_value,
+                )
+            if negative_value != 0.0:
+                for step in negative_steps:
+                    if step in marks and marks[step] > 0:
+                        continue
+                    marks[step] = min(marks.get(step, 0.0), negative_value)
+
+    for step in _success_tail_milestone_steps(args, sample, available):
+        _mark_milestone(
+            marks=marks,
+            step=step,
+            available_steps=available,
+            milestone_value=milestone_value,
+            predecessor_value=predecessor_value,
+        )
     return marks
 
 
@@ -416,6 +457,7 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
             "milestone_reward": milestone_reward(args),
             "predecessor_reward": predecessor_reward(args),
             "negative_reward": negative_reward(args),
+            "success_milestone_tail_steps": success_milestone_tail_steps(args),
             "clip": clip(args),
             "nonzero_tokens": nonzero,
             "response_length": len(values),

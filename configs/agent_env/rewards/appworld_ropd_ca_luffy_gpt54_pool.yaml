@@ -36,6 +36,7 @@ credit_assignment:
   milestone_reward: 2.0
   predecessor_reward: 0.5
   negative_reward: 0.0
+  success_milestone_tail_steps: 2
   clip: 2.0
   step_index_base: 1
 
