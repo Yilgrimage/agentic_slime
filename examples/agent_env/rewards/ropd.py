@@ -339,14 +339,14 @@ VERIFIER_SHAPING_PROMPT_TEMPLATE = """你是一名 agentic trajectory 评分专�
 
 CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-assignment judge。请一次性完成 behavior mining 和 step-index 标注。
 
-目标：为同一道任务生成少量 good/bad behavior，并立刻标出每条 trajectory 命中这些 behavior 的 Step 编号。
+目标：为同一道任务生成少量关键进展 good behavior 和明显错误 bad behavior，并立刻标出每条 trajectory 命中这些 behavior 的 Step 编号。
 
 # 关键口径
 - T0_REFERENCE 是高质量参考轨迹，但不保证完美；可以帮助发现 good behavior。
 - 不判断最终任务是否真实成功；最终成功由外部 env verifier 决定。你只评价可观察过程质量。
 - `complete_task()` 只是结束 episode。任何只显示 complete_task、fail、Execution successful、或没有可见具体 API/action 参数的 step，都不得作为 good behavior 命中。
 - 如果 step 文本被 `[truncated ...]` 裁到看不清实际 API/action、参数或证据来源，宁可不给 good hit。
-- good hit 必须能从该 Step 的可见 tool call / tool response 直接确认；不要根据意图文字、成功声明或隐含猜测标注。
+- good hit 必须是 materially advances the task 的关键进展或 milestone，且必须能从该 Step 的可见 tool call / tool response 直接确认；不要把普通合理动作、意图文字、成功声明或隐含猜测标成 good hit。
 - bad hit 可以标注：无关/错误 API、编造结果、忽略 observation、重复无效动作、过早 complete_task、参数明显不合理。
 - 每条 behavior 必须可以通过具体 Step N 判断命中。
 - 只返回紧凑 JSON，不要 rationale，不要 evidence 句子，不要 Markdown。
@@ -1541,8 +1541,8 @@ def _ca_compact_rubric(args: Any) -> dict[str, Any]:
         "score_policy": {
             "score_range": "0_to_1_process_score",
             "env_success_overrides_reward": True,
-            "failure_reward_scale_beta": _rubric_shaping_beta(args),
             "single_call_behavior_mining": True,
+            "process_step_evidence_for_credit_assignment": True,
         },
     }
 

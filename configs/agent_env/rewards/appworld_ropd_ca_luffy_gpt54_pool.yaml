@@ -31,6 +31,11 @@ credit_assignment:
   enable: true
   request_process_step_evidence: true
   beta: 0.1
+  shaping_mode: milestone
+  normalization: none
+  milestone_reward: 2.0
+  predecessor_reward: 0.5
+  negative_reward: 0.0
   clip: 2.0
   step_index_base: 1
 

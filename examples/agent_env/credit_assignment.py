@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import time
 from dataclasses import dataclass
@@ -21,6 +20,7 @@ class SegmentCreditRecord:
     sample_index: int
     start: int
     end: int
+    step: int
     value: float
     marked: bool
 
@@ -52,6 +52,33 @@ def clip(args: Any) -> float:
     if value <= 0:
         raise ValueError("reward.credit_assignment.clip must be positive")
     return value
+
+
+def shaping_mode(args: Any) -> str:
+    value = str(config(args).get("shaping_mode", "milestone")).strip().lower()
+    if value != "milestone":
+        raise ValueError("reward.credit_assignment.shaping_mode must be milestone")
+    return value
+
+
+def normalization(args: Any) -> str:
+    value = str(config(args).get("normalization", "none")).strip().lower()
+    if value != "none":
+        raise ValueError("reward.credit_assignment.normalization must be none")
+    return value
+
+
+def milestone_reward(args: Any) -> float:
+    return float_value(config(args).get("milestone_reward", 2.0), 2.0)
+
+
+def predecessor_reward(args: Any) -> float:
+    value = float_value(config(args).get("predecessor_reward", 0.5), 0.5)
+    return max(0.0, value)
+
+
+def negative_reward(args: Any) -> float:
+    return float_value(config(args).get("negative_reward", 0.0), 0.0)
 
 
 def step_index_base(args: Any) -> int:
@@ -123,11 +150,16 @@ def _step_list(value: Any) -> list[int]:
     return list(dict.fromkeys(steps))
 
 
-def _sample_step_marks(sample: Sample) -> dict[int, float]:
+def _sample_step_marks(args: Any, sample: Sample, *, available_steps: list[int] | None = None) -> dict[int, float]:
+    shaping_mode(args)
     raw = _rm_raw(sample)
     evidence = raw.get("process_step_evidence")
     if not isinstance(evidence, list):
         return {}
+    available = sorted(dict.fromkeys(step for step in (available_steps or []) if step >= 0))
+    milestone_value = milestone_reward(args)
+    predecessor_value = predecessor_reward(args)
+    negative_value = negative_reward(args)
     marks: dict[int, float] = {}
     for item in evidence:
         if not isinstance(item, dict):
@@ -141,10 +173,17 @@ def _sample_step_marks(sample: Sample) -> dict[int, float]:
             else:
                 negative_steps.extend(step for step in legacy_steps if step not in negative_steps)
         for step in positive_steps:
-            marks[step] = marks.get(step, 0.0) + 1.0
-        for step in negative_steps:
-            marks[step] = marks.get(step, 0.0) - 1.0
-    return {step: max(-1.0, min(1.0, value)) for step, value in marks.items()}
+            marks[step] = max(marks.get(step, 0.0), milestone_value)
+            for previous_step in available:
+                if previous_step >= step:
+                    break
+                marks[previous_step] = max(marks.get(previous_step, 0.0), predecessor_value)
+        if negative_value != 0.0:
+            for step in negative_steps:
+                if step in marks and marks[step] > 0:
+                    continue
+                marks[step] = min(marks.get(step, 0.0), negative_value)
+    return marks
 
 
 def _segment_turn(segment: dict[str, Any]) -> int | None:
@@ -159,9 +198,8 @@ def _segment_records_for_sample(args: Any, sample_index: int, sample: Sample) ->
     segments = sample_metadata.get("token_segments")
     if not isinstance(segments, list):
         return []
-    marks = _sample_step_marks(sample)
     base = step_index_base(args)
-    records: list[SegmentCreditRecord] = []
+    candidates: list[tuple[int, int, int]] = []
     response_cursor = 0
     response_length = int(getattr(sample, "response_length", 0) or 0)
     for raw_segment in segments:
@@ -190,12 +228,18 @@ def _segment_records_for_sample(args: Any, sample_index: int, sample: Sample) ->
         if turn is None:
             continue
         rendered_step = turn + base
+        candidates.append((start, end, rendered_step))
+
+    marks = _sample_step_marks(args, sample, available_steps=[step for _, _, step in candidates])
+    records: list[SegmentCreditRecord] = []
+    for start, end, rendered_step in candidates:
         value = marks.get(rendered_step, 0.0)
         records.append(
             SegmentCreditRecord(
                 sample_index=sample_index,
                 start=start,
                 end=end,
+                step=rendered_step,
                 value=value,
                 marked=abs(value) > 0,
             )
@@ -251,12 +295,13 @@ def _credit_record_payload(
             "env_reward": sample_metadata.get("env_reward"),
         },
         "credit_assignment": sample_metadata.get("credit_assignment"),
-        "step_marks": _sample_step_marks(sample),
+        "step_marks": {record.step: record.value for record in records if record.marked},
         "process_step_evidence": process_evidence if isinstance(process_evidence, list) else [],
         "segments": [
             {
                 "start": record.start,
                 "end": record.end,
+                "step": record.step,
                 "raw_step_value": record.value,
                 "advantage_value": advantages[record.start] if 0 <= record.start < len(advantages) else 0.0,
                 "marked": record.marked,
@@ -316,23 +361,15 @@ def _group_indices(args: Any, samples: list[Sample]) -> dict[int, list[int]]:
 def group_has_process_credit_signal(args: Any, samples: list[Sample]) -> bool:
     if not enabled(args):
         return False
+    if beta(args) == 0:
+        return False
     for indices in _group_indices(args, samples).values():
-        values: list[float] = []
         for idx in indices:
             sample = samples[idx]
             if not _is_student_train_sample(sample):
                 continue
-            values.extend(
-                record.value
-                for record in _segment_records_for_sample(args, idx, sample)
-                if record.marked
-            )
-        if len(values) <= 1:
-            continue
-        mean = sum(values) / len(values)
-        variance = sum((value - mean) ** 2 for value in values) / max(1, len(values) - 1)
-        if math.sqrt(max(variance, 0.0)) > 1e-6:
-            return True
+            if any(record.marked for record in _segment_records_for_sample(args, idx, sample)):
+                return True
     return False
 
 
@@ -348,6 +385,7 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
         sample_records.append([])
 
     cfg_clip = clip(args)
+    cfg_normalization = normalization(args)
     for indices in _group_indices(args, samples).values():
         records: list[SegmentCreditRecord] = []
         for idx in indices:
@@ -358,16 +396,10 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
         for record in records:
             sample_records[record.sample_index].append(record)
         train_records = [record for record in records if record.marked]
-        if len(train_records) <= 1:
-            continue
-        values = [record.value for record in train_records]
-        mean = sum(values) / len(values)
-        variance = sum((value - mean) ** 2 for value in values) / max(1, len(values) - 1)
-        std = math.sqrt(max(variance, 0.0))
-        if std <= 1e-6:
-            continue
         for record in train_records:
-            normalized = max(-cfg_clip, min(cfg_clip, (record.value - mean) / (std + 1e-6)))
+            if cfg_normalization != "none":
+                raise ValueError("reward.credit_assignment.normalization must be none")
+            normalized = max(-cfg_clip, min(cfg_clip, record.value))
             target = sample_advantages[record.sample_index]
             for offset in range(record.start, min(record.end, len(target))):
                 target[offset] = normalized
@@ -379,6 +411,12 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
         sample_metadata["credit_assignment"] = {
             "enabled": True,
             "beta": beta(args),
+            "shaping_mode": shaping_mode(args),
+            "normalization": normalization(args),
+            "milestone_reward": milestone_reward(args),
+            "predecessor_reward": predecessor_reward(args),
+            "negative_reward": negative_reward(args),
+            "clip": clip(args),
             "nonzero_tokens": nonzero,
             "response_length": len(values),
             "nonzero_token_rate": (nonzero / len(values)) if values else 0.0,
