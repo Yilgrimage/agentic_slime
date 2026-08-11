@@ -7,6 +7,7 @@ from typing import Any
 from slime.rollout.filter_hub.base_types import DynamicFilterOutput
 from slime.utils.types import Sample
 
+from examples.agent_env import credit_assignment
 from examples.agent_env.rollout import _is_hard_discard_sample, arg, metadata
 
 
@@ -80,6 +81,8 @@ def check_reward_nonzero_std(args: Any, samples: list[Sample], **_: Any) -> Dyna
     mean = sum(rewards) / len(rewards)
     variance = sum((reward - mean) ** 2 for reward in rewards) / max(1, len(rewards) - 1)
     keep = math.sqrt(variance) > 1e-6
+    if not keep and credit_assignment.group_has_process_credit_signal(args, active):
+        return DynamicFilterOutput(keep=True, reason=None)
     return DynamicFilterOutput(
         keep=keep,
         reason=None if keep else "zero_std",
@@ -102,12 +105,11 @@ def post_process_rewards(args: Any, samples: list[Sample]) -> tuple[list[float],
         sample_metadata["rm_reward_for_train"] = raw_reward
         raw_rewards.append(raw_reward)
 
-    credit_assignment.attach_process_advantages(args, samples)
-
     if not (
         arg(args, "advantage_estimator", None) in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
         and bool(arg(args, "rewards_normalization", False))
     ):
+        credit_assignment.attach_process_advantages(args, samples, scalar_rewards=raw_rewards)
         return raw_rewards, list(raw_rewards)
 
     rewards = [0.0] * len(samples)
@@ -141,4 +143,5 @@ def post_process_rewards(args: Any, samples: list[Sample]) -> tuple[list[float],
             centered = [value / (std + 1e-6) for value in centered]
         for idx, value in zip(active, centered, strict=True):
             rewards[idx] = value
+    credit_assignment.attach_process_advantages(args, samples, scalar_rewards=raw_rewards)
     return raw_rewards, rewards

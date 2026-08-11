@@ -106,6 +106,9 @@ def _price(text: Any) -> float | None:
 
 def _trace_instruction(trace: str) -> str:
     text = str(trace or "")
+    match = re.search(r"(?:Task|Instruction):\s*\[SEP\]\s*(.*?)\s*\[SEP\]", text, flags=re.S)
+    if match:
+        return re.sub(r"\s+", " ", match.group(1)).strip()
     if "[SEP]" in text:
         sep_parts = [part.strip() for part in re.split(r"\s*\[SEP\]\s*", text) if part.strip()]
         for idx, part in enumerate(sep_parts):

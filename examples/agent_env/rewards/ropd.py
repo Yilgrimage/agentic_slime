@@ -342,7 +342,7 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
 目标：为同一道任务生成少量关键进展 good behavior 和明显错误 bad behavior，并立刻标出每条 trajectory 命中这些 behavior 的 Step 编号。
 
 # 关键口径
-- T0_REFERENCE 是高质量参考轨迹，但不保证完美；可以帮助发现 good behavior。
+{reference_guidance}
 - 不判断最终任务是否真实成功；最终成功由外部 env verifier 决定。你只评价可观察过程质量。
 - `complete_task()` 只是结束 episode。任何只显示 complete_task、fail、Execution successful、或没有可见具体 API/action 参数的 step，都不得作为 good behavior 命中。
 - 如果 step 文本被 `[truncated ...]` 裁到看不清实际 API/action、参数或证据来源，宁可不给 good hit。
@@ -356,6 +356,9 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
 
 [Trajectories]
 {answers}
+
+[Valid Trajectory IDs]
+{trajectory_ids}
 
 [Additional Scoring Instructions]
 {extra_scoring_instructions}
@@ -398,6 +401,7 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
 - 生成 3 到 8 条 behavior，good 和 bad 都至少 1 条。
 - `behavior_id` 必须以 `g` 或 `b` 开头并唯一；`polarity` 只能是 `good` 或 `bad`。
 - 每条 `hits_by_trajectory` 必须覆盖所有输入 trajectory_id。
+- trajectory_id 必须严格来自 [Valid Trajectory IDs]，不要输出不存在的 T0_REFERENCE。
 - Step 编号只能来自对应 trajectory 文本里的 `Step N`。
 - `process_score` 是 0 到 1 的粗略过程质量分；good hits 多且 bad hits 少则高。
 - `quality` 必须是 `strong`, `useful`, `partial`, `weak`, `invalid` 之一。
@@ -1753,11 +1757,19 @@ def _build_ca_compact_verifier_prompt(
         }
         for item in answer_items
     )
+    has_reference = any(str(item.get("source") or "") == "teacher" for item in limited_items)
+    reference_guidance = (
+        "- T0_REFERENCE 是高质量参考轨迹，但不保证完美；可以帮助发现 good behavior。"
+        if has_reference
+        else "- 本批输入没有 reference trajectory；只基于任务要求和 student trajectories 的可见过程，判断关键进展和明显错误。"
+    )
     return _render_template(
         CA_COMPACT_VERIFIER_PROMPT_TEMPLATE,
         {
             "question": _limit_reward_text(args, _ropd_question(sample), question_max_chars, field="question"),
             "answers": _render_ca_compact_trajectory_block(limited_items),
+            "trajectory_ids": ", ".join(_trajectory_id(item) for item in limited_items),
+            "reference_guidance": reference_guidance,
             "extra_scoring_instructions": _extra_scoring_instructions(args),
         },
     )
@@ -2300,6 +2312,30 @@ def _env_success_for_shaping(sample: Sample) -> bool:
     return bool(sample_metadata.get("env_success"))
 
 
+def _env_score_for_shaping(sample: Sample) -> float:
+    sample_metadata = metadata(sample)
+    if "env_score" not in sample_metadata:
+        raise ValueError(
+            "reward.ropd.ca_scalar_reward_source=env_score requires sample.metadata.env_score "
+            f"for active sample index={sample.index} group_index={sample.group_index} "
+            f"status={getattr(sample.status, 'value', sample.status)} "
+            f"discard_reason={sample_metadata.get('discard_reason')!r}"
+        )
+    return max(0.0, min(1.0, float_value(sample_metadata.get("env_score"), 0.0)))
+
+
+def _ca_compact_scalar_reward(args: Any, sample: Sample) -> tuple[float, str]:
+    source = _cfg_choice(
+        args,
+        "ca_scalar_reward_source",
+        "env_success",
+        {"env_success", "success", "env_score", "score"},
+    )
+    if source in {"env_success", "success"}:
+        return (1.0 if _env_success_for_shaping(sample) else 0.0), "ca_compact_env_success"
+    return _env_score_for_shaping(sample), "ca_compact_env_score"
+
+
 def _group_stats(args: Any, student_scores: list[float], teacher_scores: tuple[float, ...]) -> dict[str, Any]:
     reference_values_for_stats = list(student_scores)
     reference = _reward_group_reference(args)
@@ -2325,8 +2361,7 @@ def _select_train_score(
 ) -> tuple[float, str]:
     schema_mode = _schema_mode(args)
     if schema_mode == "ca_compact":
-        reason = "env_success_only_ca_compact"
-        return (1.0 if _env_success_for_shaping(sample) else 0.0), reason
+        return _ca_compact_scalar_reward(args, sample)
     if schema_mode == "rubric_shaping":
         reason = f"env_success_else_{schema_mode}"
         if _env_success_for_shaping(sample):
@@ -2350,10 +2385,11 @@ async def _rubric_for_bucket(
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any] | None, tuple[str, ...]]:
     sample = samples[0]
     teacher_answers = _teacher_answers(args, sample)
+    if _schema_mode(args) == "ca_compact":
+        source = "ca_compact" if teacher_answers else "ca_compact_no_reference"
+        return _ca_compact_rubric(args), source, None, teacher_answers
     if not teacher_answers:
         return None, "missing_teacher", None, ()
-    if _schema_mode(args) == "ca_compact":
-        return _ca_compact_rubric(args), "ca_compact", None, teacher_answers
 
     existing = _existing_rubric(args, sample)
     existing_rubric = _normalize_rubric_for_mode(args, existing)

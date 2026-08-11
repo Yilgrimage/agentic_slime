@@ -17,6 +17,13 @@ from examples.agent_env.rewards.extractors import bool_value, float_value, int_v
 
 @dataclass(frozen=True)
 class SegmentCreditRecord:
+    """One assistant turn that can receive process credit.
+
+    This is the shared intermediate representation for all CA modes. The only
+    mode-specific choice is how these per-turn values are combined with scalar
+    outcome rewards before being expanded back onto response tokens.
+    """
+
     sample_index: int
     start: int
     end: int
@@ -47,6 +54,39 @@ def beta(args: Any) -> float:
     return value
 
 
+def advantage_mode(args: Any) -> str:
+    """Select how process credit is fused with scalar outcome credit.
+
+    These modes intentionally live in reward.credit_assignment, because they
+    change only the advantage construction for already-computed reward signals.
+    They do not change rollout, RM scoring, or the reward scalar stored on the
+    sample.
+    """
+
+    value = str(config(args).get("advantage_mode", "outcome_plus_process") or "outcome_plus_process").strip().lower()
+    aliases = {
+        "additive": "outcome_plus_process",
+        "a": "outcome_plus_process",
+        "sign_preserving": "outcome_reweight",
+        "reweight": "outcome_reweight",
+        "b": "outcome_reweight",
+        "segment_reward": "segment_reward_group_turn_norm",
+        "reinforce": "segment_reward_group_turn_norm",
+        "reinforce_plus_plus": "segment_reward_group_turn_norm",
+        "segment_reward_global_norm": "segment_reward_group_turn_norm",
+        "c": "segment_reward_group_turn_norm",
+    }
+    value = aliases.get(value, value)
+    valid = {
+        "outcome_plus_process",
+        "outcome_reweight",
+        "segment_reward_group_turn_norm",
+    }
+    if value not in valid:
+        raise ValueError(f"reward.credit_assignment.advantage_mode must be one of {sorted(valid)}")
+    return value
+
+
 def clip(args: Any) -> float:
     value = float_value(config(args).get("clip", 2.0), 2.0)
     if value <= 0:
@@ -62,9 +102,23 @@ def shaping_mode(args: Any) -> str:
 
 
 def normalization(args: Any) -> str:
-    value = str(config(args).get("normalization", "none")).strip().lower()
-    if value != "none":
-        raise ValueError("reward.credit_assignment.normalization must be none")
+    raw = config(args).get("normalization", None)
+    if raw in (None, ""):
+        return "episode_turn_zscore" if advantage_mode(args) == "outcome_reweight" else "none"
+    value = str(raw).strip().lower()
+    aliases = {
+        "turn_zscore": "group_turn_zscore",
+        "group_turn_norm": "group_turn_zscore",
+        "group_turn_normalization": "group_turn_zscore",
+        "trace_turn_zscore": "episode_turn_zscore",
+        "trajectory_turn_zscore": "episode_turn_zscore",
+        "episode_turn_norm": "episode_turn_zscore",
+    }
+    value = aliases.get(value, value)
+    if value not in {"none", "group_turn_zscore", "episode_turn_zscore"}:
+        raise ValueError("reward.credit_assignment.normalization must be none, group_turn_zscore, or episode_turn_zscore")
+    if advantage_mode(args) == "outcome_reweight" and value != "episode_turn_zscore":
+        raise ValueError("reward.credit_assignment.advantage_mode=outcome_reweight requires normalization=episode_turn_zscore")
     return value
 
 
@@ -288,6 +342,25 @@ def _segment_records_for_sample(args: Any, sample_index: int, sample: Sample) ->
     return records
 
 
+def sample_has_process_credit_signal(args: Any, sample: Sample) -> bool:
+    if not enabled(args) or not _is_student_train_sample(sample):
+        return False
+    return any(record.marked and abs(record.value) > 0 for record in _segment_records_for_sample(args, 0, sample))
+
+
+def group_has_process_credit_signal(args: Any, samples: list[Sample]) -> bool:
+    """Return whether a zero-scalar-reward group still has usable CA signal.
+
+    Dynamic sampling filters scalar GRPO groups before actor training. For
+    ROPD-CA, a group with identical scalar outcome rewards can still carry
+    token-local process credit. Only non-zero credit marks count: if the judge
+    found only bad behavior and `negative_reward=0`, this deliberately returns
+    False so the zero-signal group may be dropped.
+    """
+
+    return any(sample_has_process_credit_signal(args, sample) for sample in samples)
+
+
 def _sample_identifier(sample: Sample) -> dict[str, Any]:
     sample_metadata = metadata(sample)
     return {
@@ -399,7 +472,17 @@ def _group_indices(args: Any, samples: list[Sample]) -> dict[int, list[int]]:
     return grouped
 
 
-def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
+def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_rewards: list[float] | None = None) -> None:
+    """Attach response-token-aligned credit tensors using one shared pipeline.
+
+    All CA schemes first extract the same ``SegmentCreditRecord`` objects from
+    token segments and ROPD step evidence. A/B write a normalized process-credit
+    tensor and leave scalar GRPO outcome advantage to the actor hook. C combines
+    raw scalar outcome reward with process credit at the turn level, normalizes
+    those segment rewards inside each group, then writes that final tensor for
+    the same actor hook to consume.
+    """
+
     if not enabled(args):
         return
 
@@ -410,25 +493,13 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
         sample_advantages.append([0.0] * max(0, response_length))
         sample_records.append([])
 
-    cfg_clip = clip(args)
-    cfg_normalization = normalization(args)
-    for indices in _group_indices(args, samples).values():
-        records: list[SegmentCreditRecord] = []
-        for idx in indices:
-            sample = samples[idx]
-            if not _is_student_train_sample(sample):
-                continue
-            records.extend(_segment_records_for_sample(args, idx, sample))
-        for record in records:
-            sample_records[record.sample_index].append(record)
-        train_records = [record for record in records if record.marked]
-        for record in train_records:
-            if cfg_normalization != "none":
-                raise ValueError("reward.credit_assignment.normalization must be none")
-            normalized = max(-cfg_clip, min(cfg_clip, record.value))
-            target = sample_advantages[record.sample_index]
-            for offset in range(record.start, min(record.end, len(target))):
-                target[offset] = normalized
+    mode = advantage_mode(args)
+    if mode == "segment_reward_group_turn_norm":
+        if scalar_rewards is None:
+            raise ValueError("segment_reward_group_turn_norm requires scalar_rewards from reward post-process")
+        _attach_segment_reward_group_turn_norm(args, samples, sample_advantages, sample_records, scalar_rewards)
+    else:
+        _attach_process_credit(args, samples, sample_advantages, sample_records)
 
     for sample, values in zip(samples, sample_advantages, strict=True):
         sample_metadata = metadata(sample)
@@ -436,9 +507,13 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
         sample_metadata["process_advantages"] = values
         sample_metadata["credit_assignment"] = {
             "enabled": True,
+            "advantage_mode": mode,
             "beta": beta(args),
             "shaping_mode": shaping_mode(args),
             "normalization": normalization(args),
+            "segment_reward_normalization": "group_turn_zscore"
+            if mode == "segment_reward_group_turn_norm"
+            else None,
             "milestone_reward": milestone_reward(args),
             "predecessor_reward": predecessor_reward(args),
             "negative_reward": negative_reward(args),
@@ -450,3 +525,125 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
         }
 
     _maybe_dump_credit_assignment(args, samples, sample_advantages=sample_advantages, sample_records=sample_records)
+
+
+def _write_record_value(target: list[float], record: SegmentCreditRecord, value: float) -> None:
+    for offset in range(record.start, min(record.end, len(target))):
+        target[offset] = value
+
+
+def _records_for_group(
+    args: Any,
+    samples: list[Sample],
+    indices: list[int],
+    sample_records: list[list[SegmentCreditRecord]],
+) -> list[SegmentCreditRecord]:
+    """Extract the common turn-credit records for one prompt group."""
+
+    records: list[SegmentCreditRecord] = []
+    for idx in indices:
+        sample = samples[idx]
+        if not _is_student_train_sample(sample):
+            continue
+        records.extend(_segment_records_for_sample(args, idx, sample))
+    for record in records:
+        sample_records[record.sample_index].append(record)
+    return records
+
+
+def _attach_process_credit(
+    args: Any,
+    samples: list[Sample],
+    sample_advantages: list[list[float]],
+    sample_records: list[list[SegmentCreditRecord]],
+) -> None:
+    """Attach raw or normalized process credit for schemes A/B.
+
+    Scheme B intentionally uses episode-local normalization only: its process
+    term is a strict within-trajectory redistribution of the scalar outcome
+    advantage and must not depend on other sampled episodes.
+    """
+
+    cfg_clip = clip(args)
+    cfg_normalization = normalization(args)
+    for indices in _group_indices(args, samples).values():
+        records = _records_for_group(args, samples, indices, sample_records)
+        if cfg_normalization == "none":
+            train_records = [record for record in records if record.marked]
+            for record in train_records:
+                normalized = max(-cfg_clip, min(cfg_clip, record.value))
+                _write_record_value(sample_advantages[record.sample_index], record, normalized)
+            continue
+        if cfg_normalization == "group_turn_zscore":
+            _write_group_turn_zscore(records, sample_advantages, cfg_clip)
+            continue
+        if cfg_normalization == "episode_turn_zscore":
+            _write_episode_turn_zscore(records, sample_advantages, cfg_clip)
+            continue
+        raise ValueError(f"Unsupported credit assignment normalization={cfg_normalization!r}")
+
+
+def _write_group_turn_zscore(
+    records: list[SegmentCreditRecord],
+    sample_advantages: list[list[float]],
+    cfg_clip: float,
+) -> None:
+    if not records:
+        return
+    values = [record.value for record in records]
+    mean = sum(values) / len(values)
+    if len(values) <= 1:
+        std = 0.0
+    else:
+        variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+        std = max(variance, 0.0) ** 0.5
+    for record in records:
+        normalized = 0.0 if std <= 0 else (record.value - mean) / (std + 1e-6)
+        normalized = max(-cfg_clip, min(cfg_clip, normalized))
+        _write_record_value(sample_advantages[record.sample_index], record, normalized)
+
+
+def _write_episode_turn_zscore(
+    records: list[SegmentCreditRecord],
+    sample_advantages: list[list[float]],
+    cfg_clip: float,
+) -> None:
+    by_sample: dict[int, list[SegmentCreditRecord]] = {}
+    for record in records:
+        by_sample.setdefault(record.sample_index, []).append(record)
+    for sample_records in by_sample.values():
+        _write_group_turn_zscore(sample_records, sample_advantages, cfg_clip)
+
+
+def _attach_segment_reward_group_turn_norm(
+    args: Any,
+    samples: list[Sample],
+    sample_advantages: list[list[float]],
+    sample_records: list[list[SegmentCreditRecord]],
+    scalar_rewards: list[float],
+) -> None:
+    """Scheme C precomputation: normalize segment rewards over group turns.
+
+    ``scalar_rewards`` is the raw scalar outcome/reward-model result before
+    GRPO group normalization. Each assistant turn is one normalization sample:
+    build ``raw_outcome_reward + beta * process_credit``, normalize those values
+    over turns in the same group, then expand the turn value to its tokens.
+    """
+
+    cfg_clip = clip(args)
+    cfg_beta = beta(args)
+    for indices in _group_indices(args, samples).values():
+        records = _records_for_group(args, samples, indices, sample_records)
+        if not records:
+            continue
+        values = [float(scalar_rewards[record.sample_index]) + cfg_beta * record.value for record in records]
+        mean = sum(values) / len(values)
+        if len(values) <= 1:
+            std = 0.0
+        else:
+            variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+            std = max(variance, 0.0) ** 0.5
+        for record, value in zip(records, values, strict=True):
+            normalized = value - mean if std <= 0 else (value - mean) / (std + 1e-6)
+            normalized = max(-cfg_clip, min(cfg_clip, normalized))
+            _write_record_value(sample_advantages[record.sample_index], record, normalized)
