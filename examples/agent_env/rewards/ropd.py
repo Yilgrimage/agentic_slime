@@ -2324,7 +2324,10 @@ def _select_train_score(
     group_stats: dict[str, Any],
 ) -> tuple[float, str]:
     schema_mode = _schema_mode(args)
-    if schema_mode in {"rubric_shaping", "ca_compact"}:
+    if schema_mode == "ca_compact":
+        reason = "env_success_only_ca_compact"
+        return (1.0 if _env_success_for_shaping(sample) else 0.0), reason
+    if schema_mode == "rubric_shaping":
         reason = f"env_success_else_{schema_mode}"
         if _env_success_for_shaping(sample):
             return 1.0, reason
@@ -2504,7 +2507,11 @@ def _result(
     if schema_mode in {"rubric_shaping", "ca_compact"}:
         raw["rubric_score"] = float(bounded)
         raw["env_success_for_reward"] = _env_success_for_shaping(sample)
+    if schema_mode == "rubric_shaping":
         raw["ropd_shaping_beta"] = _rubric_shaping_beta(args)
+    elif schema_mode == "ca_compact":
+        raw["ca_scalar_reward_uses_process_score"] = False
+        raw["ca_process_score_used_for"] = "credit_assignment_only"
     else:
         raw["answer_score"] = float(bounded)
     for key in (

@@ -322,7 +322,11 @@ def group_has_process_credit_signal(args: Any, samples: list[Sample]) -> bool:
             sample = samples[idx]
             if not _is_student_train_sample(sample):
                 continue
-            values.extend(record.value for record in _segment_records_for_sample(args, idx, sample))
+            values.extend(
+                record.value
+                for record in _segment_records_for_sample(args, idx, sample)
+                if record.marked
+            )
         if len(values) <= 1:
             continue
         mean = sum(values) / len(values)
@@ -353,15 +357,16 @@ def attach_process_advantages(args: Any, samples: list[Sample]) -> None:
             records.extend(_segment_records_for_sample(args, idx, sample))
         for record in records:
             sample_records[record.sample_index].append(record)
-        if len(records) <= 1:
+        train_records = [record for record in records if record.marked]
+        if len(train_records) <= 1:
             continue
-        values = [record.value for record in records]
+        values = [record.value for record in train_records]
         mean = sum(values) / len(values)
         variance = sum((value - mean) ** 2 for value in values) / max(1, len(values) - 1)
         std = math.sqrt(max(variance, 0.0))
         if std <= 1e-6:
             continue
-        for record in records:
+        for record in train_records:
             normalized = max(-cfg_clip, min(cfg_clip, (record.value - mean) / (std + 1e-6)))
             target = sample_advantages[record.sample_index]
             for offset in range(record.start, min(record.end, len(target))):

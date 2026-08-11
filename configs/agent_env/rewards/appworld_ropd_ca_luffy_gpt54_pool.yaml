@@ -5,7 +5,6 @@ outcome: 10.0
 
 ropd:
   schema_mode: ca_compact
-  shaping_beta: 0.2
   join_key: task_id
   teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
   teacher_index_keys:
@@ -31,7 +30,7 @@ ropd:
 credit_assignment:
   enable: true
   request_process_step_evidence: true
-  beta: 0.05
+  beta: 0.1
   clip: 2.0
   step_index_base: 1
 
