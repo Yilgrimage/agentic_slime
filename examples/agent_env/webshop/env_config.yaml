@@ -30,6 +30,10 @@ webshop:
   attr_file: ${AGENT_ENV_DATA_DIR}/data/items_ins_v2.json
   num_products: 100000
   human_goals: true
+  # WebShop samples product prices and price constraints while building goals.
+  # This seed is part of task identity; without it, the same task_index can
+  # produce different instructions across env workers.
+  goal_seed: 0
 
 env_server:
   pool_size: 48

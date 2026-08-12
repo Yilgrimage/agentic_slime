@@ -766,6 +766,14 @@ def _list_value(value: Any, default: tuple[str, ...] = ()) -> list[str]:
     return [str(value).strip()]
 
 
+def _metadata_field_values(value: Any) -> list[str]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
+
+
 def _metadata_value(sample: Sample, keys: list[str]) -> Any:
     sample_metadata = metadata(sample)
     for key in keys:
@@ -969,10 +977,13 @@ def _join_key(args: Any) -> str:
 def _join_value(args: Any, sample: Sample) -> str:
     sample_metadata = metadata(sample)
     key = _join_key(args)
-    for candidate in (key, "task_id", "id", "task_index"):
+    candidates = (key, "id", "task_index") if key == "task_id" else (key,)
+    for candidate in candidates:
         value = sample_metadata.get(candidate)
         if value not in (None, "", []):
             return str(value)
+    if key != "task_id":
+        raise ValueError(f"ROPD join_key={key!r} is missing from sample metadata; refusing to fall back to task_id")
     return _cache_key(sample)
 
 
@@ -992,10 +1003,14 @@ def _candidate_values_from_mapping(mapping: dict[str, Any], keys: list[str]) -> 
         value = mapping.get(key)
         if value in (None, "", []):
             continue
-        for item in _list_value(value):
-            values.append(item)
-            if "::" in item:
-                values.append(item.split("::", 1)[0])
+        for item in _metadata_field_values(value):
+            item_text = str(item).strip()
+            if not item_text:
+                continue
+            values.append(item_text)
+            normalized = re.sub(r"\s+", " ", item_text).lower()
+            if normalized and normalized != item_text:
+                values.append(normalized)
     return values
 
 
@@ -1057,6 +1072,8 @@ def _teacher_index_row_text(args: Any, row: dict[str, Any]) -> str:
 def _teacher_index_row_status(row: dict[str, Any], *, has_text: bool) -> str:
     for source in (row, row.get("evidence"), row.get("adapter_result")):
         if isinstance(source, dict):
+            if source.get("can_be_teacher") is False or source.get("teacher_eligible") is False:
+                return "not_teacher"
             for success_key in ("teacher_success", "success", "completed"):
                 success = source.get(success_key)
                 if success is True:
@@ -2262,6 +2279,10 @@ def _reward_group_reference(args: Any) -> str:
     )
 
 
+def _require_teacher(args: Any) -> bool:
+    return _cfg_bool(args, "require_teacher", False)
+
+
 def _reward_mode(args: Any) -> str:
     return _cfg_choice(
         args,
@@ -2386,6 +2407,8 @@ async def _rubric_for_bucket(
     sample = samples[0]
     teacher_answers = _teacher_answers(args, sample)
     if _schema_mode(args) == "ca_compact":
+        if _require_teacher(args) and not teacher_answers:
+            return None, "missing_teacher", None, teacher_answers
         source = "ca_compact" if teacher_answers else "ca_compact_no_reference"
         return _ca_compact_rubric(args), source, None, teacher_answers
     if not teacher_answers:

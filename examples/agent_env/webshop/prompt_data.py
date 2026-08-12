@@ -33,12 +33,15 @@ def _read_task_rows(path: Path, split: str) -> list[dict[str, Any]]:
             if task_index in seen:
                 continue
             seen.add(task_index)
-            rows.append(
-                {
-                    "task_index": task_index,
-                    "task_id": str(task_id or f"webshop:{split}:{task_index}"),
-                }
-            )
+            task_prompt = str(row.get("task_prompt") or row.get("instruction") or row.get("query") or "").strip()
+            task_row = {
+                "task_index": task_index,
+                "task_id": str(task_id or f"webshop:{split}:{task_index}"),
+            }
+            if task_prompt:
+                task_row["task_prompt"] = task_prompt
+                task_row["instruction"] = task_prompt
+            rows.append(task_row)
     if not rows:
         raise RuntimeError(f"No WebShop task rows for split={split} in {path}")
     return rows
@@ -74,6 +77,10 @@ def write_split(
                     "split": split,
                 },
             }
+            for key in ("task_prompt", "instruction"):
+                value = task_row.get(key)
+                if value not in (None, "", []):
+                    row["metadata"][key] = value
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 

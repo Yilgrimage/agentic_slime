@@ -51,6 +51,14 @@ def list_value(value: Any, default: tuple[str, ...] = ()) -> list[str]:
     return [str(value).strip()]
 
 
+def metadata_field_values(value: Any) -> list[str]:
+    if value in (None, "", []):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
+
+
 def mapping_text(mapping: dict[str, Any], keys: list[str]) -> str:
     for key in keys:
         value = mapping.get(key)
@@ -86,10 +94,8 @@ def candidate_values_from_mapping(mapping: dict[str, Any], keys: list[str]) -> l
         value = mapping.get(key)
         if value in (None, "", []):
             continue
-        for item in list_value(value):
+        for item in metadata_field_values(value):
             values.append(item)
-            if "::" in item:
-                values.append(item.split("::", 1)[0])
     return values
 
 

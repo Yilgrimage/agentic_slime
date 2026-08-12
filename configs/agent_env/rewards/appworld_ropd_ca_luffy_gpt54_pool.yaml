@@ -30,6 +30,7 @@ ropd:
 credit_assignment:
   enable: true
   request_process_step_evidence: true
+  advantage_mode: outcome_plus_process
   beta: 0.1
   shaping_mode: milestone
   normalization: none

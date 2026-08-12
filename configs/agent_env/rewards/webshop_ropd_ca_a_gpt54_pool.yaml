@@ -6,10 +6,12 @@ outcome: 10.0
 ropd:
   schema_mode: ca_compact
   ca_scalar_reward_source: env_score
-  join_key: task_id
+  require_teacher: true
+  join_key: task_prompt
   teacher_index_path: ${ROOT_DIR}/data/webshop/teacher_data/trace.jsonl
   teacher_index_keys:
-    - task_id
+    - task_prompt
+    - instruction
   teacher_answer_keys:
     - teacher_tool_trace
     - teacher_trace

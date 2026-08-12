@@ -6,10 +6,12 @@ outcome: 10.0
 ropd:
   schema_mode: rubric_shaping
   shaping_beta: 0.2
-  join_key: task_id
+  require_teacher: true
+  join_key: task_prompt
   teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/webshop_deepseek_v4_flash_bestofn_teacher_score1.jsonl
   teacher_index_keys:
-    - task_id
+    - task_prompt
+    - instruction
   teacher_answer_keys:
     - teacher_tool_trace
     - teacher_trace

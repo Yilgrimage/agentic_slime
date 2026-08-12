@@ -33,13 +33,14 @@ ropd:
 credit_assignment:
   enable: true
   request_process_step_evidence: true
-  advantage_mode: outcome_reweight
-  beta: 0.2
+  advantage_mode: outcome_plus_process
+  beta: 0.5
   shaping_mode: milestone
-  normalization: episode_turn_zscore
+  normalization: none
   milestone_reward: 2.0
   predecessor_reward: 0.5
-  negative_reward: 0.0
+  negative_reward: -1.0
   success_milestone_tail_steps: 1
+  success_milestone_min_env_score: 1.0
   clip: 2.0
   step_index_base: 1

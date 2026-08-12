@@ -98,6 +98,12 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ropd_env_success_for_reward_seen = False
     ca_nonzero_tokens: list[float] = []
     ca_nonzero_token_rates: list[float] = []
+    ca_positive_token_rates: list[float] = []
+    ca_negative_token_rates: list[float] = []
+    ca_process_value_means: list[float] = []
+    ca_process_value_abs_means: list[float] = []
+    ca_process_delta_means: list[float] = []
+    ca_process_delta_abs_means: list[float] = []
 
     for sample in real_samples:
         sample_metadata = getattr(sample, "metadata", None) or {}
@@ -109,6 +115,24 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             nonzero_rate = _float_or_none(ca.get("nonzero_token_rate"))
             if nonzero_rate is not None:
                 ca_nonzero_token_rates.append(nonzero_rate)
+            positive_rate = _float_or_none(ca.get("positive_token_rate"))
+            if positive_rate is not None:
+                ca_positive_token_rates.append(positive_rate)
+            negative_rate = _float_or_none(ca.get("negative_token_rate"))
+            if negative_rate is not None:
+                ca_negative_token_rates.append(negative_rate)
+            process_mean = _float_or_none(ca.get("process_value_mean"))
+            if process_mean is not None:
+                ca_process_value_means.append(process_mean)
+            process_abs_mean = _float_or_none(ca.get("process_value_abs_mean"))
+            if process_abs_mean is not None:
+                ca_process_value_abs_means.append(process_abs_mean)
+            process_delta_mean = _float_or_none(ca.get("process_delta_mean"))
+            if process_delta_mean is not None:
+                ca_process_delta_means.append(process_delta_mean)
+            process_delta_abs_mean = _float_or_none(ca.get("process_delta_abs_mean"))
+            if process_delta_abs_mean is not None:
+                ca_process_delta_abs_means.append(process_delta_abs_mean)
         rm_reward = _as_dict(sample_metadata.get("rm_reward"))
         score = _float_or_none(rm_reward.get("score"))
         if score is not None:
@@ -234,6 +258,18 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics["reward/credit_assignment/nonzero_tokens_mean"] = _mean(ca_nonzero_tokens)
     if ca_nonzero_token_rates:
         metrics["reward/credit_assignment/nonzero_token_rate_mean"] = _mean(ca_nonzero_token_rates)
+    if ca_positive_token_rates:
+        metrics["reward/credit_assignment/positive_token_rate_mean"] = _mean(ca_positive_token_rates)
+    if ca_negative_token_rates:
+        metrics["reward/credit_assignment/negative_token_rate_mean"] = _mean(ca_negative_token_rates)
+    if ca_process_value_means:
+        metrics["reward/credit_assignment/process_value_mean"] = _mean(ca_process_value_means)
+    if ca_process_value_abs_means:
+        metrics["reward/credit_assignment/process_value_abs_mean"] = _mean(ca_process_value_abs_means)
+    if ca_process_delta_means:
+        metrics["reward/credit_assignment/process_delta_mean"] = _mean(ca_process_delta_means)
+    if ca_process_delta_abs_means:
+        metrics["reward/credit_assignment/process_delta_abs_mean"] = _mean(ca_process_delta_abs_means)
     _reward_call_metrics(metrics, role="judge", calls=judge_calls, sample_count=total)
     _reward_call_metrics(metrics, role="rubric", calls=rubric_calls, sample_count=total)
     return metrics

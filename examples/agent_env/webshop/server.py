@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import logging
 import os
+import random
 import re
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,18 @@ from examples.agent_env.prompting import require_prompt
 from examples.agent_env.server import serve_process_pool
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_instruction_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _requested_instruction(payload: dict[str, Any]) -> str:
+    for key in ("task_prompt", "instruction", "query", "question", "task_question", "instruction_text"):
+        value = payload.get(key)
+        if value not in (None, "", []):
+            return str(value).strip()
+    return ""
 
 def _load_text_env_class(webshop_lib: str | None):
     if not webshop_lib:
@@ -132,12 +145,14 @@ def _environment_config(raw: dict) -> dict:
     product_file = _deep_get(raw, "webshop", "product_file", None)
     attr_file = _deep_get(raw, "webshop", "attr_file", None)
     num_products = _deep_get(raw, "webshop", "num_products", None)
+    goal_seed = _deep_get(raw, "webshop", "goal_seed", None)
     missing = [
         name
         for name, value in (
             ("webshop.product_file", product_file),
             ("webshop.attr_file", attr_file),
             ("webshop.num_products", num_products),
+            ("webshop.goal_seed", goal_seed),
         )
         if value is None
     ]
@@ -151,6 +166,7 @@ def _environment_config(raw: dict) -> dict:
         "attr_file": os.path.expandvars(str(attr_file)) if attr_file else None,
         "num_products": num_products,
         "human_goals": _deep_get(raw, "webshop", "human_goals", True),
+        "goal_seed": goal_seed,
         "_agent_env_runtime": {
             "max_turns": int(raw.get("max_turns", _deep_get(raw, "webshop", "max_turns", 20))),
             "timeouts": raw.get("timeouts") if isinstance(raw.get("timeouts"), dict) else {},
@@ -292,11 +308,24 @@ class WebShopBackend:
 
             utils.DEFAULT_FILE_PATH = str(product_file)
 
+        goal_seed = self.config.get("goal_seed")
+        if goal_seed not in (None, ""):
+            seed = int(goal_seed)
+            random.seed(seed)
+            try:
+                import numpy as np
+
+                np.random.seed(seed)
+            except Exception:
+                logger.debug("Failed to seed numpy for WebShop goal generation", exc_info=True)
+
         kwargs = {
             "observation_mode": self.config.get("observation_mode", "text"),
             "num_products": self.config["num_products"],
             "human_goals": self.config.get("human_goals", True),
         }
+        if goal_seed not in (None, ""):
+            kwargs["seed"] = int(goal_seed)
         if product_file:
             kwargs["file_path"] = str(product_file)
         if self.config.get("env_id", "WebAgentTextEnv-v0") != "WebAgentTextEnv-v0":
@@ -314,6 +343,7 @@ class WebShopBackend:
             expected_task_id = f"webshop:{self.split}:{self.task_index}"
             if requested_task_id != expected_task_id:
                 raise ValueError(f"WebShop task_id mismatch: expected {expected_task_id}, got {requested_task_id}")
+        requested_instruction = _requested_instruction(payload)
         obs = _reset_env(self.env, self.task_index)
         self.reset_count += 1
         self.step_count = 0
@@ -326,6 +356,13 @@ class WebShopBackend:
             "split": self.split,
         }
         if instruction:
+            if requested_instruction and _normalize_instruction_text(instruction) != _normalize_instruction_text(requested_instruction):
+                raise ValueError(
+                    "WebShop instruction mismatch for "
+                    f"task_id={requested_task_id or f'webshop:{self.split}:{self.task_index}'} "
+                    f"task_index={self.task_index}: env={instruction!r} requested={requested_instruction!r}. "
+                    "Regenerate teacher/prompt data with the same WebShop goal_seed, or omit stale task text."
+                )
             self.last_info["instruction"] = instruction
             self.last_info["task_prompt"] = instruction
         return {

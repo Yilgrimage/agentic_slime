@@ -740,6 +740,9 @@ async def generate_server_episode_rollout(
         for key in ("game_file", "domain", "task_set", "data_source", "task_ref", "num_tasks"):
             if result.get(key) not in (None, "", []):
                 env_meta[key] = result.get(key)
+        for key in ("query", "task_prompt", "instruction", "question", "task_question", "instruction_text"):
+            if result.get(key) not in (None, "", []):
+                env_meta[key] = result.get(key)
         env_meta.update({key: value for key, value in info.items() if key not in env_meta})
         record_env_metadata(sample_metadata, spec, env_meta)
         if not bool(sample_metadata.get("discard_sample", False)):

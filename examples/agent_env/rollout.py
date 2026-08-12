@@ -410,7 +410,23 @@ def task_payload(sample: Sample, spec: AgentEnvSpec) -> dict[str, Any]:
         "split": split,
         "task_index": task_index(sample),
     }
-    for key in ("env", "data_source", "domain", "task_set", "dataset_name", "task_id", "seed", "task_ref", "task"):
+    for key in (
+        "env",
+        "data_source",
+        "domain",
+        "task_set",
+        "dataset_name",
+        "task_id",
+        "seed",
+        "task_ref",
+        "task",
+        "query",
+        "task_prompt",
+        "instruction",
+        "question",
+        "task_question",
+        "instruction_text",
+    ):
         if key in sample_metadata and sample_metadata[key] is not None:
             payload[key] = sample_metadata[key]
     return payload
@@ -434,6 +450,33 @@ def task_key(sample: Sample, spec: AgentEnvSpec) -> str:
     return "|".join(parts)
 
 
+def _normalize_task_metadata_value(value: Any) -> str:
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _record_env_metadata_value(
+    sample_metadata: dict[str, Any],
+    *,
+    key: str,
+    value: Any,
+    spec: AgentEnvSpec,
+    validate: bool,
+) -> None:
+    if value in (None, "", []):
+        return
+    existing = sample_metadata.get(key)
+    if validate and existing not in (None, "", []):
+        if _normalize_task_metadata_value(existing) != _normalize_task_metadata_value(value):
+            raise ValueError(
+                f"{spec.name} env returned metadata mismatch for {key}: "
+                f"sample={existing!r} env={value!r}. "
+                "Prompt data and env reset must describe the same task."
+            )
+    sample_metadata[key] = value
+
+
 def record_env_metadata(sample_metadata: dict[str, Any], spec: AgentEnvSpec, env_meta: dict[str, Any]) -> None:
     sample_metadata[spec.name] = env_meta
     for key in (
@@ -451,8 +494,13 @@ def record_env_metadata(sample_metadata: dict[str, Any], spec: AgentEnvSpec, env
         "instruction_text",
     ):
         value = env_meta.get(key)
-        if value not in (None, "", []):
-            sample_metadata.setdefault(key, value)
+        _record_env_metadata_value(
+            sample_metadata,
+            key=key,
+            value=value,
+            spec=spec,
+            validate=key in {"task_id", "query", "task_prompt", "instruction", "question", "task_question", "instruction_text"},
+        )
 
 
 def tokenizer(args: Any):

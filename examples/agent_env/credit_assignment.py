@@ -32,6 +32,30 @@ class SegmentCreditRecord:
     marked: bool
 
 
+@dataclass(frozen=True)
+class StepMarkEvent:
+    step: int
+    source: str
+    value: float
+    previous_value: float
+    new_value: float
+    applied: bool
+    criterion_id: str | None = None
+    reason: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "step": self.step,
+            "source": self.source,
+            "criterion_id": self.criterion_id,
+            "value": self.value,
+            "previous_value": self.previous_value,
+            "new_value": self.new_value,
+            "applied": self.applied,
+            "reason": self.reason,
+        }
+
+
 def config(args: Any) -> dict[str, Any]:
     value = reward_cfg_path(args, "credit_assignment", {})
     return dict(value) if isinstance(value, dict) else {}
@@ -142,6 +166,13 @@ def success_milestone_tail_steps(args: Any) -> int:
     return value
 
 
+def success_milestone_min_env_score(args: Any) -> float:
+    value = float_value(config(args).get("success_milestone_min_env_score", 1.0), 1.0)
+    if value < 0:
+        raise ValueError("reward.credit_assignment.success_milestone_min_env_score must be non-negative")
+    return value
+
+
 def step_index_base(args: Any) -> int:
     value = int_value(config(args).get("step_index_base", 1), 1)
     if value not in (0, 1):
@@ -218,16 +249,77 @@ def _mark_milestone(
     available_steps: list[int],
     milestone_value: float,
     predecessor_value: float,
+    events: list[StepMarkEvent] | None = None,
+    source: str = "process_positive",
+    criterion_id: str | None = None,
 ) -> None:
-    marks[step] = max(marks.get(step, 0.0), milestone_value)
+    _apply_mark(
+        marks=marks,
+        step=step,
+        value=milestone_value,
+        mode="max",
+        events=events,
+        source=source,
+        criterion_id=criterion_id,
+    )
     for previous_step in available_steps:
         if previous_step >= step:
             break
-        marks[previous_step] = max(marks.get(previous_step, 0.0), predecessor_value)
+        _apply_mark(
+            marks=marks,
+            step=previous_step,
+            value=predecessor_value,
+            mode="max",
+            events=events,
+            source=f"{source}_predecessor",
+            criterion_id=criterion_id,
+        )
+
+
+def _apply_mark(
+    *,
+    marks: dict[int, float],
+    step: int,
+    value: float,
+    mode: str,
+    events: list[StepMarkEvent] | None,
+    source: str,
+    criterion_id: str | None = None,
+    reason: str | None = None,
+) -> None:
+    previous = marks.get(step, 0.0)
+    if mode == "max":
+        new_value = max(previous, value)
+    elif mode == "min":
+        new_value = min(previous, value)
+    else:
+        raise ValueError(f"Unsupported mark mode: {mode}")
+    marks[step] = new_value
+    if events is not None:
+        events.append(
+            StepMarkEvent(
+                step=step,
+                source=source,
+                criterion_id=criterion_id,
+                value=value,
+                previous_value=previous,
+                new_value=new_value,
+                applied=new_value != previous,
+                reason=reason,
+            )
+        )
 
 
 def _success_tail_milestone_steps(args: Any, sample: Sample, available_steps: list[int]) -> list[int]:
-    if not bool(metadata(sample).get("env_success", False)):
+    sample_metadata = metadata(sample)
+    if "env_score" in sample_metadata:
+        try:
+            strict_success = float(sample_metadata.get("env_score")) >= success_milestone_min_env_score(args)
+        except (TypeError, ValueError):
+            strict_success = False
+    else:
+        strict_success = bool(sample_metadata.get("env_success", False))
+    if not strict_success:
         return []
     tail_steps = success_milestone_tail_steps(args)
     if tail_steps <= 0:
@@ -236,6 +328,16 @@ def _success_tail_milestone_steps(args: Any, sample: Sample, available_steps: li
 
 
 def _sample_step_marks(args: Any, sample: Sample, *, available_steps: list[int] | None = None) -> dict[int, float]:
+    marks, _ = _sample_step_marks_and_events(args, sample, available_steps=available_steps)
+    return marks
+
+
+def _sample_step_marks_and_events(
+    args: Any,
+    sample: Sample,
+    *,
+    available_steps: list[int] | None = None,
+) -> tuple[dict[int, float], list[StepMarkEvent]]:
     shaping_mode(args)
     raw = _rm_raw(sample)
     evidence = raw.get("process_step_evidence")
@@ -244,10 +346,12 @@ def _sample_step_marks(args: Any, sample: Sample, *, available_steps: list[int] 
     predecessor_value = predecessor_reward(args)
     negative_value = negative_reward(args)
     marks: dict[int, float] = {}
+    events: list[StepMarkEvent] = []
     if isinstance(evidence, list):
         for item in evidence:
             if not isinstance(item, dict):
                 continue
+            criterion_id = str(item.get("criterion_id") or "").strip() or None
             positive_steps = _step_list(item.get("positive_step_indices"))
             negative_steps = _step_list(item.get("negative_step_indices"))
             legacy_steps = _step_list(item.get("step_indices"))
@@ -263,12 +367,35 @@ def _sample_step_marks(args: Any, sample: Sample, *, available_steps: list[int] 
                     available_steps=available,
                     milestone_value=milestone_value,
                     predecessor_value=predecessor_value,
+                    events=events,
+                    source="process_positive",
+                    criterion_id=criterion_id,
                 )
             if negative_value != 0.0:
                 for step in negative_steps:
                     if step in marks and marks[step] > 0:
+                        events.append(
+                            StepMarkEvent(
+                                step=step,
+                                source="process_negative",
+                                criterion_id=criterion_id,
+                                value=negative_value,
+                                previous_value=marks[step],
+                                new_value=marks[step],
+                                applied=False,
+                                reason="positive_mark_already_present",
+                            )
+                        )
                         continue
-                    marks[step] = min(marks.get(step, 0.0), negative_value)
+                    _apply_mark(
+                        marks=marks,
+                        step=step,
+                        value=negative_value,
+                        mode="min",
+                        events=events,
+                        source="process_negative",
+                        criterion_id=criterion_id,
+                    )
 
     for step in _success_tail_milestone_steps(args, sample, available):
         _mark_milestone(
@@ -277,8 +404,10 @@ def _sample_step_marks(args: Any, sample: Sample, *, available_steps: list[int] 
             available_steps=available,
             milestone_value=milestone_value,
             predecessor_value=predecessor_value,
+            events=events,
+            source="env_success_tail",
         )
-    return marks
+    return marks, events
 
 
 def _segment_turn(segment: dict[str, Any]) -> int | None:
@@ -385,6 +514,13 @@ def _credit_record_payload(
     rm_reward = sample_metadata.get("rm_reward") if isinstance(sample_metadata.get("rm_reward"), dict) else {}
     raw = rm_reward.get("raw") if isinstance(rm_reward.get("raw"), dict) else {}
     process_evidence = raw.get("process_step_evidence")
+    step_mark_events: list[StepMarkEvent] = []
+    if records:
+        _, step_mark_events = _sample_step_marks_and_events(
+            args,
+            sample,
+            available_steps=[record.step for record in records],
+        )
     return {
         "schema_version": "agent_env.credit_assignment_audit.v1",
         "time": time.time(),
@@ -410,6 +546,7 @@ def _credit_record_payload(
         },
         "credit_assignment": sample_metadata.get("credit_assignment"),
         "step_marks": {record.step: record.value for record in records if record.marked},
+        "step_mark_events": [event.as_dict() for event in step_mark_events],
         "process_step_evidence": process_evidence if isinstance(process_evidence, list) else [],
         "segments": [
             {
@@ -504,11 +641,17 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
     for sample, values in zip(samples, sample_advantages, strict=True):
         sample_metadata = metadata(sample)
         nonzero = sum(1 for value in values if abs(value) > 0)
+        positive = sum(1 for value in values if value > 0)
+        negative = sum(1 for value in values if value < 0)
+        response_length = len(values)
+        process_mean = (sum(values) / response_length) if response_length else 0.0
+        process_abs_mean = (sum(abs(value) for value in values) / response_length) if response_length else 0.0
+        cfg_beta = beta(args)
         sample_metadata["process_advantages"] = values
         sample_metadata["credit_assignment"] = {
             "enabled": True,
             "advantage_mode": mode,
-            "beta": beta(args),
+            "beta": cfg_beta,
             "shaping_mode": shaping_mode(args),
             "normalization": normalization(args),
             "segment_reward_normalization": "group_turn_zscore"
@@ -518,10 +661,19 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
             "predecessor_reward": predecessor_reward(args),
             "negative_reward": negative_reward(args),
             "success_milestone_tail_steps": success_milestone_tail_steps(args),
+            "success_milestone_min_env_score": success_milestone_min_env_score(args),
             "clip": clip(args),
             "nonzero_tokens": nonzero,
-            "response_length": len(values),
-            "nonzero_token_rate": (nonzero / len(values)) if values else 0.0,
+            "positive_tokens": positive,
+            "negative_tokens": negative,
+            "response_length": response_length,
+            "nonzero_token_rate": (nonzero / response_length) if response_length else 0.0,
+            "positive_token_rate": (positive / response_length) if response_length else 0.0,
+            "negative_token_rate": (negative / response_length) if response_length else 0.0,
+            "process_value_mean": process_mean,
+            "process_value_abs_mean": process_abs_mean,
+            "process_delta_mean": cfg_beta * process_mean,
+            "process_delta_abs_mean": cfg_beta * process_abs_mean,
         }
 
     _maybe_dump_credit_assignment(args, samples, sample_advantages=sample_advantages, sample_records=sample_records)
