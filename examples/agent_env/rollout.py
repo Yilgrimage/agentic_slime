@@ -1681,6 +1681,28 @@ def _glm_style_pad_group(
     return padded, padding_offset, metrics
 
 
+def glm_style_group_padding_filter_keep(args: Any, group: list[Sample]) -> tuple[bool, dict[str, float]]:
+    """Return whether a completed group has enough valid samples for padding repair.
+
+    This is an infra/padding pre-filter, not reward dynamic sampling. It keeps
+    full-async collection from accepting a group that the later sample-filter
+    hook must reject because too many samples were discarded by rollout errors.
+    """
+    group_size = int(arg(args, "n_samples_per_prompt", len(group)) or len(group))
+    min_valid_fraction = float(_runtime_env(args, "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "0.5"))
+    valid_count = sum(1 for sample in group if not _is_hard_discard_sample(sample))
+    invalid_count = len(group) - valid_count
+    metrics = {
+        "agent_env/glm_padding/prefilter_group_seen": 1.0,
+        "agent_env/glm_padding/prefilter_invalid_samples": float(invalid_count),
+    }
+    keep = valid_count > group_size * min_valid_fraction
+    if not keep:
+        metrics["agent_env/glm_padding/prefilter_group_dropped"] = 1.0
+        metrics["agent_env/glm_padding/prefilter_dropped_samples"] = float(len(group))
+    return keep, metrics
+
+
 def _add_metrics(metrics: dict[str, float], update: dict[str, float]) -> None:
     for key, value in update.items():
         metrics[key] = metrics.get(key, 0.0) + float(value)

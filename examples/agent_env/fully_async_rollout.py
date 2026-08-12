@@ -24,6 +24,8 @@ logger = logging.getLogger("examples.agent_env.fully_async_rollout")
 _worker_lock = threading.Lock()
 _worker: AsyncRolloutWorker | None = None
 _worker_key: tuple[int, int] | None = None
+_GLM_PADDING_FILTER_PATH = "examples.agent_env.rollout.glm_style_pad_groups_filter"
+_GLM_PADDING_PREFILTER_PATH = "examples.agent_env.rollout.glm_style_group_padding_filter_keep"
 
 
 def _iter_samples(node: Any):
@@ -106,6 +108,17 @@ def _max_inflight_groups(args: Any) -> int:
     return _default_max_inflight_groups(args)
 
 
+def _add_metrics(metrics: dict[str, float], update: dict[str, float]) -> None:
+    for key, value in update.items():
+        metrics[key] = metrics.get(key, 0.0) + float(value)
+
+
+def _load_padding_prefilter(args: Any):
+    if getattr(args, "rollout_sample_filter_path", None) != _GLM_PADDING_FILTER_PATH:
+        return None
+    return load_function(_GLM_PADDING_PREFILTER_PATH)
+
+
 def _get_worker(args: Any, data_buffer: Any) -> AsyncRolloutWorker:
     global _worker, _worker_key
     max_groups = _max_inflight_groups(args)
@@ -150,7 +163,9 @@ async def _generate_rollout_async(args: Any, rollout_id: int, data_buffer: Any) 
     dynamic_filter = (
         load_function(args.dynamic_sampling_filter_path) if args.dynamic_sampling_filter_path is not None else None
     )
+    padding_prefilter = _load_padding_prefilter(args)
     metric_gatherer = MetricGatherer()
+    prefilter_metrics: dict[str, float] = {}
 
     target = int(args.rollout_batch_size)
     logger.info(
@@ -171,6 +186,16 @@ async def _generate_rollout_async(args: Any, rollout_id: int, data_buffer: Any) 
         for gid, group in worker.get_completed_groups():
             drained += 1
             all_groups.append(group)
+            if padding_prefilter is not None:
+                padding_keep, padding_metrics = padding_prefilter(args, group)
+                _add_metrics(prefilter_metrics, padding_metrics)
+                if not padding_keep:
+                    logger.info(
+                        "agent-env fully-async rollout %d: skipped group %s before collection: too few valid samples",
+                        rollout_id,
+                        gid,
+                    )
+                    continue
             dynamic_filter_output = call_dynamic_filter(dynamic_filter, args, group)
             if not dynamic_filter_output.keep:
                 metric_gatherer.on_dynamic_filter_drop(reason=dynamic_filter_output.reason)
@@ -215,6 +240,7 @@ async def _generate_rollout_async(args: Any, rollout_id: int, data_buffer: Any) 
         worker.queue_size(),
     )
     metrics = metric_gatherer.collect()
+    metrics.update(prefilter_metrics)
     metrics.update(generated_train_scope_metrics(generated_groups=all_groups, train_groups=data))
     return RolloutFnTrainOutput(samples=data, metrics=metrics)
 
