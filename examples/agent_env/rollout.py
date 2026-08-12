@@ -1619,6 +1619,52 @@ def _is_hard_discard_sample(sample: Sample) -> bool:
     return False
 
 
+def _discard_text_for_reason(sample: Sample) -> str:
+    sample_metadata = metadata(sample)
+    pieces = [
+        str(sample_metadata.get("discard_reason") or ""),
+        str(sample_metadata.get("error") or ""),
+    ]
+    infra_error = sample_metadata.get("infra_error")
+    if isinstance(infra_error, dict):
+        pieces.extend(str(infra_error.get(key) or "") for key in ("phase", "type", "message"))
+    return " ".join(piece for piece in pieces if piece).lower()
+
+
+def _hard_discard_reason_category(sample: Sample) -> str | None:
+    if not _is_hard_discard_sample(sample):
+        return None
+
+    text = _discard_text_for_reason(sample)
+    if "policy" in text:
+        if "timeout" in text or "timed out" in text or "readtimeout" in text:
+            return "policy_timeout"
+        return "policy_error"
+    if "timeout" in text or "timed out" in text or "readtimeout" in text:
+        return "env_timeout"
+    if "capacity" in text or "worker available" in text or "allocate" in text:
+        return "env_capacity"
+    if text.startswith("env_") or "env_" in text:
+        return "env_error"
+    if "episode_no_policy_calls" in text:
+        return "episode_no_policy_calls"
+    if "server_episode_failure" in text:
+        return "server_episode_failure"
+    if text.startswith("ropd_") or "judge_error" in text or "rubric_error" in text:
+        return "reward_error"
+    if sample.status == Sample.Status.ABORTED:
+        return "aborted"
+
+    sample_metadata = metadata(sample)
+    off_policy_mask = getattr(sample, "off_policy_loss_mask", None)
+    off_policy_mask_sum = sum(int(value) for value in off_policy_mask) if off_policy_mask is not None else 0
+    if sample.loss_mask is not None and sum(int(value) for value in sample.loss_mask) <= 0 and off_policy_mask_sum <= 0:
+        return "empty_loss_mask"
+    if bool(getattr(sample, "remove_sample", False)) or bool(sample_metadata.get("discard_sample", False)):
+        return "discard_sample"
+    return "other"
+
+
 def _padding_sample_index(rollout_id: int, offset: int) -> int:
     return -((int(rollout_id) + 1) * 10_000_000 + offset + 1)
 
@@ -1690,12 +1736,22 @@ def glm_style_group_padding_filter_keep(args: Any, group: list[Sample]) -> tuple
     """
     group_size = int(arg(args, "n_samples_per_prompt", len(group)) or len(group))
     min_valid_fraction = float(_runtime_env(args, "AGENT_ENV_GLM_PADDING_MIN_VALID_FRACTION", "0.5"))
-    valid_count = sum(1 for sample in group if not _is_hard_discard_sample(sample))
+    valid_count = 0
+    reason_counts: dict[str, int] = {}
+    for sample in group:
+        reason = _hard_discard_reason_category(sample)
+        if reason is None:
+            valid_count += 1
+        else:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
     invalid_count = len(group) - valid_count
     metrics = {
         "agent_env/glm_padding/prefilter_group_seen": 1.0,
+        "agent_env/glm_padding/prefilter_valid_samples": float(valid_count),
         "agent_env/glm_padding/prefilter_invalid_samples": float(invalid_count),
     }
+    for reason, count in reason_counts.items():
+        metrics[f"agent_env/glm_padding/prefilter_invalid_{reason}_samples"] = float(count)
     keep = valid_count > group_size * min_valid_fraction
     if not keep:
         metrics["agent_env/glm_padding/prefilter_group_dropped"] = 1.0

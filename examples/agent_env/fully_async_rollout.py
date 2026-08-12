@@ -113,6 +113,22 @@ def _add_metrics(metrics: dict[str, float], update: dict[str, float]) -> None:
         metrics[key] = metrics.get(key, 0.0) + float(value)
 
 
+def _padding_reason_counts(metrics: dict[str, float]) -> dict[str, int]:
+    prefix = "agent_env/glm_padding/prefilter_invalid_"
+    suffix = "_samples"
+    counts: dict[str, int] = {}
+    for key, value in metrics.items():
+        if not key.startswith(prefix) or not key.endswith(suffix):
+            continue
+        reason = key[len(prefix) : -len(suffix)]
+        if reason == "samples":
+            continue
+        count = int(value)
+        if count > 0:
+            counts[reason] = count
+    return counts
+
+
 def _load_padding_prefilter(args: Any):
     if getattr(args, "rollout_sample_filter_path", None) != _GLM_PADDING_FILTER_PATH:
         return None
@@ -191,9 +207,11 @@ async def _generate_rollout_async(args: Any, rollout_id: int, data_buffer: Any) 
                 _add_metrics(prefilter_metrics, padding_metrics)
                 if not padding_keep:
                     logger.info(
-                        "agent-env fully-async rollout %d: skipped group %s before collection: too few valid samples",
+                        "agent-env fully-async rollout %d: skipped group %s before collection: "
+                        "too few valid samples reason_counts=%s",
                         rollout_id,
                         gid,
+                        _padding_reason_counts(padding_metrics),
                     )
                     continue
             dynamic_filter_output = call_dynamic_filter(dynamic_filter, args, group)
