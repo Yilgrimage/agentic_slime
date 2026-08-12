@@ -16,6 +16,7 @@ from examples.agent_env.env_episode import (
     finish_reason_is_length,
     policy_context_limit_reached,
 )
+from examples.agent_env.appworld.patches import install_appworld_patches
 from examples.agent_env.prompting import require_prompt
 from examples.agent_env.server import serve_process_pool
 
@@ -193,6 +194,7 @@ class AppWorldBackend:
         self.last_info: dict[str, Any] = {}
 
     def start(self) -> dict[str, Any]:
+        install_appworld_patches()
         root = self.config.get("root")
         if root:
             os.environ["APPWORLD_ROOT"] = str(root)
