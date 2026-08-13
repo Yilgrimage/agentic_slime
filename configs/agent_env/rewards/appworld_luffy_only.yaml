@@ -1,0 +1,26 @@
+impl: legacy
+judge_mode: none
+source: success
+outcome: 1.0
+format:
+  valid: 0.0
+  invalid: 0.0
+truncated: 0.0
+
+luffy:
+  enable: true
+  mode: token_loss
+  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
+  teacher_index_keys:
+    - task_id
+  teacher_trace_keys:
+    - teacher_response
+    - teacher_raw_trace_text
+  policy_format: appworld_markdown_code
+  insertion_mode: replace_anchor
+  teacher_reward_source: constant
+  teacher_reward: 1.0
+  student_pg_loss_coef: 0.0
+  off_policy_loss_coef: 1.0
+  off_policy_reshape: p_div_p_0.1
+  off_policy_reshape_eps: 0.1

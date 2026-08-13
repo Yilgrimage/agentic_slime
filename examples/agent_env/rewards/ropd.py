@@ -348,6 +348,7 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
 - 如果 step 文本被 `[truncated ...]` 裁到看不清实际 API/action、参数或证据来源，宁可不给 good hit。
 - good hit 必须是 materially advances the task 的关键进展或 milestone，且必须能从该 Step 的可见 tool call / tool response 直接确认；不要把普通合理动作、意图文字、成功声明或隐含猜测标成 good hit。
 - bad hit 可以标注：无关/错误 API、编造结果、忽略 observation、重复无效动作、过早 complete_task、参数明显不合理。
+- 如果 bad hit 依赖“某个 item/API/action 不在 observation 中可见”这类缺失证据，而相关 observation 已被截断或省略，不要标注该 bad hit。
 - 每条 behavior 必须可以通过具体 Step N 判断命中。
 - 只返回紧凑 JSON，不要 rationale，不要 evidence 句子，不要 Markdown。
 
@@ -2122,7 +2123,6 @@ def _parse_ca_compact_batch_scores(
                 "answer_index": expected_index,
                 "trajectory_id": trajectory_id,
                 "process_score": process_score,
-                "rubric_score": process_score,
                 "final_score": process_score,
                 "trajectory_quality": quality,
                 "fatal_error": quality == "invalid",
@@ -2563,8 +2563,10 @@ def _result(
         "strip_assistant_response": trace_options.strip_assistant_response,
         "strip_system_prompt": trace_options.strip_system_prompt,
     }
-    if schema_mode in {"rubric_shaping", "ca_compact"}:
+    if schema_mode == "rubric_shaping":
         raw["rubric_score"] = float(bounded)
+        raw["env_success_for_reward"] = _env_success_for_shaping(sample)
+    elif schema_mode == "ca_compact":
         raw["env_success_for_reward"] = _env_success_for_shaping(sample)
     if schema_mode == "rubric_shaping":
         raw["ropd_shaping_beta"] = _rubric_shaping_beta(args)
@@ -2606,7 +2608,13 @@ def _result(
         score=weighted,
         components={
             "rubric_task_success": weighted,
-            ("ropd_rubric_score" if schema_mode in {"rubric_shaping", "ca_compact"} else "ropd_answer_score"): bounded,
+            (
+                "ropd_ca_process_score"
+                if schema_mode == "ca_compact"
+                else "ropd_rubric_score"
+                if schema_mode == "rubric_shaping"
+                else "ropd_answer_score"
+            ): bounded,
         },
         raw=raw,
         reason="",

@@ -1084,7 +1084,8 @@ def policy_loss_function(
     entropy = torch.cat(entropy, dim=0)
     entropy_loss = sum_of_sample_mean(entropy)
 
-    loss = pg_loss - args.entropy_coef * entropy_loss
+    student_pg_loss_coef = float(getattr(args, "student_pg_loss_coef", 1.0))
+    loss = student_pg_loss_coef * pg_loss - args.entropy_coef * entropy_loss
     if off_policy_pg_loss is not None:
         loss = loss + args.off_policy_loss_coef * off_policy_pg_loss
 
@@ -1120,6 +1121,11 @@ def policy_loss_function(
         "entropy_loss": entropy_loss.clone().detach(),
         "pg_clipfrac": pg_clipfrac.clone().detach(),
         "ppo_kl": ppo_kl.clone().detach(),
+        "student_pg_loss_coef": torch.tensor(
+            student_pg_loss_coef,
+            dtype=loss.dtype,
+            device=loss.device,
+        ),
     }
 
     if train_rollout_logprob_abs_diff is not None:

@@ -464,6 +464,8 @@ prepare_native_eval() {
     validate_prompt_data "${path}"
     var="$(eval_prompt_env_var "${split}")"
     export "${var}=${path}"
+    export "$(upper_name "${ENV_NAME}")_EVAL_PROMPT_DATA=${path}"
+    export "$(upper_name "${ENV_NAME}")_EVAL_DATASET_NAME=${ENV_NAME}-${split}"
   done
 }
 

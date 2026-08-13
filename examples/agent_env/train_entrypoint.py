@@ -373,12 +373,14 @@ def _install_reward_derived_train_args(args: Any) -> None:
 
     setattr(args, "use_off_policy_loss", True)
     setattr(args, "off_policy_loss_coef", float(luffy.get("off_policy_loss_coef", 1.0)))
+    setattr(args, "student_pg_loss_coef", float(luffy.get("student_pg_loss_coef", 1.0)))
     reshape = str(luffy.get("off_policy_reshape", "p_div_p_0.1") or "p_div_p_0.1").strip()
     setattr(args, "off_policy_reshape", reshape)
     setattr(args, "off_policy_reshape_eps", float(luffy.get("off_policy_reshape_eps", 0.1)))
     _LOGGER.info(
-        "Enabled reward-derived off-policy token loss: coef=%s reshape=%s eps=%s",
+        "Enabled reward-derived off-policy token loss: coef=%s student_pg_loss_coef=%s reshape=%s eps=%s",
         getattr(args, "off_policy_loss_coef", None),
+        getattr(args, "student_pg_loss_coef", None),
         getattr(args, "off_policy_reshape", None),
         getattr(args, "off_policy_reshape_eps", None),
     )

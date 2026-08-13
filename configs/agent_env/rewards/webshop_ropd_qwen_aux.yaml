@@ -29,6 +29,6 @@ ropd:
   answer_mode: trace
   strip_reasoning: true
   strip_tool_call: false
-  strip_tool_response: 240
+  strip_tool_response: 1200
   strip_assistant_response: true
   strip_system_prompt: true

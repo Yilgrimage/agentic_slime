@@ -8,9 +8,7 @@ eval:
     top_p: 1.0
     top_k: -1
   datasets:
-    - name: appworld-dev
+    - name: ${oc.env:APPWORLD_EVAL_DATASET_NAME}
       # Formal comparisons should use the full generated split JSONL.
-      path: ${oc.env:APPWORLD_DEV_PROMPT_DATA}
+      path: ${oc.env:APPWORLD_EVAL_PROMPT_DATA}
       custom_generate_function_path: examples.agent_env.appworld.rollout.generate
-      metadata_overrides:
-        split: dev

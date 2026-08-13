@@ -94,6 +94,10 @@ def advantage_mode(args: Any) -> str:
         "sign_preserving": "outcome_reweight",
         "reweight": "outcome_reweight",
         "b": "outcome_reweight",
+        "bangbang": "outcome_bangbang_reweight",
+        "bangbang_b": "outcome_bangbang_reweight",
+        "hard_b": "outcome_bangbang_reweight",
+        "hard_bangbang": "outcome_bangbang_reweight",
         "segment_reward": "segment_reward_group_turn_norm",
         "reinforce": "segment_reward_group_turn_norm",
         "reinforce_plus_plus": "segment_reward_group_turn_norm",
@@ -104,6 +108,7 @@ def advantage_mode(args: Any) -> str:
     valid = {
         "outcome_plus_process",
         "outcome_reweight",
+        "outcome_bangbang_reweight",
         "segment_reward_group_turn_norm",
     }
     if value not in valid:
@@ -143,6 +148,10 @@ def normalization(args: Any) -> str:
         raise ValueError("reward.credit_assignment.normalization must be none, group_turn_zscore, or episode_turn_zscore")
     if advantage_mode(args) == "outcome_reweight" and value != "episode_turn_zscore":
         raise ValueError("reward.credit_assignment.advantage_mode=outcome_reweight requires normalization=episode_turn_zscore")
+    if advantage_mode(args) == "outcome_bangbang_reweight" and value != "none":
+        raise ValueError(
+            "reward.credit_assignment.advantage_mode=outcome_bangbang_reweight requires normalization=none"
+        )
     return value
 
 
@@ -153,6 +162,13 @@ def milestone_reward(args: Any) -> float:
 def predecessor_reward(args: Any) -> float:
     value = float_value(config(args).get("predecessor_reward", 0.5), 0.5)
     return max(0.0, value)
+
+
+def predecessor_decay(args: Any) -> float:
+    value = float_value(config(args).get("predecessor_decay", 1.0), 1.0)
+    if value < 0 or value > 1:
+        raise ValueError("reward.credit_assignment.predecessor_decay must be in [0, 1]")
+    return value
 
 
 def negative_reward(args: Any) -> float:
@@ -244,20 +260,25 @@ def _step_list(value: Any) -> list[int]:
 
 def _mark_milestone(
     *,
-    marks: dict[int, float],
+    direct_positive_marks: dict[int, float],
+    direct_negative_marks: dict[int, float],
+    predecessor_marks: dict[int, float],
     step: int,
     available_steps: list[int],
     milestone_value: float,
     predecessor_value: float,
+    predecessor_decay_value: float,
     events: list[StepMarkEvent] | None = None,
     source: str = "process_positive",
     criterion_id: str | None = None,
 ) -> None:
-    _apply_mark(
-        marks=marks,
+    _apply_priority_mark(
+        direct_positive_marks=direct_positive_marks,
+        direct_negative_marks=direct_negative_marks,
+        predecessor_marks=predecessor_marks,
         step=step,
         value=milestone_value,
-        mode="max",
+        kind="direct_positive",
         events=events,
         source=source,
         criterion_id=criterion_id,
@@ -265,36 +286,91 @@ def _mark_milestone(
     for previous_step in available_steps:
         if previous_step >= step:
             break
-        _apply_mark(
-            marks=marks,
+        distance = step - previous_step
+        decayed_predecessor = predecessor_value * (predecessor_decay_value ** max(0, distance - 1))
+        _apply_priority_mark(
+            direct_positive_marks=direct_positive_marks,
+            direct_negative_marks=direct_negative_marks,
+            predecessor_marks=predecessor_marks,
             step=previous_step,
-            value=predecessor_value,
-            mode="max",
+            value=decayed_predecessor,
+            kind="predecessor",
             events=events,
             source=f"{source}_predecessor",
             criterion_id=criterion_id,
         )
 
 
-def _apply_mark(
+def _combined_step_value(
     *,
-    marks: dict[int, float],
+    step: int,
+    direct_positive_marks: dict[int, float],
+    direct_negative_marks: dict[int, float],
+    predecessor_marks: dict[int, float],
+) -> float:
+    positive = direct_positive_marks.get(step, 0.0)
+    negative = direct_negative_marks.get(step, 0.0)
+    if positive != 0.0 or negative != 0.0:
+        return positive + negative
+    return predecessor_marks.get(step, 0.0)
+
+
+def _final_step_marks(
+    *,
+    direct_positive_marks: dict[int, float],
+    direct_negative_marks: dict[int, float],
+    predecessor_marks: dict[int, float],
+) -> dict[int, float]:
+    steps = set(direct_positive_marks) | set(direct_negative_marks) | set(predecessor_marks)
+    marks: dict[int, float] = {}
+    for step in sorted(steps):
+        value = _combined_step_value(
+            step=step,
+            direct_positive_marks=direct_positive_marks,
+            direct_negative_marks=direct_negative_marks,
+            predecessor_marks=predecessor_marks,
+        )
+        if value != 0.0:
+            marks[step] = value
+    return marks
+
+
+def _apply_priority_mark(
+    *,
+    direct_positive_marks: dict[int, float],
+    direct_negative_marks: dict[int, float],
+    predecessor_marks: dict[int, float],
     step: int,
     value: float,
-    mode: str,
+    kind: str,
     events: list[StepMarkEvent] | None,
     source: str,
     criterion_id: str | None = None,
-    reason: str | None = None,
 ) -> None:
-    previous = marks.get(step, 0.0)
-    if mode == "max":
-        new_value = max(previous, value)
-    elif mode == "min":
-        new_value = min(previous, value)
+    previous = _combined_step_value(
+        step=step,
+        direct_positive_marks=direct_positive_marks,
+        direct_negative_marks=direct_negative_marks,
+        predecessor_marks=predecessor_marks,
+    )
+    reason: str | None = None
+    if kind == "direct_positive":
+        direct_positive_marks[step] = max(direct_positive_marks.get(step, 0.0), value)
+    elif kind == "direct_negative":
+        direct_negative_marks[step] = min(direct_negative_marks.get(step, 0.0), value)
+    elif kind == "predecessor":
+        if step in direct_positive_marks or step in direct_negative_marks:
+            reason = "direct_mark_already_present"
+        else:
+            predecessor_marks[step] = max(predecessor_marks.get(step, 0.0), value)
     else:
-        raise ValueError(f"Unsupported mark mode: {mode}")
-    marks[step] = new_value
+        raise ValueError(f"Unsupported mark kind: {kind}")
+    new_value = _combined_step_value(
+        step=step,
+        direct_positive_marks=direct_positive_marks,
+        direct_negative_marks=direct_negative_marks,
+        predecessor_marks=predecessor_marks,
+    )
     if events is not None:
         events.append(
             StepMarkEvent(
@@ -344,8 +420,11 @@ def _sample_step_marks_and_events(
     available = sorted(dict.fromkeys(step for step in (available_steps or []) if step >= 0))
     milestone_value = milestone_reward(args)
     predecessor_value = predecessor_reward(args)
+    predecessor_decay_value = predecessor_decay(args)
     negative_value = negative_reward(args)
-    marks: dict[int, float] = {}
+    direct_positive_marks: dict[int, float] = {}
+    direct_negative_marks: dict[int, float] = {}
+    predecessor_marks: dict[int, float] = {}
     events: list[StepMarkEvent] = []
     if isinstance(evidence, list):
         for item in evidence:
@@ -362,36 +441,27 @@ def _sample_step_marks_and_events(
                     negative_steps.extend(step for step in legacy_steps if step not in negative_steps)
             for step in positive_steps:
                 _mark_milestone(
-                    marks=marks,
+                    direct_positive_marks=direct_positive_marks,
+                    direct_negative_marks=direct_negative_marks,
+                    predecessor_marks=predecessor_marks,
                     step=step,
                     available_steps=available,
                     milestone_value=milestone_value,
                     predecessor_value=predecessor_value,
+                    predecessor_decay_value=predecessor_decay_value,
                     events=events,
                     source="process_positive",
                     criterion_id=criterion_id,
                 )
             if negative_value != 0.0:
                 for step in negative_steps:
-                    if step in marks and marks[step] > 0:
-                        events.append(
-                            StepMarkEvent(
-                                step=step,
-                                source="process_negative",
-                                criterion_id=criterion_id,
-                                value=negative_value,
-                                previous_value=marks[step],
-                                new_value=marks[step],
-                                applied=False,
-                                reason="positive_mark_already_present",
-                            )
-                        )
-                        continue
-                    _apply_mark(
-                        marks=marks,
+                    _apply_priority_mark(
+                        direct_positive_marks=direct_positive_marks,
+                        direct_negative_marks=direct_negative_marks,
+                        predecessor_marks=predecessor_marks,
                         step=step,
                         value=negative_value,
-                        mode="min",
+                        kind="direct_negative",
                         events=events,
                         source="process_negative",
                         criterion_id=criterion_id,
@@ -399,14 +469,22 @@ def _sample_step_marks_and_events(
 
     for step in _success_tail_milestone_steps(args, sample, available):
         _mark_milestone(
-            marks=marks,
+            direct_positive_marks=direct_positive_marks,
+            direct_negative_marks=direct_negative_marks,
+            predecessor_marks=predecessor_marks,
             step=step,
             available_steps=available,
             milestone_value=milestone_value,
             predecessor_value=predecessor_value,
+            predecessor_decay_value=predecessor_decay_value,
             events=events,
             source="env_success_tail",
         )
+    marks = _final_step_marks(
+        direct_positive_marks=direct_positive_marks,
+        direct_negative_marks=direct_negative_marks,
+        predecessor_marks=predecessor_marks,
+    )
     return marks, events
 
 
@@ -659,6 +737,7 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
             else None,
             "milestone_reward": milestone_reward(args),
             "predecessor_reward": predecessor_reward(args),
+            "predecessor_decay": predecessor_decay(args),
             "negative_reward": negative_reward(args),
             "success_milestone_tail_steps": success_milestone_tail_steps(args),
             "success_milestone_min_env_score": success_milestone_min_env_score(args),
