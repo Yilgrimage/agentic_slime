@@ -15,6 +15,7 @@ _APPWORLD_OFFICIAL_PROMPT_MARKERS = (
     "python REPL environment",
     "Let's start with the task",
 )
+_KNOWN_AGENT_ENVS = ("alfworld", "webshop", "tau2", "appworld", "openclaw")
 
 TracePartSpec = bool | int
 
@@ -79,6 +80,7 @@ def render_answer_for_reward(
     final_answer: Any = "",
     answer_mode: str = "trace",
     options: TraceCompressionOptions | None = None,
+    env_name: str | None = None,
     check_reasoning_presence: bool = False,
 ) -> str:
     options = options or TraceCompressionOptions()
@@ -90,29 +92,61 @@ def render_answer_for_reward(
         return final_text
     if mode != "trace":
         raise ValueError(f"Unsupported reward answer_mode={mode!r}; expected 'final' or 'trace'")
-    trace_text = render_trace_for_reward(sample, options=options)
+    trace_text = render_trace_for_reward(sample, options=options, env_name=env_name)
     return _combine_final_and_trace(final_text, trace_text)
 
 
-def render_trace_for_reward(sample: Sample, *, options: TraceCompressionOptions | None = None) -> str:
+def render_trace_for_reward(
+    sample: Sample,
+    *,
+    options: TraceCompressionOptions | None = None,
+    env_name: str | None = None,
+) -> str:
     options = options or TraceCompressionOptions()
     sample_metadata = _sample_payload(sample)
+    resolved_env_name = _trace_env_name(sample_metadata, explicit_env_name=env_name)
+
+    def finish(rendered: str) -> str:
+        return _finalize_reward_trace_text(
+            rendered,
+            sample_metadata=sample_metadata,
+            env_name=resolved_env_name,
+        )
+
     explicit_trace = _first_metadata_value(sample_metadata, ("reward_trace", "judge_trace", "ropd_trace"))
     if explicit_trace not in (None, "", []):
-        return compress_trace_text(explicit_trace, options=options)
+        return finish(compress_trace_text(explicit_trace, options=options))
     turns = sample_metadata.get("turns")
     if isinstance(turns, list):
         rendered = _render_turns(
             turns,
             options=options,
-            initial_observation=_initial_observation_from_sample_metadata(sample_metadata, options=options),
+            initial_observation=_initial_observation_from_sample_metadata(
+                sample_metadata,
+                options=options,
+                env_name=resolved_env_name,
+            ),
         )
         if rendered:
-            return rendered
+            return finish(rendered)
+    segments = sample_metadata.get("token_segments")
+    if isinstance(segments, list):
+        rendered = _render_token_segments(
+            segments,
+            sample_metadata=sample_metadata,
+            env_name=resolved_env_name,
+            options=options,
+        )
+        if rendered:
+            return finish(rendered)
     messages = sample_metadata.get("messages")
     if isinstance(messages, list):
         task_prompt = _task_prompt_from_sample_metadata(sample_metadata)
-        appworld_start = _appworld_episode_start_from_messages(messages, task_prompt)
+        appworld_start = (
+            _appworld_episode_start_from_messages(messages, task_prompt)
+            if resolved_env_name == "appworld"
+            else None
+        )
         rendered = _render_messages(
             messages,
             options=options,
@@ -121,18 +155,13 @@ def render_trace_for_reward(sample: Sample, *, options: TraceCompressionOptions 
             start_index=appworld_start,
         )
         if rendered:
-            return rendered
-    segments = sample_metadata.get("token_segments")
-    if isinstance(segments, list):
-        rendered = _render_token_segments(segments, options=options)
-        if rendered:
-            return rendered
+            return finish(rendered)
     trace_value = _first_metadata_value(
         sample_metadata,
         ("trace", "trajectory", "rollout_trace", "student_trace"),
     )
     if trace_value not in (None, "", []):
-        return compress_trace_text(trace_value, options=options)
+        return finish(compress_trace_text(trace_value, options=options))
     sample_index = getattr(sample, "index", sample_metadata.get("sample_index", "unknown"))
     raise ValueError(
         "reward trace is missing structured trace fields for sample "
@@ -145,6 +174,8 @@ def render_teacher_trace_for_reward(
     trace: Any,
     *,
     options: TraceCompressionOptions | None = None,
+    env_name: str | None = None,
+    context_metadata: dict[str, Any] | None = None,
     check_reasoning_presence: bool = False,
     reasoning_context: str = "teacher_trace",
 ) -> str:
@@ -157,20 +188,35 @@ def render_teacher_trace_for_reward(
     """
 
     options = options or TraceCompressionOptions()
+    context_payload = dict(context_metadata or {})
+    resolved_env_name = _trace_env_name(context_payload, explicit_env_name=env_name)
+
+    def finish(rendered: str) -> str:
+        return _finalize_reward_trace_text(
+            rendered,
+            sample_metadata=context_payload,
+            env_name=resolved_env_name,
+        )
+
     if check_reasoning_presence:
         _check_reasoning_contract(trace, options, context=reasoning_context)
     if trace in (None, "", []):
         return ""
     if isinstance(trace, Sample):
-        return render_trace_for_reward(trace, options=options)
-    structured = _render_structured_teacher_trace(trace, options=options)
+        return render_trace_for_reward(trace, options=options, env_name=env_name)
+    structured = _render_structured_teacher_trace(
+        trace,
+        options=options,
+        env_name=env_name,
+        context_metadata=context_payload,
+    )
     if structured:
-        return structured
+        return finish(structured)
     text = _message_text(_apply_structured_reasoning_policy(trace, options.strip_reasoning))
     legacy = _render_legacy_teacher_text(text, options=options)
     if legacy:
-        return legacy
-    return compress_trace_text(trace, options=options)
+        return finish(legacy)
+    return finish(compress_trace_text(trace, options=options))
 
 
 def compress_trace_text(
@@ -186,7 +232,6 @@ def compress_trace_text(
         _check_reasoning_contract(text, options, context=reasoning_context)
     raw_value = _apply_structured_reasoning_policy(text, options.strip_reasoning)
     value = _strip_chat_boundary_tokens(_message_text(raw_value))
-    value = _strip_appworld_official_prompt_text(value)
     if _is_strip_spec(options.strip_system_prompt):
         value = _strip_system_prompt_text(value)
     elif (limit := _truncate_limit(options.strip_system_prompt)) is not None:
@@ -211,7 +256,13 @@ def compress_trace_text(
     return value.strip()
 
 
-def _render_structured_teacher_trace(trace: Any, *, options: TraceCompressionOptions) -> str:
+def _render_structured_teacher_trace(
+    trace: Any,
+    *,
+    options: TraceCompressionOptions,
+    env_name: str | None = None,
+    context_metadata: dict[str, Any] | None = None,
+) -> str:
     if isinstance(trace, dict):
         payload = trace
     elif isinstance(trace, (list, tuple)):
@@ -220,8 +271,10 @@ def _render_structured_teacher_trace(trace: Any, *, options: TraceCompressionOpt
         payload = {"messages": normalized} if role_count else {"turns": normalized}
     else:
         return ""
+    if context_metadata:
+        payload = {**context_metadata, **payload}
     try:
-        return render_trace_for_reward(Sample(prompt="", metadata=payload), options=options)
+        return render_trace_for_reward(Sample(prompt="", metadata=payload), options=options, env_name=env_name)
     except ValueError:
         return ""
 
@@ -415,23 +468,94 @@ def _render_turns(
     return "\n\n".join(lines).strip()
 
 
-def _initial_observation_from_sample_metadata(sample_metadata: dict[str, Any], *, options: TraceCompressionOptions) -> str:
+def _initial_observation_from_sample_metadata(
+    sample_metadata: dict[str, Any],
+    *,
+    options: TraceCompressionOptions,
+    env_name: str,
+) -> str:
     task_prompt = _task_prompt_from_sample_metadata(sample_metadata)
-    if task_prompt and _metadata_contains_appworld_official_prompt(sample_metadata):
+    if env_name == "appworld" and task_prompt and _metadata_contains_appworld_official_prompt(sample_metadata):
         return "Task:\n" + task_prompt
 
     explicit = _first_metadata_value(sample_metadata, ("reward_initial_observation", "initial_observation"))
     if explicit not in (None, "", []):
-        return compress_trace_text(
+        return _canonical_initial_observation_text(
             explicit,
+            sample_metadata=sample_metadata,
+            env_name=env_name,
             options=options,
-            strip_assistant_response=False,
         )
 
     if task_prompt:
         return "Task:\n" + task_prompt
 
-    return _initial_observation_from_messages(sample_metadata.get("messages"), options=options)
+    initial_from_messages = _initial_observation_from_messages(sample_metadata.get("messages"), options=options)
+    return _canonical_initial_observation_text(
+        initial_from_messages,
+        sample_metadata=sample_metadata,
+        env_name=env_name,
+        options=options,
+        require_task_for_appworld=False,
+    )
+
+
+def _canonical_initial_observation_text(
+    text: Any,
+    *,
+    sample_metadata: dict[str, Any],
+    env_name: str,
+    options: TraceCompressionOptions,
+    require_task_for_appworld: bool = True,
+) -> str:
+    if text in (None, "", []):
+        return ""
+    value = _env_specific_initial_observation_text(
+        text,
+        sample_metadata=sample_metadata,
+        env_name=env_name,
+        require_task_for_appworld=require_task_for_appworld,
+    )
+    return compress_trace_text(
+        value,
+        options=options,
+        strip_assistant_response=False,
+    )
+
+
+def _env_specific_initial_observation_text(
+    text: Any,
+    *,
+    sample_metadata: dict[str, Any],
+    env_name: str,
+    require_task_for_appworld: bool,
+) -> str:
+    # Source adapters may accept different trace shapes, but environment
+    # semantics live behind this explicit env-name dispatch. Generic compression
+    # must stay unaware of AppWorld/WebShop/Tau2-specific prompt conventions.
+    if env_name == "appworld":
+        return _appworld_initial_observation_text(
+            text,
+            sample_metadata=sample_metadata,
+            require_task=require_task_for_appworld,
+        )
+    return str(text or "")
+
+
+def _appworld_initial_observation_text(
+    text: Any,
+    *,
+    sample_metadata: dict[str, Any],
+    require_task: bool,
+) -> str:
+    if not _contains_appworld_official_prompt(text):
+        return str(text or "")
+    task_prompt = _task_prompt_from_sample_metadata(sample_metadata)
+    if task_prompt:
+        return "Task:\n" + task_prompt
+    if require_task:
+        raise ValueError("AppWorld official prompt trace cannot be rendered for reward without task_prompt metadata")
+    return str(text or "")
 
 
 def _task_prompt_from_sample_metadata(sample_metadata: dict[str, Any]) -> str:
@@ -540,16 +664,41 @@ def _normalize_search_text(text: Any) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip().lower()
 
 
-def _strip_appworld_official_prompt_text(text: str) -> str:
-    value = str(text or "")
+def _finalize_reward_trace_text(text: str, *, sample_metadata: dict[str, Any], env_name: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return value
+    return _env_specific_reward_trace_text(value, sample_metadata=sample_metadata, env_name=env_name)
+
+
+def _env_specific_reward_trace_text(text: str, *, sample_metadata: dict[str, Any], env_name: str) -> str:
+    if env_name == "appworld":
+        return _finalize_appworld_reward_trace_text(text, sample_metadata=sample_metadata)
+    return text
+
+
+def _finalize_appworld_reward_trace_text(text: str, *, sample_metadata: dict[str, Any]) -> str:
+    value = str(text or "").strip()
     if not _contains_appworld_official_prompt(value):
         return value
-    return re.sub(
+    task_prompt = _task_prompt_from_sample_metadata(sample_metadata)
+    if not task_prompt:
+        raise ValueError(
+            "AppWorld official prompt trace cannot be rendered for reward without task_prompt metadata"
+        )
+    replacement = "Initial observation:\nTask:\n" + task_prompt
+    replaced, count = re.subn(
         r"(?is)(^|\n)Initial observation\s*:\s*.*?(?=\n\s*Step\s+\d+\s*:|\Z)",
-        r"\1",
+        lambda match: match.group(1) + replacement,
         value,
         count=1,
-    ).strip()
+    )
+    if count:
+        return replaced.strip()
+    first_step = re.search(r"(?im)^\s*Step\s+\d+\s*:", value)
+    if first_step:
+        return (replacement + "\n\n" + value[first_step.start() :].strip()).strip()
+    return replacement
 
 
 def _render_messages(
@@ -641,7 +790,13 @@ def _render_messages(
     return "\n\n".join(lines).strip()
 
 
-def _render_token_segments(segments: list[Any], *, options: TraceCompressionOptions) -> str:
+def _render_token_segments(
+    segments: list[Any],
+    *,
+    sample_metadata: dict[str, Any],
+    env_name: str,
+    options: TraceCompressionOptions,
+) -> str:
     normalized = [item for item in segments if isinstance(item, dict)]
     if not normalized:
         return ""
@@ -654,10 +809,11 @@ def _render_token_segments(segments: list[Any], *, options: TraceCompressionOpti
         if not text:
             continue
         if kind == "initial_prompt" and not lines:
-            initial_text = compress_trace_text(
+            initial_text = _canonical_initial_observation_text(
                 text,
+                sample_metadata=sample_metadata,
+                env_name=env_name,
                 options=options,
-                strip_assistant_response=False,
             )
             if initial_text:
                 lines.append("Initial observation:\n" + initial_text)
@@ -791,6 +947,41 @@ def _first_metadata_value(metadata: dict[str, Any], keys: tuple[str, ...]) -> An
     return None
 
 
+def _trace_env_name(metadata: dict[str, Any], *, explicit_env_name: str | None = None) -> str:
+    explicit = _normalize_env_name(explicit_env_name)
+    if explicit:
+        return explicit
+    for key in ("env_name", "agent_env_name", "environment", "task_env"):
+        value = _normalize_env_name(metadata.get(key))
+        if value:
+            return value
+    for key in _KNOWN_AGENT_ENVS:
+        if isinstance(metadata.get(key), dict):
+            return key
+    for nested_key in ("env_metadata", "requested_task", "source_row"):
+        nested = metadata.get(nested_key)
+        if not isinstance(nested, dict):
+            continue
+        for key in ("env_name", "agent_env_name", "environment", "task_env"):
+            value = _normalize_env_name(nested.get(key))
+            if value:
+                return value
+    return ""
+
+
+def _normalize_env_name(value: Any) -> str:
+    text = re.sub(r"[^a-z0-9_]+", "", str(value or "").strip().lower())
+    aliases = {
+        "alfworld": "alfworld",
+        "webshop": "webshop",
+        "tau2": "tau2",
+        "tau": "tau2",
+        "appworld": "appworld",
+        "openclaw": "openclaw",
+    }
+    return aliases.get(text, text if text in _KNOWN_AGENT_ENVS else "")
+
+
 def _sample_payload(sample: Any) -> dict[str, Any]:
     """Return the trace-bearing sample payload.
 
@@ -817,6 +1008,10 @@ def _sample_payload(sample: Any) -> dict[str, Any]:
                 "trajectory",
                 "rollout_trace",
                 "student_trace",
+                "env_name",
+                "agent_env_name",
+                "environment",
+                "task_env",
                 "env_evaluate",
                 "env_metadata",
             )

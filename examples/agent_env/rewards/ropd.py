@@ -704,6 +704,17 @@ def _rubric_shaping_beta(args: Any) -> float:
     return beta
 
 
+def _failure_shaping_beta(args: Any) -> float:
+    beta = float_value(_cfg(args, "failure_shaping_beta", _cfg(args, "shaping_beta", 1.0)), 1.0)
+    if beta < 0:
+        raise ValueError("reward.ropd.failure_shaping_beta must be non-negative")
+    return beta
+
+
+def _env_success_overrides_reward(args: Any) -> bool:
+    return _cfg_bool(args, "env_success_overrides_reward", False)
+
+
 def _answer_process_weights(args: Any) -> tuple[float, float]:
     answer_weight = float_value(_cfg(args, "answer_weight", 1.0), 1.0)
     process_weight = float_value(_cfg(args, "process_weight", 0.0), 0.0)
@@ -1202,10 +1213,20 @@ def _trace_options(args: Any) -> TraceCompressionOptions:
     )
 
 
-def _sanitize_teacher_answer_for_anonymous_verifier(args: Any, answer: Any) -> str:
+def _trace_env_name_from_args(args: Any) -> str:
+    for key in ("env_name", "agent_env_name", "environment"):
+        value = str(getattr(args, key, "") or "").strip().lower()
+        if value:
+            return value
+    return str(os.environ.get("ENV_NAME", "") or os.environ.get("AGENT_ENV_NAME", "")).strip().lower()
+
+
+def _sanitize_teacher_answer_for_anonymous_verifier(args: Any, answer: Any, *, sample: Sample) -> str:
     text = render_teacher_trace_for_reward(
         answer,
         options=_trace_options(args),
+        env_name=_trace_env_name_from_args(args),
+        context_metadata=metadata(sample),
         check_reasoning_presence=True,
         reasoning_context="ropd_teacher_answer",
     )
@@ -1270,6 +1291,7 @@ def _answer_for_judge(args: Any, sample: Sample) -> str:
         final_answer=_explicit_final_answer(sample),
         answer_mode=mode,
         options=_trace_options(args),
+        env_name=_trace_env_name_from_args(args),
         check_reasoning_presence=True,
     )
 
@@ -1316,7 +1338,7 @@ def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
     if values:
         return tuple(
             dict.fromkeys(
-                _sanitize_teacher_answer_for_anonymous_verifier(args, value)
+                _sanitize_teacher_answer_for_anonymous_verifier(args, value, sample=sample)
                 for value in values
                 if value.strip()
             )
@@ -1332,7 +1354,7 @@ def _teacher_answers(args: Any, sample: Sample) -> tuple[str, ...]:
             status = _teacher_index_row_status(row, has_text=bool(text))
             if status != "completed" or not text:
                 return ()
-            return (_sanitize_teacher_answer_for_anonymous_verifier(args, text),)
+            return (_sanitize_teacher_answer_for_anonymous_verifier(args, text, sample=sample),)
     return ()
 
 
@@ -2389,6 +2411,12 @@ def _select_train_score(
             return 1.0, reason
         shaped = _rubric_shaping_beta(args) * max(0.0, min(1.0, answer_score))
         return max(0.0, min(1.0, shaped)), reason
+    if schema_mode == "answer_process_50_50" and _env_success_overrides_reward(args):
+        reason = f"env_success_else_{schema_mode}"
+        if _env_success_for_shaping(sample):
+            return 1.0, reason
+        shaped = _failure_shaping_beta(args) * max(0.0, min(1.0, answer_score))
+        return max(0.0, min(1.0, shaped)), reason
     reward_mode = _reward_mode(args)
     if reward_mode == "group_centered":
         return _clip(args, answer_score - float(group_stats.get("mean", 0.0))), reward_mode
@@ -2566,6 +2594,12 @@ def _result(
     if schema_mode == "rubric_shaping":
         raw["rubric_score"] = float(bounded)
         raw["env_success_for_reward"] = _env_success_for_shaping(sample)
+    elif schema_mode == "answer_process_50_50":
+        raw["answer_process_score"] = float(bounded)
+        raw["env_success_overrides_reward"] = _env_success_overrides_reward(args)
+        if _env_success_overrides_reward(args):
+            raw["env_success_for_reward"] = _env_success_for_shaping(sample)
+            raw["failure_shaping_beta"] = _failure_shaping_beta(args)
     elif schema_mode == "ca_compact":
         raw["env_success_for_reward"] = _env_success_for_shaping(sample)
     if schema_mode == "rubric_shaping":

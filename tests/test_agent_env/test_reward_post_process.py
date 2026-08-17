@@ -1,4 +1,5 @@
 from argparse import Namespace
+import json
 
 import torch
 
@@ -37,6 +38,33 @@ def test_luffy_teacher_sample_uses_same_grpo_normalizer_as_students():
     assert raw_rewards == [1.0] * 7 + [1.078]
     assert max(abs(value) for value in rewards) < 3.0
     assert abs(rewards[-1] - 2.474873) < 1e-4
+
+
+def test_reward_group_dump_records_raw_and_normalized_rewards(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUN_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_ENV_REWARD_GROUP_DUMP_N", "10")
+    monkeypatch.setenv("AGENT_ENV_REWARD_GROUP_DUMP_TOTAL_N", "10")
+    args = Namespace(
+        advantage_estimator="grpo",
+        rewards_normalization=True,
+        grpo_std_normalization=False,
+        n_samples_per_prompt=2,
+        reward_key=None,
+    )
+    samples = [_sample(1.0), _sample(3.0)]
+
+    raw_rewards, rewards = post_process_rewards(args, samples)
+
+    assert raw_rewards == [1.0, 3.0]
+    assert rewards == [-1.0, 1.0]
+    dump_files = list((tmp_path / "reward_artifacts" / "reward_groups").glob("reward_group_pid*.jsonl"))
+    assert len(dump_files) == 1
+    payload = json.loads(dump_files[0].read_text().splitlines()[0])
+    assert payload["sample_count"] == 2
+    assert payload["active_count"] == 2
+    assert payload["raw_reward_stats"]["mean"] == 2.0
+    assert payload["normalized_reward_stats"]["mean"] == 0.0
+    assert [row["normalized_reward"] for row in payload["samples"]] == [-1.0, 1.0]
 
 
 def test_credit_assignment_attaches_response_aligned_process_advantages():
@@ -177,7 +205,7 @@ def test_segment_credit_assignment_advantage_reweights_outcome_sign():
 
     segment_credit_assignment_advantage(args, rollout_data)
 
-    expected = 2.0 * (1.0 + 0.5 * torch.tanh(torch.tensor([2.0, -2.0])))
+    expected = 2.0 * torch.clamp(1.0 + 0.5 * torch.tensor([2.0, -2.0]), min=1e-6)
     assert torch.allclose(rollout_data["advantages"][0], expected)
     assert torch.all(rollout_data["advantages"][0] > 0)
 
@@ -350,3 +378,37 @@ def test_credit_assignment_mode_c_builds_group_turn_segment_rewards_in_post_proc
     assert torch.all(weak_adv < 0)
     all_values = torch.cat([strong_adv, weak_adv])
     assert abs(float(all_values.mean())) < 1e-6
+
+
+def test_segment_credit_assignment_advantage_dumps_token_level_artifact(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_ENV_ADVANTAGE_DUMP_N", "1")
+    monkeypatch.setenv("AGENT_ENV_ADVANTAGE_DUMP_TOKEN_IDS", "1")
+    monkeypatch.setenv("AGENT_ENV_ADVANTAGE_DUMP_DIR", str(tmp_path))
+    args = Namespace(
+        advantage_estimator="grpo",
+        reward={"credit_assignment": {"enable": True, "beta": 0.5}},
+    )
+    rollout_data = {
+        "kl": [torch.zeros(2, dtype=torch.float32)],
+        "rewards": [2.0],
+        "process_advantages": [torch.tensor([1.0, -1.0], dtype=torch.float32)],
+        "loss_masks": [torch.tensor([1, 1], dtype=torch.int32)],
+        "response_lengths": [2],
+        "tokens": [torch.tensor([11, 22, 33, 44], dtype=torch.long)],
+        "sample_indices": [7],
+        "rollout_ids": [3],
+        "source_names": ["appworld"],
+    }
+
+    segment_credit_assignment_advantage(args, rollout_data)
+
+    paths = list(tmp_path.glob("advantage_pid*.jsonl"))
+    assert len(paths) == 1
+    payload = json.loads(paths[0].read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "agent_env.token_advantage_audit.v1"
+    assert payload["sample_index"] == 7
+    assert payload["response_token_ids"] == [33, 44]
+    assert payload["tokens"][0]["process_advantage"] == 1.0
+    assert payload["tokens"][0]["final_advantage"] == 2.5
+    assert payload["tokens"][1]["process_advantage"] == -1.0
+    assert payload["tokens"][1]["final_advantage"] == 1.5

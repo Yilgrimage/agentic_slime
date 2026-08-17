@@ -6,7 +6,7 @@ import torch
 
 from slime.utils.ppo_utils import get_grpo_returns
 
-from examples.agent_env import credit_assignment
+from examples.agent_env import advantage_dump, credit_assignment
 
 
 def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any]) -> None:
@@ -55,10 +55,12 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
     if not process_advantages:
         rollout_data["advantages"] = [value for value in base_returns]
         rollout_data["returns"] = base_returns
+        advantage_dump.maybe_dump_token_advantages(args, rollout_data, base_returns, None, base_returns)
         return
     if beta == 0 and mode != "segment_reward_group_turn_norm":
         rollout_data["advantages"] = [value for value in base_returns]
         rollout_data["returns"] = base_returns
+        advantage_dump.maybe_dump_token_advantages(args, rollout_data, base_returns, None, base_returns)
         return
 
     process_tensors = _process_tensors(process_advantages, base_returns)
@@ -81,6 +83,7 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
 
     rollout_data["advantages"] = advantages
     rollout_data["returns"] = advantages
+    advantage_dump.maybe_dump_token_advantages(args, rollout_data, base_returns, process_tensors, advantages)
 
 
 def _process_tensors(process_advantages: list[Any], base_returns: list[torch.Tensor]) -> list[torch.Tensor]:

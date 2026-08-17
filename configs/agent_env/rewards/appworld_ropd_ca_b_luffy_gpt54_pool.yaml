@@ -1,0 +1,59 @@
+impl: ropd
+judge_mode: aux
+source: score
+outcome: 10.0
+
+ropd:
+  schema_mode: ca_compact
+  join_key: task_id
+  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
+  teacher_index_keys:
+    - task_id
+  teacher_answer_keys:
+    - teacher_trace
+    - teacher_tool_trace
+    - teacher_full_trace_text
+  concurrency: 8
+  judge_concurrency: 8
+  max_attempts: 4
+  rate_limit_backoff_s: 10
+  retry_backoff_s: 1
+  response_format: json_object
+  judge_max_tokens: 4096
+  answer_mode: trace
+  strip_reasoning: true
+  strip_tool_call: 256
+  strip_tool_response: 120
+  strip_assistant_response: true
+  strip_system_prompt: true
+
+credit_assignment:
+  enable: true
+  request_process_step_evidence: true
+  advantage_mode: outcome_reweight
+  beta: 0.2
+  shaping_mode: milestone
+  normalization: episode_turn_zscore
+  milestone_reward: 2.0
+  predecessor_reward: 0.5
+  negative_reward: 0.0
+  success_milestone_tail_steps: 2
+  clip: 2.0
+  step_index_base: 1
+
+luffy:
+  enable: true
+  mode: token_loss
+  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
+  teacher_index_keys:
+    - task_id
+  teacher_trace_keys:
+    - teacher_response
+    - teacher_raw_trace_text
+  policy_format: appworld_markdown_code
+  insertion_mode: replace_anchor
+  teacher_reward_source: constant
+  teacher_reward: 10.0
+  off_policy_loss_coef: 1.0
+  off_policy_reshape: p_div_p_0.1
+  off_policy_reshape_eps: 0.1
