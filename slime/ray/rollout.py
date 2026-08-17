@@ -548,12 +548,14 @@ class RolloutManager:
             self._try_ci_fault_injection()
         data, metrics = self._get_rollout_data(rollout_id=rollout_id)
         self._save_debug_rollout_data(data, rollout_id=rollout_id, evaluation=False)
-        _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
+        rollout_time = time.time() - start_time
         if self.args.debug_rollout_only:
             # if debug rollout only, we don't convert samples to train data and directly return
+            _log_rollout_data(rollout_id, self.args, data, metrics, rollout_time)
             return
-        data = self._convert_samples_to_train_data(data)
-        return self._split_train_data_by_dp(data)
+        train_data = self._convert_samples_to_train_data(data)
+        _log_rollout_data(rollout_id, self.args, data, metrics, rollout_time)
+        return self._split_train_data_by_dp(train_data)
 
     def eval(self, rollout_id):
         if self.args.debug_train_only:
