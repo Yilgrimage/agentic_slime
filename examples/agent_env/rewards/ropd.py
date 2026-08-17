@@ -351,6 +351,7 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
 - 如果 bad hit 依赖“某个 item/API/action 不在 observation 中可见”这类缺失证据，而相关 observation 已被截断或省略，不要标注该 bad hit。
 - 每条 behavior 必须可以通过具体 Step N 判断命中。
 - 只返回紧凑 JSON，不要 rationale，不要 evidence 句子，不要 Markdown。
+{tasa_state_instructions}
 
 [Question]
 {question}
@@ -394,6 +395,7 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
   "trajectory_scores": [
     {"trajectory_id": "T0_REFERENCE", "process_score": 0.0, "quality": "strong"}
   ]
+{tasa_state_json_example}
 }
 ```
 
@@ -406,6 +408,7 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
 - Step 编号只能来自对应 trajectory 文本里的 `Step N`。
 - `process_score` 是 0 到 1 的粗略过程质量分；good hits 多且 bad hits 少则高。
 - `quality` 必须是 `strong`, `useful`, `partial`, `weak`, `invalid` 之一。
+{tasa_state_output_constraints}
 - 输出字段只能是 schema 中出现的字段。
 - 只返回 JSON object，不要输出解释、Markdown 或其他文本。
 """
@@ -1587,6 +1590,7 @@ def _ca_compact_rubric(args: Any) -> dict[str, Any]:
             "env_success_overrides_reward": True,
             "single_call_behavior_mining": True,
             "process_step_evidence_for_credit_assignment": True,
+            "tasa_state_evidence_for_credit_assignment": credit_assignment.request_tasa_state_evidence(args),
         },
     }
 
@@ -1782,6 +1786,50 @@ def _render_ca_compact_trajectory_block(answer_items: tuple[dict[str, Any], ...]
     return "\n\n".join(blocks)
 
 
+def _tasa_state_prompt_parts(args: Any) -> tuple[str, str, str]:
+    if not credit_assignment.request_tasa_state_evidence(args):
+        return "", "", ""
+    instructions = """
+
+# TASA-GRPO semantic state evidence
+同时输出 `tasa_state_schema` 和 `tasa_state_changes`，用于构造 teacher-anchored semantic state baseline。
+规则：
+- `tasa_state_schema` 描述任务级 semantic state predicates，而不是 teacher action。
+- milestone predicate 必须描述已经达成的可观察状态事实，例如“目标用户已确定”，不要写“调用了某个 API”。
+- bad flag predicate 描述会污染后续状态的明确错误事实，例如“进入错误用户上下文”。
+- 总 predicate 数量控制在 3 到 8 个；id 使用 `M1`, `M2`... 和 `B1`, `B2`...
+- `requires` 只表达 milestone 之间的先后依赖，不能引用 bad flag。
+- `tasa_state_changes` 只标 student trajectories；每个 student trajectory_id 必须出现一次。
+- `changes[].step` 表示该 Step 的 action 执行后状态发生变化；step 编号必须来自该 trajectory 文本。
+- `set` 填该 step 后变为 true 的 predicate id；`unset` 通常为空，只有状态被明确纠正时才使用。
+"""
+    example = """,
+  "tasa_state_schema": {
+    "milestones": [
+      {"id": "M1", "predicate": "正确目标用户已经确定", "requires": []},
+      {"id": "M2", "predicate": "正确目标订单已经确定", "requires": ["M1"]}
+    ],
+    "bad_flags": [
+      {"id": "B1", "predicate": "进入错误用户上下文"}
+    ]
+  },
+  "tasa_state_changes": [
+    {
+      "trajectory_id": "S0_STUDENT",
+      "changes": [
+        {"step": 2, "set": ["M1"], "unset": []},
+        {"step": 5, "set": ["M2"], "unset": []}
+      ]
+    }
+  ]"""
+    constraints = """
+- TASA mode 下必须输出 `tasa_state_schema` 和 `tasa_state_changes`。
+- `tasa_state_schema.milestones` 和 `tasa_state_schema.bad_flags` 的总数必须是 3 到 8。
+- `tasa_state_changes[].trajectory_id` 必须覆盖所有 S*_STUDENT 且不能包含 teacher trajectory。
+- `set`/`unset` 中的 id 必须来自 `tasa_state_schema`。"""
+    return instructions, example, constraints
+
+
 def _build_ca_compact_verifier_prompt(
     args: Any,
     sample: Sample,
@@ -1803,6 +1851,7 @@ def _build_ca_compact_verifier_prompt(
         if has_reference
         else "- 本批输入没有 reference trajectory；只基于任务要求和 student trajectories 的可见过程，判断关键进展和明显错误。"
     )
+    tasa_state_instructions, tasa_state_json_example, tasa_state_output_constraints = _tasa_state_prompt_parts(args)
     return _render_template(
         CA_COMPACT_VERIFIER_PROMPT_TEMPLATE,
         {
@@ -1811,6 +1860,9 @@ def _build_ca_compact_verifier_prompt(
             "trajectory_ids": ", ".join(_trajectory_id(item) for item in limited_items),
             "reference_guidance": reference_guidance,
             "extra_scoring_instructions": _extra_scoring_instructions(args),
+            "tasa_state_instructions": tasa_state_instructions,
+            "tasa_state_json_example": tasa_state_json_example,
+            "tasa_state_output_constraints": tasa_state_output_constraints,
         },
     )
 
@@ -2038,13 +2090,161 @@ def _score_0_to_1(value: Any) -> float:
     return max(0.0, min(1.0, float_value(value, 0.0)))
 
 
+def _parse_tasa_state_id_list(raw: Any, *, field: str) -> list[str]:
+    if raw in (None, "", []):
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"ROPD compact TASA {field} must be a list")
+    ids: list[str] = []
+    for item in raw:
+        item_id = str(item or "").strip()
+        if not item_id:
+            continue
+        ids.append(item_id)
+    return list(dict.fromkeys(ids))
+
+
+def _parse_tasa_state_schema(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("ROPD compact TASA state schema must be an object")
+    milestones = payload.get("milestones")
+    bad_flags = payload.get("bad_flags")
+    if not isinstance(milestones, list) or not isinstance(bad_flags, list):
+        raise ValueError("ROPD compact TASA state schema requires milestones and bad_flags lists")
+    normalized_milestones: list[dict[str, Any]] = []
+    normalized_bad_flags: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for raw_item in milestones:
+        if not isinstance(raw_item, dict):
+            raise ValueError("ROPD compact TASA milestone must be an object")
+        item_id = str(raw_item.get("id") or "").strip()
+        if not re.fullmatch(r"M[1-9][0-9]*", item_id):
+            raise ValueError("ROPD compact TASA milestone id must match M<N>")
+        if item_id in seen_ids:
+            raise ValueError("ROPD compact TASA predicate ids must be unique")
+        predicate = str(raw_item.get("predicate") or "").strip()
+        if not predicate:
+            raise ValueError("ROPD compact TASA milestone predicate is required")
+        seen_ids.add(item_id)
+        normalized_milestones.append(
+            {
+                "id": item_id,
+                "predicate": predicate,
+                "requires": _parse_tasa_state_id_list(raw_item.get("requires", []), field=f"{item_id}.requires"),
+            }
+        )
+
+    milestone_ids = {item["id"] for item in normalized_milestones}
+    for item in normalized_milestones:
+        unknown_requires = sorted(set(item["requires"]) - milestone_ids)
+        if unknown_requires:
+            raise ValueError(f"ROPD compact TASA milestone requires unknown ids: {unknown_requires}")
+
+    for raw_item in bad_flags:
+        if not isinstance(raw_item, dict):
+            raise ValueError("ROPD compact TASA bad flag must be an object")
+        item_id = str(raw_item.get("id") or "").strip()
+        if not re.fullmatch(r"B[1-9][0-9]*", item_id):
+            raise ValueError("ROPD compact TASA bad flag id must match B<N>")
+        if item_id in seen_ids:
+            raise ValueError("ROPD compact TASA predicate ids must be unique")
+        predicate = str(raw_item.get("predicate") or "").strip()
+        if not predicate:
+            raise ValueError("ROPD compact TASA bad flag predicate is required")
+        seen_ids.add(item_id)
+        normalized_bad_flags.append({"id": item_id, "predicate": predicate})
+
+    total = len(normalized_milestones) + len(normalized_bad_flags)
+    if not (3 <= total <= 8):
+        raise ValueError("ROPD compact TASA state schema must contain 3..8 predicates")
+    if not normalized_milestones:
+        raise ValueError("ROPD compact TASA state schema requires at least one milestone")
+    return {"milestones": normalized_milestones, "bad_flags": normalized_bad_flags}
+
+
+def _parse_tasa_state_changes(
+    payload: Any,
+    *,
+    expected_student_ids: set[str],
+    valid_steps: dict[str, set[int]],
+    valid_predicate_ids: set[str],
+) -> dict[str, list[dict[str, Any]]]:
+    if not isinstance(payload, list):
+        raise ValueError("ROPD compact TASA state changes must be a list")
+    changes_by_trajectory: dict[str, list[dict[str, Any]]] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("ROPD compact TASA state change item must be an object")
+        trajectory_id = str(item.get("trajectory_id") or "").strip()
+        if trajectory_id not in expected_student_ids:
+            raise ValueError(f"ROPD compact TASA state changes unknown/non-student trajectory_id={trajectory_id!r}")
+        raw_changes = item.get("changes")
+        if not isinstance(raw_changes, list):
+            raise ValueError("ROPD compact TASA changes must be a list")
+        normalized_changes: list[dict[str, Any]] = []
+        for raw_change in raw_changes:
+            if not isinstance(raw_change, dict):
+                raise ValueError("ROPD compact TASA change entry must be an object")
+            try:
+                step = int(raw_change.get("step"))
+            except (TypeError, ValueError):
+                raise ValueError("ROPD compact TASA change step must be an integer") from None
+            if step not in valid_steps[trajectory_id]:
+                raise ValueError(f"ROPD compact TASA step does not exist for {trajectory_id}: {step}")
+            set_ids = _parse_tasa_state_id_list(raw_change.get("set", []), field="change.set")
+            unset_ids = _parse_tasa_state_id_list(raw_change.get("unset", []), field="change.unset")
+            overlap = set(set_ids).intersection(unset_ids)
+            if overlap:
+                raise ValueError(f"ROPD compact TASA cannot set and unset the same id: {sorted(overlap)}")
+            unknown = sorted((set(set_ids) | set(unset_ids)) - valid_predicate_ids)
+            if unknown:
+                raise ValueError(f"ROPD compact TASA change references unknown predicate ids: {unknown}")
+            if not set_ids and not unset_ids:
+                continue
+            normalized_changes.append({"step": step, "set": set_ids, "unset": unset_ids})
+        changes_by_trajectory[trajectory_id] = normalized_changes
+    missing = sorted(expected_student_ids - set(changes_by_trajectory))
+    if missing:
+        raise ValueError(f"ROPD compact TASA state changes missing student trajectories: {missing}")
+    return changes_by_trajectory
+
+
+def _parse_tasa_state_annotations(
+    args: Any,
+    payload: dict[str, Any],
+    *,
+    answer_items: tuple[dict[str, Any], ...],
+    valid_steps: dict[str, set[int]],
+) -> tuple[dict[str, Any] | None, dict[str, list[dict[str, Any]]]]:
+    if not credit_assignment.request_tasa_state_evidence(args):
+        return None, {}
+    schema = _parse_tasa_state_schema(payload.get("tasa_state_schema"))
+    valid_predicate_ids = {
+        str(item["id"])
+        for item in list(schema.get("milestones", [])) + list(schema.get("bad_flags", []))
+        if isinstance(item, dict)
+    }
+    expected_student_ids = {
+        _trajectory_id(item)
+        for item in answer_items
+        if str(item.get("source") or "") == "student"
+    }
+    changes = _parse_tasa_state_changes(
+        payload.get("tasa_state_changes"),
+        expected_student_ids=expected_student_ids,
+        valid_steps=valid_steps,
+        valid_predicate_ids=valid_predicate_ids,
+    )
+    return schema, changes
+
+
 def _parse_ca_compact_batch_scores(
     args: Any,
     payload: Any,
     *,
     answer_items: tuple[dict[str, Any], ...],
 ) -> list[dict[str, Any]]:
-    del args
     if not isinstance(payload, dict):
         raise ValueError("ROPD compact CA verifier response must be a JSON object")
     if payload.get("schema_version") != CA_COMPACT_VERIFIER_SCHEMA_VERSION:
@@ -2119,6 +2319,13 @@ def _parse_ca_compact_batch_scores(
     if polarities != {"good", "bad"}:
         raise ValueError("ROPD compact CA must include both good and bad behaviors")
 
+    tasa_state_schema, tasa_changes_by_trajectory = _parse_tasa_state_annotations(
+        args,
+        payload,
+        answer_items=answer_items,
+        valid_steps=valid_steps,
+    )
+
     raw_scores = payload.get("trajectory_scores")
     if not isinstance(raw_scores, list):
         raise ValueError("ROPD compact CA trajectory_scores must be a list")
@@ -2150,6 +2357,14 @@ def _parse_ca_compact_batch_scores(
                 "fatal_error": quality == "invalid",
                 "process_step_evidence": evidence_by_trajectory[trajectory_id],
                 "behaviors": behavior_items,
+                **(
+                    {
+                        "tasa_state_schema": tasa_state_schema,
+                        "tasa_state_changes": tasa_changes_by_trajectory.get(trajectory_id, []),
+                    }
+                    if tasa_state_schema is not None and str(item.get("source") or "") == "student"
+                    else {}
+                ),
             }
         )
     return scores
@@ -2629,6 +2844,8 @@ def _result(
         "fatal_error",
         "trajectory_id",
         "behaviors",
+        "tasa_state_schema",
+        "tasa_state_changes",
     ):
         if key in student_item:
             raw[key] = student_item[key]

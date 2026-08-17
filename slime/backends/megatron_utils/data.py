@@ -287,6 +287,7 @@ def log_rollout_data(
                 "rollout_mask_sums",
                 "off_policy_mask_sums",
                 "process_advantages",
+                "process_advantage_masks",
                 "rollout_top_p_token_ids",
                 "rollout_top_p_token_offsets",
                 "rollout_routed_experts",

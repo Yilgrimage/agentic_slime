@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +30,12 @@ class SegmentCreditRecord:
     step: int
     value: float
     marked: bool
+    state_key: str | None = None
+    state_ids: tuple[str, ...] = ()
+    peer_count: int | None = None
+    state_reward_mean: float | None = None
+    local_advantage: float | None = None
+    supported: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +109,10 @@ def advantage_mode(args: Any) -> str:
         "reinforce_plus_plus": "segment_reward_group_turn_norm",
         "segment_reward_global_norm": "segment_reward_group_turn_norm",
         "c": "segment_reward_group_turn_norm",
+        "tasa": "teacher_anchored_state_aggregation",
+        "tasa_grpo": "teacher_anchored_state_aggregation",
+        "teacher_anchored": "teacher_anchored_state_aggregation",
+        "teacher_anchored_state_aggregation": "teacher_anchored_state_aggregation",
     }
     value = aliases.get(value, value)
     valid = {
@@ -110,6 +120,7 @@ def advantage_mode(args: Any) -> str:
         "outcome_reweight",
         "outcome_bangbang_reweight",
         "segment_reward_group_turn_norm",
+        "teacher_anchored_state_aggregation",
     }
     if value not in valid:
         raise ValueError(f"reward.credit_assignment.advantage_mode must be one of {sorted(valid)}")
@@ -152,6 +163,32 @@ def normalization(args: Any) -> str:
         raise ValueError(
             "reward.credit_assignment.advantage_mode=outcome_bangbang_reweight requires normalization=none"
         )
+    return value
+
+
+def request_tasa_state_evidence(args: Any) -> bool:
+    return enabled(args) and advantage_mode(args) == "teacher_anchored_state_aggregation"
+
+
+def tasa_min_peer_support(args: Any) -> int:
+    value = int_value(config(args).get("tasa_min_peer_support", 2), 2)
+    if value < 1:
+        raise ValueError("reward.credit_assignment.tasa_min_peer_support must be positive")
+    return value
+
+
+def tasa_local_normalization(args: Any) -> str:
+    value = str(config(args).get("tasa_local_normalization", "group_segment_zscore") or "group_segment_zscore")
+    value = value.strip().lower()
+    aliases = {
+        "zscore": "group_segment_zscore",
+        "group_zscore": "group_segment_zscore",
+        "segment_zscore": "group_segment_zscore",
+        "group_segment_norm": "group_segment_zscore",
+    }
+    value = aliases.get(value, value)
+    if value not in {"none", "group_segment_zscore"}:
+        raise ValueError("reward.credit_assignment.tasa_local_normalization must be none or group_segment_zscore")
     return value
 
 
@@ -549,8 +586,158 @@ def _segment_records_for_sample(args: Any, sample_index: int, sample: Sample) ->
     return records
 
 
+def _string_id_list(value: Any) -> list[str]:
+    if value in (None, "", []):
+        return []
+    if not isinstance(value, list):
+        raise ValueError("TASA state id fields must be lists")
+    ids: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        ids.append(text)
+    return list(dict.fromkeys(ids))
+
+
+def _tasa_schema_ids(raw: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    schema = raw.get("tasa_state_schema")
+    if not isinstance(schema, dict):
+        raise ValueError("TASA-GRPO requires judge raw.tasa_state_schema")
+    milestones = schema.get("milestones")
+    bad_flags = schema.get("bad_flags")
+    if not isinstance(milestones, list) or not isinstance(bad_flags, list):
+        raise ValueError("TASA-GRPO state schema requires milestones and bad_flags lists")
+
+    def collect_ids(items: list[Any], *, prefix: str, field: str) -> tuple[str, ...]:
+        ids: list[str] = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError(f"TASA-GRPO {field} entries must be objects")
+            item_id = str(item.get("id") or "").strip()
+            if not item_id:
+                raise ValueError(f"TASA-GRPO {field} entries require id")
+            if not item_id.startswith(prefix):
+                raise ValueError(f"TASA-GRPO {field} id must start with {prefix}")
+            ids.append(item_id)
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"TASA-GRPO {field} ids must be unique")
+        return tuple(ids)
+
+    milestone_ids = collect_ids(milestones, prefix="M", field="milestones")
+    bad_flag_ids = collect_ids(bad_flags, prefix="B", field="bad_flags")
+    if not milestone_ids and not bad_flag_ids:
+        raise ValueError("TASA-GRPO state schema must contain at least one predicate")
+    overlap = set(milestone_ids).intersection(bad_flag_ids)
+    if overlap:
+        raise ValueError(f"TASA-GRPO state schema has duplicate ids across predicate types: {sorted(overlap)}")
+    return milestone_ids, bad_flag_ids
+
+
+def _tasa_state_key(active_milestones: set[str], active_bad_flags: set[str]) -> tuple[str, tuple[str, ...]]:
+    ids = tuple(sorted(active_milestones) + sorted(active_bad_flags))
+    return "|".join(ids) if ids else "ROOT", ids
+
+
+def _tasa_changes_by_step(raw: dict[str, Any], valid_ids: set[str]) -> dict[int, tuple[tuple[str, ...], tuple[str, ...]]]:
+    changes = raw.get("tasa_state_changes")
+    if not isinstance(changes, list):
+        raise ValueError("TASA-GRPO requires judge raw.tasa_state_changes")
+    by_step: dict[int, tuple[list[str], list[str]]] = {}
+    for item in changes:
+        if not isinstance(item, dict):
+            raise ValueError("TASA-GRPO state change entries must be objects")
+        try:
+            step = int(item.get("step"))
+        except (TypeError, ValueError):
+            raise ValueError("TASA-GRPO state change entries require integer step") from None
+        if step < 0:
+            raise ValueError("TASA-GRPO state change step must be non-negative")
+        set_ids = _string_id_list(item.get("set", []))
+        unset_ids = _string_id_list(item.get("unset", []))
+        unknown = sorted((set(set_ids) | set(unset_ids)) - valid_ids)
+        if unknown:
+            raise ValueError(f"TASA-GRPO state change references unknown predicate ids: {unknown}")
+        current_set, current_unset = by_step.setdefault(step, ([], []))
+        for item_id in set_ids:
+            if item_id not in current_set:
+                current_set.append(item_id)
+        for item_id in unset_ids:
+            if item_id not in current_unset:
+                current_unset.append(item_id)
+    return {step: (tuple(set_ids), tuple(unset_ids)) for step, (set_ids, unset_ids) in by_step.items()}
+
+
+def _tasa_segment_records_for_sample(args: Any, sample_index: int, sample: Sample) -> list[SegmentCreditRecord]:
+    sample_metadata = metadata(sample)
+    segments = sample_metadata.get("token_segments")
+    if not isinstance(segments, list):
+        return []
+    raw = _rm_raw(sample)
+    milestone_ids, bad_flag_ids = _tasa_schema_ids(raw)
+    valid_ids = set(milestone_ids) | set(bad_flag_ids)
+    changes_by_step = _tasa_changes_by_step(raw, valid_ids)
+    base = step_index_base(args)
+    response_cursor = 0
+    response_length = int(getattr(sample, "response_length", 0) or 0)
+    active_milestones: set[str] = set()
+    active_bad_flags: set[str] = set()
+    records: list[SegmentCreditRecord] = []
+    for raw_segment in segments:
+        if not isinstance(raw_segment, dict):
+            continue
+        try:
+            token_count = int(raw_segment.get("token_count", 0) or 0)
+        except (TypeError, ValueError):
+            token_count = 0
+        if token_count <= 0:
+            continue
+        kind = str(raw_segment.get("kind") or "")
+        start = response_cursor
+        end = min(response_length, response_cursor + token_count)
+        if kind != "initial_prompt":
+            response_cursor += token_count
+        if kind != "assistant" or end <= start:
+            continue
+        try:
+            loss_mask_sum = int(raw_segment.get("loss_mask_sum", 0) or 0)
+        except (TypeError, ValueError):
+            loss_mask_sum = 0
+        if loss_mask_sum <= 0:
+            continue
+        turn = _segment_turn(raw_segment)
+        if turn is None:
+            continue
+        rendered_step = turn + base
+        state_key, state_ids = _tasa_state_key(active_milestones, active_bad_flags)
+        records.append(
+            SegmentCreditRecord(
+                sample_index=sample_index,
+                start=start,
+                end=end,
+                step=rendered_step,
+                value=0.0,
+                marked=False,
+                state_key=state_key,
+                state_ids=state_ids,
+            )
+        )
+        set_ids, unset_ids = changes_by_step.get(rendered_step, ((), ()))
+        for item_id in unset_ids:
+            active_milestones.discard(item_id)
+            active_bad_flags.discard(item_id)
+        for item_id in set_ids:
+            if item_id in milestone_ids:
+                active_milestones.add(item_id)
+            else:
+                active_bad_flags.add(item_id)
+    return records
+
+
 def sample_has_process_credit_signal(args: Any, sample: Sample) -> bool:
     if not enabled(args) or not _is_student_train_sample(sample):
+        return False
+    if advantage_mode(args) == "teacher_anchored_state_aggregation":
         return False
     return any(record.marked and abs(record.value) > 0 for record in _segment_records_for_sample(args, 0, sample))
 
@@ -626,6 +813,8 @@ def _credit_record_payload(
         "step_marks": {record.step: record.value for record in records if record.marked},
         "step_mark_events": [event.as_dict() for event in step_mark_events],
         "process_step_evidence": process_evidence if isinstance(process_evidence, list) else [],
+        "tasa_state_schema": raw.get("tasa_state_schema") if isinstance(raw.get("tasa_state_schema"), dict) else None,
+        "tasa_state_changes": raw.get("tasa_state_changes") if isinstance(raw.get("tasa_state_changes"), list) else [],
         "segments": [
             {
                 "start": record.start,
@@ -634,6 +823,12 @@ def _credit_record_payload(
                 "raw_step_value": record.value,
                 "advantage_value": advantages[record.start] if 0 <= record.start < len(advantages) else 0.0,
                 "marked": record.marked,
+                "state_key": record.state_key,
+                "state_ids": list(record.state_ids),
+                "peer_count": record.peer_count,
+                "state_reward_mean": record.state_reward_mean,
+                "local_advantage": record.local_advantage,
+                "supported": record.supported,
             }
             for record in records
         ],
@@ -702,10 +897,12 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
         return
 
     sample_advantages: list[list[float]] = []
+    sample_masks: list[list[float]] = []
     sample_records: list[list[SegmentCreditRecord]] = []
     for sample in samples:
         response_length = int(getattr(sample, "response_length", 0) or 0)
         sample_advantages.append([0.0] * max(0, response_length))
+        sample_masks.append([0.0] * max(0, response_length))
         sample_records.append([])
 
     mode = advantage_mode(args)
@@ -713,10 +910,14 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
         if scalar_rewards is None:
             raise ValueError("segment_reward_group_turn_norm requires scalar_rewards from reward post-process")
         _attach_segment_reward_group_turn_norm(args, samples, sample_advantages, sample_records, scalar_rewards)
+    elif mode == "teacher_anchored_state_aggregation":
+        if scalar_rewards is None:
+            raise ValueError("TASA-GRPO requires scalar_rewards from reward post-process")
+        _attach_tasa_state_baselines(args, samples, sample_advantages, sample_masks, sample_records, scalar_rewards)
     else:
         _attach_process_credit(args, samples, sample_advantages, sample_records)
 
-    for sample, values in zip(samples, sample_advantages, strict=True):
+    for sample, values, support_values in zip(samples, sample_advantages, sample_masks, strict=True):
         sample_metadata = metadata(sample)
         nonzero = sum(1 for value in values if abs(value) > 0)
         positive = sum(1 for value in values if value > 0)
@@ -726,7 +927,9 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
         process_abs_mean = (sum(abs(value) for value in values) / response_length) if response_length else 0.0
         cfg_beta = beta(args)
         sample_metadata["process_advantages"] = values
-        sample_metadata["credit_assignment"] = {
+        if mode == "teacher_anchored_state_aggregation":
+            sample_metadata["process_advantage_masks"] = support_values
+        credit_stats = {
             "enabled": True,
             "advantage_mode": mode,
             "beta": cfg_beta,
@@ -734,6 +937,12 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
             "normalization": normalization(args),
             "segment_reward_normalization": "group_turn_zscore"
             if mode == "segment_reward_group_turn_norm"
+            else None,
+            "tasa_local_normalization": tasa_local_normalization(args)
+            if mode == "teacher_anchored_state_aggregation"
+            else None,
+            "tasa_min_peer_support": tasa_min_peer_support(args)
+            if mode == "teacher_anchored_state_aggregation"
             else None,
             "milestone_reward": milestone_reward(args),
             "predecessor_reward": predecessor_reward(args),
@@ -754,6 +963,10 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
             "process_delta_mean": cfg_beta * process_mean,
             "process_delta_abs_mean": cfg_beta * process_abs_mean,
         }
+        tasa_stats = sample_metadata.pop("_tasa_credit_assignment", None)
+        if isinstance(tasa_stats, dict):
+            credit_stats.update(tasa_stats)
+        sample_metadata["credit_assignment"] = credit_stats
 
     _maybe_dump_credit_assignment(args, samples, sample_advantages=sample_advantages, sample_records=sample_records)
 
@@ -761,6 +974,32 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
 def _write_record_value(target: list[float], record: SegmentCreditRecord, value: float) -> None:
     for offset in range(record.start, min(record.end, len(target))):
         target[offset] = value
+
+
+def _mean_float(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _sample_std(values: list[float]) -> float:
+    if len(values) <= 1:
+        return 0.0
+    mean = _mean_float(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return max(variance, 0.0) ** 0.5
+
+
+def _corr(xs: list[float], ys: list[float]) -> float:
+    if len(xs) <= 1 or len(xs) != len(ys):
+        return 0.0
+    mean_x = _mean_float(xs)
+    mean_y = _mean_float(ys)
+    centered_x = [value - mean_x for value in xs]
+    centered_y = [value - mean_y for value in ys]
+    denom_x = sum(value * value for value in centered_x)
+    denom_y = sum(value * value for value in centered_y)
+    if denom_x <= 0 or denom_y <= 0:
+        return 0.0
+    return sum(x * y for x, y in zip(centered_x, centered_y, strict=True)) / ((denom_x * denom_y) ** 0.5)
 
 
 def _records_for_group(
@@ -780,6 +1019,60 @@ def _records_for_group(
     for record in records:
         sample_records[record.sample_index].append(record)
     return records
+
+
+def _group_reward_advantages(sample_indices: list[int], scalar_rewards: list[float]) -> dict[int, float]:
+    values = [float(scalar_rewards[idx]) for idx in sample_indices]
+    mean = _mean_float(values)
+    std = _sample_std(values)
+    if std <= 0:
+        return {idx: float(scalar_rewards[idx]) - mean for idx in sample_indices}
+    return {idx: (float(scalar_rewards[idx]) - mean) / (std + 1e-6) for idx in sample_indices}
+
+
+def _write_tasa_group_stats(
+    *,
+    samples: list[Sample],
+    group_indices: list[int],
+    records: list[SegmentCreditRecord],
+    state_rewards: dict[str, dict[int, float]],
+    local_values: list[float],
+    base_values: list[float],
+) -> None:
+    unique_states = len(state_rewards)
+    reused_states = sum(1 for values in state_rewards.values() if len(values) >= 2)
+    state_reward_stds = [_sample_std(list(values.values())) for values in state_rewards.values() if len(values) >= 2]
+    supported_records = [record for record in records if record.supported]
+    records_with_any_peer = [record for record in records if (record.peer_count or 0) >= 1]
+    group_stats = {
+        "tasa_group_segment_count": float(len(records)),
+        "tasa_group_supported_segment_count": float(len(supported_records)),
+        "tasa_group_supported_segment_rate": len(supported_records) / len(records) if records else 0.0,
+        "tasa_group_unique_states": float(unique_states),
+        "tasa_group_reused_states": float(reused_states),
+        "tasa_group_state_reuse_rate": reused_states / unique_states if unique_states else 0.0,
+        "tasa_group_segment_peer_rate": len(records_with_any_peer) / len(records) if records else 0.0,
+        "tasa_group_peer_count_mean": _mean_float([float(record.peer_count or 0) for record in records]),
+        "tasa_group_state_reward_std_mean": _mean_float(state_reward_stds),
+        "tasa_local_outcome_corr": _corr(local_values, base_values),
+    }
+    by_sample: dict[int, list[SegmentCreditRecord]] = {}
+    for record in records:
+        by_sample.setdefault(record.sample_index, []).append(record)
+    for idx in group_indices:
+        if not _is_student_train_sample(samples[idx]):
+            continue
+        sample_records = by_sample.get(idx, [])
+        response_length = int(getattr(samples[idx], "response_length", 0) or 0)
+        supported_tokens = sum(max(0, record.end - record.start) for record in sample_records if record.supported)
+        sample_stats = {
+            **group_stats,
+            "tasa_sample_segment_count": float(len(sample_records)),
+            "tasa_sample_supported_segment_count": float(len([record for record in sample_records if record.supported])),
+            "tasa_supported_tokens": float(supported_tokens),
+            "tasa_supported_token_rate": supported_tokens / response_length if response_length else 0.0,
+        }
+        metadata(samples[idx])["_tasa_credit_assignment"] = sample_stats
 
 
 def _attach_process_credit(
@@ -812,6 +1105,111 @@ def _attach_process_credit(
             _write_episode_turn_zscore(records, sample_advantages, cfg_clip)
             continue
         raise ValueError(f"Unsupported credit assignment normalization={cfg_normalization!r}")
+
+
+def _attach_tasa_state_baselines(
+    args: Any,
+    samples: list[Sample],
+    sample_advantages: list[list[float]],
+    sample_masks: list[list[float]],
+    sample_records: list[list[SegmentCreditRecord]],
+    scalar_rewards: list[float],
+) -> None:
+    """TASA-GRPO: build leave-one-out abstract-state baselines per group.
+
+    The judge supplies task-level semantic predicates and per-student state
+    change points. We reconstruct the abstract state before each assistant
+    action, aggregate terminal outcome rewards over trajectories that reached
+    the same state, and use ``R_i - V_{-i}(z)`` as a segment-local baseline.
+    """
+
+    cfg_clip = clip(args)
+    cfg_min_peer_support = tasa_min_peer_support(args)
+    cfg_normalization = tasa_local_normalization(args)
+    for indices in _group_indices(args, samples).values():
+        raw_records: list[SegmentCreditRecord] = []
+        student_indices: list[int] = []
+        for idx in indices:
+            sample = samples[idx]
+            if not _is_student_train_sample(sample):
+                continue
+            records = _tasa_segment_records_for_sample(args, idx, sample)
+            if records:
+                student_indices.append(idx)
+                raw_records.extend(records)
+        if not raw_records:
+            continue
+
+        state_rewards: dict[str, dict[int, float]] = {}
+        for record in raw_records:
+            state_key = record.state_key or "ROOT"
+            state_rewards.setdefault(state_key, {})[record.sample_index] = float(scalar_rewards[record.sample_index])
+
+        local_records: list[SegmentCreditRecord] = []
+        raw_local_values: list[float] = []
+        for record in raw_records:
+            state_key = record.state_key or "ROOT"
+            rewards_by_sample = state_rewards[state_key]
+            peer_rewards = [
+                reward
+                for sample_index, reward in rewards_by_sample.items()
+                if sample_index != record.sample_index
+            ]
+            peer_count = len(peer_rewards)
+            supported = peer_count >= cfg_min_peer_support
+            state_reward_mean = _mean_float(peer_rewards) if peer_rewards else 0.0
+            local_advantage = float(scalar_rewards[record.sample_index]) - state_reward_mean if supported else 0.0
+            if supported:
+                raw_local_values.append(local_advantage)
+            local_records.append(
+                replace(
+                    record,
+                    value=local_advantage,
+                    marked=supported and abs(local_advantage) > 0,
+                    peer_count=peer_count,
+                    state_reward_mean=state_reward_mean,
+                    local_advantage=local_advantage,
+                    supported=supported,
+                )
+            )
+
+        if cfg_normalization == "group_segment_zscore":
+            mean = _mean_float(raw_local_values)
+            std = _sample_std(raw_local_values)
+        else:
+            mean = 0.0
+            std = 0.0
+
+        normalized_records: list[SegmentCreditRecord] = []
+        train_local_values: list[float] = []
+        train_base_values: list[float] = []
+        base_by_sample = _group_reward_advantages(student_indices, scalar_rewards)
+        normalization_has_scale = cfg_normalization != "group_segment_zscore" or std > 0
+        for record in local_records:
+            if record.supported and normalization_has_scale:
+                if cfg_normalization == "group_segment_zscore":
+                    normalized = (float(record.local_advantage or 0.0) - mean) / (std + 1e-6)
+                else:
+                    normalized = float(record.local_advantage or 0.0)
+                normalized = max(-cfg_clip, min(cfg_clip, normalized))
+                train_local_values.append(normalized)
+                train_base_values.append(base_by_sample.get(record.sample_index, 0.0))
+                final_record = replace(record, value=normalized, marked=abs(normalized) > 0)
+                _write_record_value(sample_advantages[record.sample_index], record, normalized)
+                _write_record_value(sample_masks[record.sample_index], record, 1.0)
+            else:
+                final_record = replace(record, value=0.0, marked=False, supported=False)
+            normalized_records.append(final_record)
+            sample_records[record.sample_index].append(final_record)
+
+        _write_tasa_group_stats(
+            samples=samples,
+            group_indices=indices,
+            records=normalized_records,
+            state_rewards=state_rewards,
+            local_values=train_local_values,
+            base_values=train_base_values,
+        )
 
 
 def _write_group_turn_zscore(

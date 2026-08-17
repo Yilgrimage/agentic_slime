@@ -380,6 +380,93 @@ def test_credit_assignment_mode_c_builds_group_turn_segment_rewards_in_post_proc
     assert abs(float(all_values.mean())) < 1e-6
 
 
+def test_credit_assignment_tasa_builds_leave_one_out_state_baselines():
+    args = Namespace(
+        advantage_estimator="grpo",
+        rewards_normalization=False,
+        grpo_std_normalization=False,
+        n_samples_per_prompt=3,
+        reward_key=None,
+        reward={
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_state_aggregation",
+                "beta": 0.2,
+                "clip": 10.0,
+                "tasa_min_peer_support": 2,
+                "tasa_local_normalization": "none",
+                "step_index_base": 1,
+            },
+        },
+    )
+
+    def make_sample(reward: float) -> Sample:
+        return Sample(
+            group_index=0,
+            reward=reward,
+            response_length=4,
+            loss_mask=[1, 1, 1, 1],
+            status=Sample.Status.COMPLETED,
+            metadata={
+                "token_segments": [
+                    {"kind": "initial_prompt", "turn": 0, "token_count": 1, "loss_mask_sum": 0},
+                    {"kind": "assistant", "turn": 0, "token_count": 2, "loss_mask_sum": 2},
+                    {"kind": "assistant", "turn": 1, "token_count": 2, "loss_mask_sum": 2},
+                ],
+                "rm_reward": {
+                    "score": reward,
+                    "raw": {
+                        "tasa_state_schema": {
+                            "milestones": [{"id": "M1", "predicate": "state reached", "requires": []}],
+                            "bad_flags": [],
+                        },
+                        "tasa_state_changes": [{"step": 1, "set": ["M1"], "unset": []}],
+                    },
+                },
+            },
+        )
+
+    first, second, third = make_sample(1.0), make_sample(0.0), make_sample(1.0)
+
+    post_process_rewards(args, [first, second, third])
+
+    assert first.metadata["process_advantages"] == [0.5, 0.5, 0.5, 0.5]
+    assert second.metadata["process_advantages"] == [-1.0, -1.0, -1.0, -1.0]
+    assert third.metadata["process_advantage_masks"] == [1.0, 1.0, 1.0, 1.0]
+    assert first.metadata["credit_assignment"]["tasa_group_unique_states"] == 2.0
+    assert first.metadata["credit_assignment"]["tasa_group_supported_segment_rate"] == 1.0
+
+
+def test_segment_credit_assignment_advantage_tasa_falls_back_without_support_mask():
+    args = Namespace(
+        advantage_estimator="grpo",
+        reward={
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_state_aggregation",
+                "beta": 0.2,
+            }
+        },
+    )
+    rollout_data = {
+        "kl": [torch.zeros(2, dtype=torch.float32), torch.zeros(2, dtype=torch.float32)],
+        "rewards": [1.0, -1.0],
+        "process_advantages": [
+            torch.tensor([2.0, 2.0], dtype=torch.float32),
+            torch.tensor([-2.0, -2.0], dtype=torch.float32),
+        ],
+        "process_advantage_masks": [
+            torch.tensor([1.0, 0.0], dtype=torch.float32),
+            torch.tensor([0.0, 1.0], dtype=torch.float32),
+        ],
+    }
+
+    segment_credit_assignment_advantage(args, rollout_data)
+
+    assert torch.allclose(rollout_data["advantages"][0], torch.tensor([1.2, 1.0]))
+    assert torch.allclose(rollout_data["advantages"][1], torch.tensor([-1.0, -1.2]))
+
+
 def test_segment_credit_assignment_advantage_dumps_token_level_artifact(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_ENV_ADVANTAGE_DUMP_N", "1")
     monkeypatch.setenv("AGENT_ENV_ADVANTAGE_DUMP_TOKEN_IDS", "1")

@@ -41,6 +41,10 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
       those values across turns in the same group, then expands the result to
       response tokens. This is REINFORCE++-style centering/scaling, not a
       same-prefix GRPO relative advantage.
+    - ``teacher_anchored_state_aggregation`` (TASA-GRPO): consume a
+      state-conditioned local REINFORCE baseline computed from teacher-anchored
+      semantic state predicates. Tokens whose abstract state lacks enough peer
+      support keep the original GRPO advantage exactly.
     """
 
     if getattr(args, "advantage_estimator", "grpo") not in {"grpo", "gspo", "cispo"}:
@@ -78,6 +82,12 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
     elif mode == "segment_reward_group_turn_norm":
         del beta
         advantages = _segment_reward_group_turn_norm(process_tensors)
+    elif mode == "teacher_anchored_state_aggregation":
+        support_masks = rollout_data.get("process_advantage_masks")
+        if not support_masks:
+            raise ValueError("TASA-GRPO requires response-aligned process_advantage_masks")
+        support_tensors = _process_tensors(support_masks, base_returns)
+        advantages = _teacher_anchored_state_aggregation(base_returns, process_tensors, support_tensors, beta)
     else:
         raise ValueError(f"Unsupported credit assignment advantage mode: {mode}")
 
@@ -217,3 +227,19 @@ def _segment_reward_group_turn_norm(
     """
 
     return [tensor for tensor in process_tensors]
+
+
+def _teacher_anchored_state_aggregation(
+    base_returns: list[torch.Tensor],
+    local_tensors: list[torch.Tensor],
+    support_tensors: list[torch.Tensor],
+    beta: float,
+) -> list[torch.Tensor]:
+    """TASA-GRPO: mix GRPO with supported state-conditioned local baselines."""
+
+    advantages: list[torch.Tensor] = []
+    for base, local, support in zip(base_returns, local_tensors, support_tensors, strict=True):
+        supported = support > 0
+        mixed = (1.0 - beta) * base + beta * local
+        advantages.append(torch.where(supported, mixed, base))
+    return advantages

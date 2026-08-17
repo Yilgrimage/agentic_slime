@@ -43,6 +43,7 @@ _ROLLOUT_DATA_TENSOR_DTYPES = {
     "off_policy_loss_masks": torch.int,
     "rollout_log_probs": torch.float32,
     "process_advantages": torch.float32,
+    "process_advantage_masks": torch.float32,
     "rollout_top_p_token_ids": torch.int32,
     "rollout_top_p_token_offsets": torch.int32,
     "teacher_log_probs": torch.float32,
@@ -833,6 +834,18 @@ class RolloutManager:
                 )
                 process_advantages.append(values)
             train_data["process_advantages"] = process_advantages
+
+        if any(sample.metadata and "process_advantage_masks" in sample.metadata for sample in samples):
+            process_advantage_masks = []
+            for sample in samples:
+                values = (sample.metadata or {}).get("process_advantage_masks")
+                if values is None:
+                    values = [0.0] * sample.response_length
+                assert len(values) == sample.response_length, (
+                    f"process_advantage_masks length {len(values)} != response length {sample.response_length}"
+                )
+                process_advantage_masks.append(values)
+            train_data["process_advantage_masks"] = process_advantage_masks
 
         if any(sample.multimodal_train_inputs is not None for sample in samples):
             train_data["multimodal_train_inputs"] = [sample.multimodal_train_inputs for sample in samples]

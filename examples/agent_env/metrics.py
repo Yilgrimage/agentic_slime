@@ -107,6 +107,13 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ca_process_value_abs_means: list[float] = []
     ca_process_delta_means: list[float] = []
     ca_process_delta_abs_means: list[float] = []
+    ca_tasa_supported_token_rates: list[float] = []
+    ca_tasa_unique_states: list[float] = []
+    ca_tasa_state_reuse_rates: list[float] = []
+    ca_tasa_supported_segment_rates: list[float] = []
+    ca_tasa_peer_count_means: list[float] = []
+    ca_tasa_state_reward_std_means: list[float] = []
+    ca_tasa_local_outcome_corrs: list[float] = []
 
     for sample in real_samples:
         sample_metadata = getattr(sample, "metadata", None) or {}
@@ -136,6 +143,27 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             process_delta_abs_mean = _float_or_none(ca.get("process_delta_abs_mean"))
             if process_delta_abs_mean is not None:
                 ca_process_delta_abs_means.append(process_delta_abs_mean)
+            tasa_supported_token_rate = _float_or_none(ca.get("tasa_supported_token_rate"))
+            if tasa_supported_token_rate is not None:
+                ca_tasa_supported_token_rates.append(tasa_supported_token_rate)
+            tasa_unique_states = _float_or_none(ca.get("tasa_group_unique_states"))
+            if tasa_unique_states is not None:
+                ca_tasa_unique_states.append(tasa_unique_states)
+            tasa_state_reuse_rate = _float_or_none(ca.get("tasa_group_state_reuse_rate"))
+            if tasa_state_reuse_rate is not None:
+                ca_tasa_state_reuse_rates.append(tasa_state_reuse_rate)
+            tasa_supported_segment_rate = _float_or_none(ca.get("tasa_group_supported_segment_rate"))
+            if tasa_supported_segment_rate is not None:
+                ca_tasa_supported_segment_rates.append(tasa_supported_segment_rate)
+            tasa_peer_count_mean = _float_or_none(ca.get("tasa_group_peer_count_mean"))
+            if tasa_peer_count_mean is not None:
+                ca_tasa_peer_count_means.append(tasa_peer_count_mean)
+            tasa_state_reward_std_mean = _float_or_none(ca.get("tasa_group_state_reward_std_mean"))
+            if tasa_state_reward_std_mean is not None:
+                ca_tasa_state_reward_std_means.append(tasa_state_reward_std_mean)
+            tasa_local_outcome_corr = _float_or_none(ca.get("tasa_local_outcome_corr"))
+            if tasa_local_outcome_corr is not None:
+                ca_tasa_local_outcome_corrs.append(tasa_local_outcome_corr)
         rm_reward = _as_dict(sample_metadata.get("rm_reward"))
         score = _float_or_none(rm_reward.get("score"))
         if score is not None:
@@ -286,6 +314,20 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics["reward/credit_assignment/process_delta_mean"] = _mean(ca_process_delta_means)
     if ca_process_delta_abs_means:
         metrics["reward/credit_assignment/process_delta_abs_mean"] = _mean(ca_process_delta_abs_means)
+    if ca_tasa_supported_token_rates:
+        metrics["reward/credit_assignment/tasa_supported_token_rate_mean"] = _mean(ca_tasa_supported_token_rates)
+    if ca_tasa_unique_states:
+        metrics["reward/credit_assignment/tasa_unique_states_mean"] = _mean(ca_tasa_unique_states)
+    if ca_tasa_state_reuse_rates:
+        metrics["reward/credit_assignment/tasa_state_reuse_rate_mean"] = _mean(ca_tasa_state_reuse_rates)
+    if ca_tasa_supported_segment_rates:
+        metrics["reward/credit_assignment/tasa_supported_segment_rate_mean"] = _mean(ca_tasa_supported_segment_rates)
+    if ca_tasa_peer_count_means:
+        metrics["reward/credit_assignment/tasa_peer_count_mean"] = _mean(ca_tasa_peer_count_means)
+    if ca_tasa_state_reward_std_means:
+        metrics["reward/credit_assignment/tasa_state_reward_std_mean"] = _mean(ca_tasa_state_reward_std_means)
+    if ca_tasa_local_outcome_corrs:
+        metrics["reward/credit_assignment/tasa_local_outcome_corr_mean"] = _mean(ca_tasa_local_outcome_corrs)
     _reward_call_metrics(metrics, role="judge", calls=judge_calls, sample_count=total)
     _reward_call_metrics(metrics, role="rubric", calls=rubric_calls, sample_count=total)
     return metrics
