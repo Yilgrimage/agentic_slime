@@ -36,6 +36,14 @@ class SegmentCreditRecord:
     state_reward_mean: float | None = None
     local_advantage: float | None = None
     supported: bool | None = None
+    next_state_key: str | None = None
+    next_state_ids: tuple[str, ...] = ()
+    state_prior: float | None = None
+    next_state_prior: float | None = None
+    state_value: float | None = None
+    next_state_value: float | None = None
+    td_delta: float | None = None
+    gae_advantage: float | None = None
 
 
 @dataclass(frozen=True)
@@ -111,8 +119,14 @@ def advantage_mode(args: Any) -> str:
         "c": "segment_reward_group_turn_norm",
         "tasa": "teacher_anchored_state_aggregation",
         "tasa_grpo": "teacher_anchored_state_aggregation",
+        "tasa_mc": "teacher_anchored_state_aggregation",
         "teacher_anchored": "teacher_anchored_state_aggregation",
         "teacher_anchored_state_aggregation": "teacher_anchored_state_aggregation",
+        "tasa_gae": "teacher_anchored_value_gae",
+        "tasa_v": "teacher_anchored_value_gae",
+        "tasa_value": "teacher_anchored_value_gae",
+        "tasa_value_gae": "teacher_anchored_value_gae",
+        "teacher_anchored_value_gae": "teacher_anchored_value_gae",
     }
     value = aliases.get(value, value)
     valid = {
@@ -121,6 +135,7 @@ def advantage_mode(args: Any) -> str:
         "outcome_bangbang_reweight",
         "segment_reward_group_turn_norm",
         "teacher_anchored_state_aggregation",
+        "teacher_anchored_value_gae",
     }
     if value not in valid:
         raise ValueError(f"reward.credit_assignment.advantage_mode must be one of {sorted(valid)}")
@@ -167,7 +182,10 @@ def normalization(args: Any) -> str:
 
 
 def request_tasa_state_evidence(args: Any) -> bool:
-    return enabled(args) and advantage_mode(args) == "teacher_anchored_state_aggregation"
+    return enabled(args) and advantage_mode(args) in {
+        "teacher_anchored_state_aggregation",
+        "teacher_anchored_value_gae",
+    }
 
 
 def tasa_min_peer_support(args: Any) -> int:
@@ -189,6 +207,51 @@ def tasa_local_normalization(args: Any) -> str:
     value = aliases.get(value, value)
     if value not in {"none", "group_segment_zscore"}:
         raise ValueError("reward.credit_assignment.tasa_local_normalization must be none or group_segment_zscore")
+    return value
+
+
+def tasa_prior_kappa(args: Any) -> float:
+    value = float_value(config(args).get("tasa_prior_kappa", 4.0), 4.0)
+    if value < 0:
+        raise ValueError("reward.credit_assignment.tasa_prior_kappa must be non-negative")
+    return value
+
+
+def tasa_lambda(args: Any) -> float:
+    value = float_value(config(args).get("tasa_lambda", 0.8), 0.8)
+    if value < 0 or value > 1:
+        raise ValueError("reward.credit_assignment.tasa_lambda must be in [0, 1]")
+    return value
+
+
+def tasa_prior_root(args: Any) -> float:
+    value = float_value(config(args).get("tasa_prior_root", 0.1), 0.1)
+    return max(0.0, min(1.0, value))
+
+
+def tasa_prior_success(args: Any) -> float:
+    value = float_value(config(args).get("tasa_prior_success", 0.9), 0.9)
+    return max(0.0, min(1.0, value))
+
+
+def tasa_bad_flag_penalty(args: Any) -> float:
+    value = float_value(config(args).get("tasa_bad_flag_penalty", 0.2), 0.2)
+    if value < 0:
+        raise ValueError("reward.credit_assignment.tasa_bad_flag_penalty must be non-negative")
+    return value
+
+
+def tasa_outcome_scale(args: Any) -> float:
+    value = float_value(config(args).get("tasa_outcome_scale", reward_cfg_path(args, "outcome", 1.0)), 1.0)
+    if value <= 0:
+        raise ValueError("reward.credit_assignment.tasa_outcome_scale must be positive")
+    return value
+
+
+def tasa_teacher_weight(args: Any) -> float:
+    value = float_value(config(args).get("tasa_teacher_weight", 1.0), 1.0)
+    if value < 0:
+        raise ValueError("reward.credit_assignment.tasa_teacher_weight must be non-negative")
     return value
 
 
@@ -634,6 +697,37 @@ def _tasa_schema_ids(raw: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, .
     return milestone_ids, bad_flag_ids
 
 
+def _tasa_progress_by_id(args: Any, raw: dict[str, Any], milestone_ids: tuple[str, ...]) -> dict[str, float]:
+    schema = raw.get("tasa_state_schema")
+    if not isinstance(schema, dict):
+        raise ValueError("TASA-GRPO requires judge raw.tasa_state_schema")
+    milestones = schema.get("milestones")
+    if not isinstance(milestones, list):
+        raise ValueError("TASA-GRPO state schema requires milestones list")
+    progress_by_id: dict[str, float] = {}
+    require_progress = advantage_mode(args) == "teacher_anchored_value_gae"
+    for index, item in enumerate(milestones, start=1):
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        if item_id not in milestone_ids:
+            continue
+        raw_progress = item.get("progress")
+        if raw_progress in (None, ""):
+            if require_progress:
+                raise ValueError(f"TASA-GAE requires progress for milestone {item_id}")
+            progress = float(index)
+        else:
+            progress = float_value(raw_progress, 0.0)
+            if progress <= 0:
+                raise ValueError(f"TASA milestone progress must be positive for {item_id}")
+        progress_by_id[item_id] = progress
+    missing = [item_id for item_id in milestone_ids if item_id not in progress_by_id]
+    if missing:
+        raise ValueError(f"TASA state schema missing progress ids: {missing}")
+    return progress_by_id
+
+
 def _tasa_state_key(active_milestones: set[str], active_bad_flags: set[str]) -> tuple[str, tuple[str, ...]]:
     ids = tuple(sorted(active_milestones) + sorted(active_bad_flags))
     return "|".join(ids) if ids else "ROOT", ids
@@ -731,14 +825,23 @@ def _tasa_segment_records_for_sample(args: Any, sample_index: int, sample: Sampl
                 active_milestones.add(item_id)
             else:
                 active_bad_flags.add(item_id)
+        next_state_key, next_state_ids = _tasa_state_key(active_milestones, active_bad_flags)
+        records[-1] = replace(records[-1], next_state_key=next_state_key, next_state_ids=next_state_ids)
     return records
 
 
 def sample_has_process_credit_signal(args: Any, sample: Sample) -> bool:
     if not enabled(args) or not _is_student_train_sample(sample):
         return False
-    if advantage_mode(args) == "teacher_anchored_state_aggregation":
+    mode = advantage_mode(args)
+    if mode == "teacher_anchored_state_aggregation":
         return False
+    if mode == "teacher_anchored_value_gae":
+        try:
+            records = _tasa_segment_records_for_sample(args, 0, sample)
+        except ValueError:
+            return False
+        return any((record.state_key != record.next_state_key) for record in records)
     return any(record.marked and abs(record.value) > 0 for record in _segment_records_for_sample(args, 0, sample))
 
 
@@ -825,10 +928,18 @@ def _credit_record_payload(
                 "marked": record.marked,
                 "state_key": record.state_key,
                 "state_ids": list(record.state_ids),
+                "next_state_key": record.next_state_key,
+                "next_state_ids": list(record.next_state_ids),
                 "peer_count": record.peer_count,
                 "state_reward_mean": record.state_reward_mean,
                 "local_advantage": record.local_advantage,
                 "supported": record.supported,
+                "state_prior": record.state_prior,
+                "next_state_prior": record.next_state_prior,
+                "state_value": record.state_value,
+                "next_state_value": record.next_state_value,
+                "td_delta": record.td_delta,
+                "gae_advantage": record.gae_advantage,
             }
             for record in records
         ],
@@ -914,6 +1025,10 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
         if scalar_rewards is None:
             raise ValueError("TASA-GRPO requires scalar_rewards from reward post-process")
         _attach_tasa_state_baselines(args, samples, sample_advantages, sample_masks, sample_records, scalar_rewards)
+    elif mode == "teacher_anchored_value_gae":
+        if scalar_rewards is None:
+            raise ValueError("TASA-GAE requires scalar_rewards from reward post-process")
+        _attach_tasa_value_gae(args, samples, sample_advantages, sample_masks, sample_records, scalar_rewards)
     else:
         _attach_process_credit(args, samples, sample_advantages, sample_records)
 
@@ -925,9 +1040,9 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
         response_length = len(values)
         process_mean = (sum(values) / response_length) if response_length else 0.0
         process_abs_mean = (sum(abs(value) for value in values) / response_length) if response_length else 0.0
-        cfg_beta = beta(args)
+        cfg_beta = 0.0 if mode == "teacher_anchored_value_gae" else beta(args)
         sample_metadata["process_advantages"] = values
-        if mode == "teacher_anchored_state_aggregation":
+        if mode in {"teacher_anchored_state_aggregation", "teacher_anchored_value_gae"}:
             sample_metadata["process_advantage_masks"] = support_values
         credit_stats = {
             "enabled": True,
@@ -939,11 +1054,18 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
             if mode == "segment_reward_group_turn_norm"
             else None,
             "tasa_local_normalization": tasa_local_normalization(args)
-            if mode == "teacher_anchored_state_aggregation"
+            if mode in {"teacher_anchored_state_aggregation", "teacher_anchored_value_gae"}
             else None,
             "tasa_min_peer_support": tasa_min_peer_support(args)
-            if mode == "teacher_anchored_state_aggregation"
+            if mode in {"teacher_anchored_state_aggregation", "teacher_anchored_value_gae"}
             else None,
+            "tasa_prior_kappa": tasa_prior_kappa(args) if mode == "teacher_anchored_value_gae" else None,
+            "tasa_lambda": tasa_lambda(args) if mode == "teacher_anchored_value_gae" else None,
+            "tasa_prior_root": tasa_prior_root(args) if mode == "teacher_anchored_value_gae" else None,
+            "tasa_prior_success": tasa_prior_success(args) if mode == "teacher_anchored_value_gae" else None,
+            "tasa_bad_flag_penalty": tasa_bad_flag_penalty(args) if mode == "teacher_anchored_value_gae" else None,
+            "tasa_outcome_scale": tasa_outcome_scale(args) if mode == "teacher_anchored_value_gae" else None,
+            "tasa_teacher_weight": tasa_teacher_weight(args) if mode == "teacher_anchored_value_gae" else None,
             "milestone_reward": milestone_reward(args),
             "predecessor_reward": predecessor_reward(args),
             "predecessor_decay": predecessor_decay(args),
@@ -960,8 +1082,8 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
             "negative_token_rate": (negative / response_length) if response_length else 0.0,
             "process_value_mean": process_mean,
             "process_value_abs_mean": process_abs_mean,
-            "process_delta_mean": cfg_beta * process_mean,
-            "process_delta_abs_mean": cfg_beta * process_abs_mean,
+            "process_delta_mean": None if mode == "teacher_anchored_value_gae" else cfg_beta * process_mean,
+            "process_delta_abs_mean": None if mode == "teacher_anchored_value_gae" else cfg_beta * process_abs_mean,
         }
         tasa_stats = sample_metadata.pop("_tasa_credit_assignment", None)
         if isinstance(tasa_stats, dict):
@@ -1030,6 +1152,48 @@ def _group_reward_advantages(sample_indices: list[int], scalar_rewards: list[flo
     return {idx: (float(scalar_rewards[idx]) - mean) / (std + 1e-6) for idx in sample_indices}
 
 
+def _tasa_outcomes(args: Any, sample_indices: list[int], scalar_rewards: list[float]) -> dict[int, float]:
+    scale = tasa_outcome_scale(args)
+    return {idx: max(0.0, min(1.0, float(scalar_rewards[idx]) / scale)) for idx in sample_indices}
+
+
+def _tasa_state_prior(
+    args: Any,
+    *,
+    state_ids: tuple[str, ...],
+    progress_by_id: dict[str, float],
+) -> float:
+    root = tasa_prior_root(args)
+    success = tasa_prior_success(args)
+    max_progress = max(progress_by_id.values()) if progress_by_id else 0.0
+    active_progress = max((progress_by_id[item_id] for item_id in state_ids if item_id in progress_by_id), default=0.0)
+    fraction = 0.0 if max_progress <= 0 else max(0.0, min(1.0, active_progress / max_progress))
+    prior = root + (success - root) * fraction
+    bad_count = sum(1 for item_id in state_ids if item_id.startswith("B"))
+    prior -= tasa_bad_flag_penalty(args) * bad_count
+    return max(0.0, min(1.0, prior))
+
+
+def _tasa_posterior_value(
+    *,
+    prior: float,
+    kappa: float,
+    outcomes_by_sample: dict[int, float],
+    exclude_sample_index: int | None = None,
+) -> tuple[float, int, float]:
+    values = [
+        outcome
+        for sample_index, outcome in outcomes_by_sample.items()
+        if exclude_sample_index is None or sample_index != exclude_sample_index
+    ]
+    count = len(values)
+    total = sum(values)
+    denominator = kappa + count
+    if denominator <= 0:
+        return prior, count, total
+    return (kappa * prior + total) / denominator, count, total
+
+
 def _write_tasa_group_stats(
     *,
     samples: list[Sample],
@@ -1055,6 +1219,18 @@ def _write_tasa_group_stats(
         "tasa_group_peer_count_mean": _mean_float([float(record.peer_count or 0) for record in records]),
         "tasa_group_state_reward_std_mean": _mean_float(state_reward_stds),
         "tasa_local_outcome_corr": _corr(local_values, base_values),
+        "tasa_state_prior_mean": _mean_float(
+            [float(record.state_prior) for record in records if record.state_prior is not None]
+        ),
+        "tasa_state_value_mean": _mean_float(
+            [float(record.state_value) for record in records if record.state_value is not None]
+        ),
+        "tasa_td_delta_abs_mean": _mean_float(
+            [abs(float(record.td_delta)) for record in records if record.td_delta is not None]
+        ),
+        "tasa_gae_abs_mean": _mean_float(
+            [abs(float(record.gae_advantage)) for record in records if record.gae_advantage is not None]
+        ),
     }
     by_sample: dict[int, list[SegmentCreditRecord]] = {}
     for record in records:
@@ -1207,6 +1383,183 @@ def _attach_tasa_state_baselines(
             group_indices=indices,
             records=normalized_records,
             state_rewards=state_rewards,
+            local_values=train_local_values,
+            base_values=train_base_values,
+        )
+
+
+def _normalize_tasa_gae_values(
+    records: list[SegmentCreditRecord],
+    cfg_normalization: str,
+    cfg_clip: float,
+) -> dict[tuple[int, int, int], float]:
+    values = [float(record.gae_advantage or 0.0) for record in records if record.supported]
+    if not values:
+        return {}
+    if cfg_normalization == "group_segment_zscore":
+        mean = _mean_float(values)
+        std = _sample_std(values)
+    else:
+        mean = 0.0
+        std = 0.0
+    normalized: dict[tuple[int, int, int], float] = {}
+    has_scale = cfg_normalization != "group_segment_zscore" or std > 0
+    for record in records:
+        if not record.supported or not has_scale:
+            continue
+        value = float(record.gae_advantage or 0.0)
+        if cfg_normalization == "group_segment_zscore":
+            value = (value - mean) / (std + 1e-6)
+        value = max(-cfg_clip, min(cfg_clip, value))
+        normalized[(record.sample_index, record.start, record.end)] = value
+    return normalized
+
+
+def _attach_tasa_value_gae(
+    args: Any,
+    samples: list[Sample],
+    sample_advantages: list[list[float]],
+    sample_masks: list[list[float]],
+    sample_records: list[list[SegmentCreditRecord]],
+    scalar_rewards: list[float],
+) -> None:
+    """TASA-GAE: teacher-prior calibrated abstract-state value advantages.
+
+    Judge output only defines semantic predicates and student state-change
+    points. Numeric values are programmatic:
+
+    * ``V_T(z)`` from milestone progress rank and bad flags;
+    * ``V_tilde(z)`` from Beta/pseudo-count shrinkage over student outcomes;
+    * segment deltas/GAE from ``V_tilde``.
+
+    This mode writes final response-token advantages. The actor hook uses them
+    directly for supported segments and falls back to vanilla GRPO elsewhere.
+    """
+
+    cfg_clip = clip(args)
+    cfg_min_peer_support = tasa_min_peer_support(args)
+    cfg_normalization = tasa_local_normalization(args)
+    cfg_kappa = tasa_prior_kappa(args)
+    cfg_lambda = tasa_lambda(args)
+    for indices in _group_indices(args, samples).values():
+        records_by_sample: dict[int, list[SegmentCreditRecord]] = {}
+        raw_records: list[SegmentCreditRecord] = []
+        student_indices: list[int] = []
+        progress_by_id: dict[str, float] | None = None
+        for idx in indices:
+            sample = samples[idx]
+            if not _is_student_train_sample(sample):
+                continue
+            raw = _rm_raw(sample)
+            milestone_ids, _ = _tasa_schema_ids(raw)
+            sample_progress = _tasa_progress_by_id(args, raw, milestone_ids)
+            if progress_by_id is None:
+                progress_by_id = sample_progress
+            elif progress_by_id != sample_progress:
+                raise ValueError("TASA-GAE requires one shared state progress schema per group")
+            records = _tasa_segment_records_for_sample(args, idx, sample)
+            if records:
+                student_indices.append(idx)
+                records_by_sample[idx] = records
+                raw_records.extend(records)
+        if not raw_records or progress_by_id is None:
+            continue
+
+        outcomes = _tasa_outcomes(args, student_indices, scalar_rewards)
+        state_outcomes: dict[str, dict[int, float]] = {}
+        state_ids_by_key: dict[str, tuple[str, ...]] = {}
+        for record in raw_records:
+            for key, ids in (
+                (record.state_key or "ROOT", record.state_ids),
+                (record.next_state_key or record.state_key or "ROOT", record.next_state_ids or record.state_ids),
+            ):
+                state_ids_by_key.setdefault(key, ids)
+                state_outcomes.setdefault(key, {})[record.sample_index] = outcomes[record.sample_index]
+
+        state_prior = {
+            key: _tasa_state_prior(args, state_ids=ids, progress_by_id=progress_by_id)
+            for key, ids in state_ids_by_key.items()
+        }
+
+        final_records: list[SegmentCreditRecord] = []
+        for sample_index, records in records_by_sample.items():
+            annotated: list[SegmentCreditRecord] = []
+            for record in records:
+                state_key = record.state_key or "ROOT"
+                next_state_key = record.next_state_key or state_key
+                value, peer_count, _ = _tasa_posterior_value(
+                    prior=state_prior[state_key],
+                    kappa=cfg_kappa,
+                    outcomes_by_sample=state_outcomes.get(state_key, {}),
+                    exclude_sample_index=sample_index,
+                )
+                next_value, _, _ = _tasa_posterior_value(
+                    prior=state_prior[next_state_key],
+                    kappa=cfg_kappa,
+                    outcomes_by_sample=state_outcomes.get(next_state_key, {}),
+                    exclude_sample_index=sample_index,
+                )
+                supported = peer_count >= cfg_min_peer_support
+                annotated.append(
+                    replace(
+                        record,
+                        peer_count=peer_count,
+                        state_reward_mean=value,
+                        state_prior=state_prior[state_key],
+                        next_state_prior=state_prior[next_state_key],
+                        state_value=value,
+                        next_state_value=next_value,
+                        supported=supported,
+                    )
+                )
+
+            gae_tail = 0.0
+            sample_final: list[SegmentCreditRecord] = []
+            for position in range(len(annotated) - 1, -1, -1):
+                record = annotated[position]
+                if position == len(annotated) - 1:
+                    delta = outcomes[sample_index] - float(record.state_value or 0.0)
+                else:
+                    delta = float(record.next_state_value or 0.0) - float(record.state_value or 0.0)
+                gae_value = delta + cfg_lambda * gae_tail
+                gae_tail = gae_value
+                sample_final.append(
+                    replace(
+                        record,
+                        value=gae_value,
+                        marked=record.supported and abs(gae_value) > 0,
+                        local_advantage=gae_value,
+                        td_delta=delta,
+                        gae_advantage=gae_value,
+                    )
+                )
+            sample_final.reverse()
+            final_records.extend(sample_final)
+
+        normalized_values = _normalize_tasa_gae_values(final_records, cfg_normalization, cfg_clip)
+        train_local_values: list[float] = []
+        train_base_values: list[float] = []
+        base_by_sample = _group_reward_advantages(student_indices, scalar_rewards)
+        normalized_records: list[SegmentCreditRecord] = []
+        for record in final_records:
+            key = (record.sample_index, record.start, record.end)
+            if key in normalized_values:
+                value = normalized_values[key]
+                train_local_values.append(value)
+                train_base_values.append(base_by_sample.get(record.sample_index, 0.0))
+                final_record = replace(record, value=value, marked=abs(value) > 0)
+                _write_record_value(sample_advantages[record.sample_index], record, value)
+                _write_record_value(sample_masks[record.sample_index], record, 1.0)
+            else:
+                final_record = replace(record, value=0.0, marked=False, supported=False)
+            normalized_records.append(final_record)
+            sample_records[record.sample_index].append(final_record)
+
+        _write_tasa_group_stats(
+            samples=samples,
+            group_indices=indices,
+            records=normalized_records,
+            state_rewards=state_outcomes,
             local_values=train_local_values,
             base_values=train_base_values,
         )

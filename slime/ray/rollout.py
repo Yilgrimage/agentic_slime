@@ -905,6 +905,7 @@ class RolloutManager:
                 "off_policy_mask_sums",
                 "rollout_log_probs",
                 "process_advantages",
+                "process_advantage_masks",
                 "rollout_top_p_token_ids",
                 "rollout_top_p_token_offsets",
                 "rollout_routed_experts",

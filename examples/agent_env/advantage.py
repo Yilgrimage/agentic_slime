@@ -45,6 +45,9 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
       state-conditioned local REINFORCE baseline computed from teacher-anchored
       semantic state predicates. Tokens whose abstract state lacks enough peer
       support keep the original GRPO advantage exactly.
+    - ``teacher_anchored_value_gae`` (TASA-GAE): consume a teacher-prior,
+      student-outcome calibrated state value estimate. Supported tokens use the
+      segment GAE advantage directly; unsupported tokens keep vanilla GRPO.
     """
 
     if getattr(args, "advantage_estimator", "grpo") not in {"grpo", "gspo", "cispo"}:
@@ -61,7 +64,7 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
         rollout_data["returns"] = base_returns
         advantage_dump.maybe_dump_token_advantages(args, rollout_data, base_returns, None, base_returns)
         return
-    if beta == 0 and mode != "segment_reward_group_turn_norm":
+    if beta == 0 and mode not in {"segment_reward_group_turn_norm", "teacher_anchored_value_gae"}:
         rollout_data["advantages"] = [value for value in base_returns]
         rollout_data["returns"] = base_returns
         advantage_dump.maybe_dump_token_advantages(args, rollout_data, base_returns, None, base_returns)
@@ -88,8 +91,21 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
             raise ValueError("TASA-GRPO requires response-aligned process_advantage_masks")
         support_tensors = _process_tensors(support_masks, base_returns)
         advantages = _teacher_anchored_state_aggregation(base_returns, process_tensors, support_tensors, beta)
+    elif mode == "teacher_anchored_value_gae":
+        support_masks = rollout_data.get("process_advantage_masks")
+        if not support_masks:
+            raise ValueError("TASA-GAE requires response-aligned process_advantage_masks")
+        support_tensors = _process_tensors(support_masks, base_returns)
+        advantages = _teacher_anchored_value_gae(base_returns, process_tensors, support_tensors)
     else:
         raise ValueError(f"Unsupported credit assignment advantage mode: {mode}")
+
+    if mode in {"teacher_anchored_state_aggregation", "teacher_anchored_value_gae"}:
+        advantages = _scale_tasa_teacher_advantages(
+            args,
+            advantages,
+            rollout_data.get("off_policy_loss_masks"),
+        )
 
     rollout_data["advantages"] = advantages
     rollout_data["returns"] = advantages
@@ -243,3 +259,42 @@ def _teacher_anchored_state_aggregation(
         mixed = (1.0 - beta) * base + beta * local
         advantages.append(torch.where(supported, mixed, base))
     return advantages
+
+
+def _teacher_anchored_value_gae(
+    base_returns: list[torch.Tensor],
+    local_tensors: list[torch.Tensor],
+    support_tensors: list[torch.Tensor],
+) -> list[torch.Tensor]:
+    """TASA-GAE: replace supported tokens with the value-layer GAE advantage."""
+
+    advantages: list[torch.Tensor] = []
+    for base, local, support in zip(base_returns, local_tensors, support_tensors, strict=True):
+        supported = support > 0
+        advantages.append(torch.where(supported, local, base))
+    return advantages
+
+
+def _scale_tasa_teacher_advantages(
+    args: Any,
+    advantages: list[torch.Tensor],
+    off_policy_masks: list[torch.Tensor] | None,
+) -> list[torch.Tensor]:
+    """Optionally scale Luffy/off-policy teacher-token advantages in TASA modes."""
+
+    weight = credit_assignment.tasa_teacher_weight(args)
+    if weight == 1.0 or not off_policy_masks:
+        return advantages
+    scaled: list[torch.Tensor] = []
+    for advantage, mask in zip(advantages, off_policy_masks, strict=False):
+        if mask is None:
+            scaled.append(advantage)
+            continue
+        teacher_tokens = mask.to(device=advantage.device, dtype=torch.bool, non_blocking=True)
+        if teacher_tokens.shape != advantage.shape:
+            raise ValueError(
+                f"off_policy_loss_mask shape {tuple(teacher_tokens.shape)} does not match "
+                f"advantage shape {tuple(advantage.shape)}"
+            )
+        scaled.append(torch.where(teacher_tokens, advantage * weight, advantage))
+    return scaled

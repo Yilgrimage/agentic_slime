@@ -114,6 +114,13 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ca_tasa_peer_count_means: list[float] = []
     ca_tasa_state_reward_std_means: list[float] = []
     ca_tasa_local_outcome_corrs: list[float] = []
+    ca_tasa_state_prior_means: list[float] = []
+    ca_tasa_state_value_means: list[float] = []
+    ca_tasa_td_delta_abs_means: list[float] = []
+    ca_tasa_gae_abs_means: list[float] = []
+    ca_tasa_prior_kappas: list[float] = []
+    ca_tasa_lambdas: list[float] = []
+    ca_tasa_teacher_weights: list[float] = []
 
     for sample in real_samples:
         sample_metadata = getattr(sample, "metadata", None) or {}
@@ -164,6 +171,27 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             tasa_local_outcome_corr = _float_or_none(ca.get("tasa_local_outcome_corr"))
             if tasa_local_outcome_corr is not None:
                 ca_tasa_local_outcome_corrs.append(tasa_local_outcome_corr)
+            tasa_state_prior_mean = _float_or_none(ca.get("tasa_state_prior_mean"))
+            if tasa_state_prior_mean is not None:
+                ca_tasa_state_prior_means.append(tasa_state_prior_mean)
+            tasa_state_value_mean = _float_or_none(ca.get("tasa_state_value_mean"))
+            if tasa_state_value_mean is not None:
+                ca_tasa_state_value_means.append(tasa_state_value_mean)
+            tasa_td_delta_abs_mean = _float_or_none(ca.get("tasa_td_delta_abs_mean"))
+            if tasa_td_delta_abs_mean is not None:
+                ca_tasa_td_delta_abs_means.append(tasa_td_delta_abs_mean)
+            tasa_gae_abs_mean = _float_or_none(ca.get("tasa_gae_abs_mean"))
+            if tasa_gae_abs_mean is not None:
+                ca_tasa_gae_abs_means.append(tasa_gae_abs_mean)
+            tasa_prior_kappa = _float_or_none(ca.get("tasa_prior_kappa"))
+            if tasa_prior_kappa is not None:
+                ca_tasa_prior_kappas.append(tasa_prior_kappa)
+            tasa_lambda = _float_or_none(ca.get("tasa_lambda"))
+            if tasa_lambda is not None:
+                ca_tasa_lambdas.append(tasa_lambda)
+            tasa_teacher_weight = _float_or_none(ca.get("tasa_teacher_weight"))
+            if tasa_teacher_weight is not None:
+                ca_tasa_teacher_weights.append(tasa_teacher_weight)
         rm_reward = _as_dict(sample_metadata.get("rm_reward"))
         score = _float_or_none(rm_reward.get("score"))
         if score is not None:
@@ -328,6 +356,20 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics["reward/credit_assignment/tasa_state_reward_std_mean"] = _mean(ca_tasa_state_reward_std_means)
     if ca_tasa_local_outcome_corrs:
         metrics["reward/credit_assignment/tasa_local_outcome_corr_mean"] = _mean(ca_tasa_local_outcome_corrs)
+    if ca_tasa_state_prior_means:
+        metrics["reward/credit_assignment/tasa_state_prior_mean"] = _mean(ca_tasa_state_prior_means)
+    if ca_tasa_state_value_means:
+        metrics["reward/credit_assignment/tasa_state_value_mean"] = _mean(ca_tasa_state_value_means)
+    if ca_tasa_td_delta_abs_means:
+        metrics["reward/credit_assignment/tasa_td_delta_abs_mean"] = _mean(ca_tasa_td_delta_abs_means)
+    if ca_tasa_gae_abs_means:
+        metrics["reward/credit_assignment/tasa_gae_abs_mean"] = _mean(ca_tasa_gae_abs_means)
+    if ca_tasa_prior_kappas:
+        metrics["reward/credit_assignment/tasa_prior_kappa"] = _mean(ca_tasa_prior_kappas)
+    if ca_tasa_lambdas:
+        metrics["reward/credit_assignment/tasa_lambda"] = _mean(ca_tasa_lambdas)
+    if ca_tasa_teacher_weights:
+        metrics["reward/credit_assignment/tasa_teacher_weight"] = _mean(ca_tasa_teacher_weights)
     _reward_call_metrics(metrics, role="judge", calls=judge_calls, sample_count=total)
     _reward_call_metrics(metrics, role="rubric", calls=rubric_calls, sample_count=total)
     return metrics

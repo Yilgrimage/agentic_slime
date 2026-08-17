@@ -1,7 +1,11 @@
 from argparse import Namespace
 
+import torch
+
 from slime.utils.types import Sample
 
+from examples.agent_env import credit_assignment
+from examples.agent_env.advantage import segment_credit_assignment_advantage
 from examples.agent_env.rewards.ropd import _parse_ca_compact_batch_scores, _select_train_score
 
 
@@ -128,5 +132,179 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
 
     student_scores = [item for item in scores if item["trajectory_id"].startswith("S")]
     assert student_scores[0]["tasa_state_schema"]["milestones"][0]["id"] == "M1"
+    assert student_scores[0]["tasa_state_schema"]["milestones"][0]["progress"] == 1.0
     assert student_scores[0]["tasa_state_changes"][1]["set"] == ["M2"]
     assert student_scores[1]["tasa_state_changes"][0]["set"] == ["B1"]
+
+
+def test_tasa_gae_requires_milestone_progress():
+    args = Namespace(
+        reward={
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_value_gae",
+            }
+        }
+    )
+    answer_items = (
+        {"source": "student", "source_index": 0, "text": "Step 1\nstudent"},
+        {"source": "student", "source_index": 1, "text": "Step 1\nstudent"},
+    )
+    payload = {
+        "schema_version": "ropd.ca_compact_batch_verifier.v1",
+        "behaviors": [
+            {
+                "behavior_id": "g1",
+                "polarity": "good",
+                "description": "good action",
+                "weight": 1.0,
+                "hits_by_trajectory": [
+                    {"trajectory_id": "S0_STUDENT", "step_indices": [1]},
+                    {"trajectory_id": "S1_STUDENT", "step_indices": []},
+                ],
+            },
+            {
+                "behavior_id": "g2",
+                "polarity": "good",
+                "description": "good followup",
+                "weight": 1.0,
+                "hits_by_trajectory": [
+                    {"trajectory_id": "S0_STUDENT", "step_indices": []},
+                    {"trajectory_id": "S1_STUDENT", "step_indices": [1]},
+                ],
+            },
+            {
+                "behavior_id": "b1",
+                "polarity": "bad",
+                "description": "bad action",
+                "weight": 1.0,
+                "hits_by_trajectory": [
+                    {"trajectory_id": "S0_STUDENT", "step_indices": []},
+                    {"trajectory_id": "S1_STUDENT", "step_indices": []},
+                ],
+            },
+        ],
+        "trajectory_scores": [
+            {"trajectory_id": "S0_STUDENT", "process_score": 1.0, "quality": "strong"},
+            {"trajectory_id": "S1_STUDENT", "process_score": 0.0, "quality": "weak"},
+        ],
+        "tasa_state_schema": {
+            "milestones": [{"id": "M1", "predicate": "state reached", "requires": []}],
+            "bad_flags": [
+                {"id": "B1", "predicate": "wrong state"},
+                {"id": "B2", "predicate": "worse state"},
+            ],
+        },
+        "tasa_state_changes": [
+            {"trajectory_id": "S0_STUDENT", "changes": [{"step": 1, "set": ["M1"], "unset": []}]},
+            {"trajectory_id": "S1_STUDENT", "changes": [{"step": 1, "set": ["B1"], "unset": []}]},
+        ],
+    }
+
+    try:
+        _parse_ca_compact_batch_scores(args, payload, answer_items=answer_items)
+    except ValueError as exc:
+        assert "progress" in str(exc)
+    else:
+        raise AssertionError("TASA-GAE accepted a milestone without progress")
+
+
+def _tasa_sample(index: int, *, changes: list[dict[str, object]]) -> Sample:
+    schema = {
+        "milestones": [
+            {"id": "M1", "predicate": "first state", "requires": [], "progress": 1.0},
+            {"id": "M2", "predicate": "second state", "requires": ["M1"], "progress": 2.0},
+        ],
+        "bad_flags": [{"id": "B1", "predicate": "wrong state"}],
+    }
+    return Sample(
+        group_index=0,
+        index=index,
+        rollout_id=index,
+        response_length=4,
+        loss_mask=[1, 1, 1, 1],
+        status=Sample.Status.COMPLETED,
+        metadata={
+            "token_segments": [
+                {"kind": "assistant", "turn": 0, "token_count": 2, "loss_mask_sum": 2},
+                {"kind": "assistant", "turn": 1, "token_count": 2, "loss_mask_sum": 2},
+            ],
+            "rm_reward": {
+                "raw": {
+                    "tasa_state_schema": schema,
+                    "tasa_state_changes": changes,
+                }
+            },
+        },
+    )
+
+
+def test_tasa_gae_attaches_prior_posterior_segment_advantages():
+    args = Namespace(
+        n_samples_per_prompt=3,
+        reward={
+            "outcome": 1.0,
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_value_gae",
+                "tasa_min_peer_support": 1,
+                "tasa_local_normalization": "none",
+                "tasa_prior_kappa": 4.0,
+                "tasa_lambda": 0.0,
+                "tasa_prior_root": 0.1,
+                "tasa_prior_success": 0.9,
+                "tasa_bad_flag_penalty": 0.2,
+                "tasa_outcome_scale": 1.0,
+            },
+        },
+    )
+    samples = [
+        _tasa_sample(
+            0,
+            changes=[
+                {"step": 1, "set": ["M1"], "unset": []},
+                {"step": 2, "set": ["M2"], "unset": []},
+            ],
+        ),
+        _tasa_sample(1, changes=[{"step": 1, "set": ["M1"], "unset": []}]),
+        _tasa_sample(2, changes=[]),
+    ]
+
+    credit_assignment.attach_process_advantages(args, samples, scalar_rewards=[1.0, 0.0, 0.0])
+
+    first_adv = samples[0].metadata["process_advantages"]
+    second_adv = samples[1].metadata["process_advantages"]
+    assert first_adv[0] > 0
+    assert first_adv[2] > 0
+    assert second_adv[0] > 0
+    assert second_adv[2] < 0
+    stats = samples[0].metadata["credit_assignment"]
+    assert stats["advantage_mode"] == "teacher_anchored_value_gae"
+    assert stats["tasa_prior_kappa"] == 4.0
+    assert stats["tasa_group_unique_states"] >= 3
+    assert stats["tasa_td_delta_abs_mean"] > 0
+
+
+def test_tasa_gae_train_hook_replaces_supported_tokens_and_scales_teacher():
+    args = Namespace(
+        advantage_estimator="grpo",
+        reward={
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_value_gae",
+                "tasa_teacher_weight": 0.5,
+            }
+        },
+    )
+    rollout_data = {
+        "kl": [torch.zeros(2), torch.zeros(2)],
+        "rewards": [1.0, 2.0],
+        "process_advantages": [torch.tensor([9.0, 9.0]), torch.tensor([9.0, 9.0])],
+        "process_advantage_masks": [torch.tensor([1.0, 0.0]), torch.tensor([0.0, 0.0])],
+        "off_policy_loss_masks": [torch.tensor([0, 0]), torch.tensor([1, 1])],
+    }
+
+    segment_credit_assignment_advantage(args, rollout_data)
+
+    assert torch.allclose(rollout_data["advantages"][0], torch.tensor([9.0, 1.0]))
+    assert torch.allclose(rollout_data["advantages"][1], torch.tensor([1.0, 1.0]))

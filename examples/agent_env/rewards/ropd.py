@@ -1795,7 +1795,9 @@ def _tasa_state_prompt_parts(args: Any) -> tuple[str, str, str]:
 同时输出 `tasa_state_schema` 和 `tasa_state_changes`，用于构造 teacher-anchored semantic state baseline。
 规则：
 - `tasa_state_schema` 描述任务级 semantic state predicates，而不是 teacher action。
+- schema 必须锚定 teacher reference trajectory 和 task objective 抽象出的状态事实；student 可用不同路径达成同一 predicate。
 - milestone predicate 必须描述已经达成的可观察状态事实，例如“目标用户已确定”，不要写“调用了某个 API”。
+- milestone 必须包含正数 `progress`，表示 teacher 参考路径中的粗粒度进展顺序；这是离散 rank，不是成功概率。
 - bad flag predicate 描述会污染后续状态的明确错误事实，例如“进入错误用户上下文”。
 - 总 predicate 数量控制在 3 到 8 个；id 使用 `M1`, `M2`... 和 `B1`, `B2`...
 - `requires` 只表达 milestone 之间的先后依赖，不能引用 bad flag。
@@ -1806,8 +1808,8 @@ def _tasa_state_prompt_parts(args: Any) -> tuple[str, str, str]:
     example = """,
   "tasa_state_schema": {
     "milestones": [
-      {"id": "M1", "predicate": "正确目标用户已经确定", "requires": []},
-      {"id": "M2", "predicate": "正确目标订单已经确定", "requires": ["M1"]}
+      {"id": "M1", "predicate": "正确目标用户已经确定", "requires": [], "progress": 1},
+      {"id": "M2", "predicate": "正确目标订单已经确定", "requires": ["M1"], "progress": 2}
     ],
     "bad_flags": [
       {"id": "B1", "predicate": "进入错误用户上下文"}
@@ -1825,6 +1827,7 @@ def _tasa_state_prompt_parts(args: Any) -> tuple[str, str, str]:
     constraints = """
 - TASA mode 下必须输出 `tasa_state_schema` 和 `tasa_state_changes`。
 - `tasa_state_schema.milestones` 和 `tasa_state_schema.bad_flags` 的总数必须是 3 到 8。
+- TASA-GAE mode 下每个 milestone 必须有正数 `progress`；依赖项的 progress 不应大于被依赖 milestone。
 - `tasa_state_changes[].trajectory_id` 必须覆盖所有 S*_STUDENT 且不能包含 teacher trajectory。
 - `set`/`unset` 中的 id 必须来自 `tasa_state_schema`。"""
     return instructions, example, constraints
@@ -2104,7 +2107,7 @@ def _parse_tasa_state_id_list(raw: Any, *, field: str) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
-def _parse_tasa_state_schema(payload: Any) -> dict[str, Any]:
+def _parse_tasa_state_schema(args: Any, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("ROPD compact TASA state schema must be an object")
     milestones = payload.get("milestones")
@@ -2114,8 +2117,9 @@ def _parse_tasa_state_schema(payload: Any) -> dict[str, Any]:
     normalized_milestones: list[dict[str, Any]] = []
     normalized_bad_flags: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    require_progress = credit_assignment.advantage_mode(args) == "teacher_anchored_value_gae"
 
-    for raw_item in milestones:
+    for index, raw_item in enumerate(milestones, start=1):
         if not isinstance(raw_item, dict):
             raise ValueError("ROPD compact TASA milestone must be an object")
         item_id = str(raw_item.get("id") or "").strip()
@@ -2126,20 +2130,39 @@ def _parse_tasa_state_schema(payload: Any) -> dict[str, Any]:
         predicate = str(raw_item.get("predicate") or "").strip()
         if not predicate:
             raise ValueError("ROPD compact TASA milestone predicate is required")
+        raw_progress = raw_item.get("progress")
+        if raw_progress in (None, ""):
+            if require_progress:
+                raise ValueError(f"ROPD compact TASA-GAE milestone {item_id} requires progress")
+            progress = float(index)
+        else:
+            progress = float_value(raw_progress, 0.0)
+            if progress <= 0:
+                raise ValueError(f"ROPD compact TASA milestone {item_id} progress must be positive")
         seen_ids.add(item_id)
         normalized_milestones.append(
             {
                 "id": item_id,
                 "predicate": predicate,
                 "requires": _parse_tasa_state_id_list(raw_item.get("requires", []), field=f"{item_id}.requires"),
+                "progress": progress,
             }
         )
 
     milestone_ids = {item["id"] for item in normalized_milestones}
+    progress_by_id = {str(item["id"]): float(item["progress"]) for item in normalized_milestones}
     for item in normalized_milestones:
         unknown_requires = sorted(set(item["requires"]) - milestone_ids)
         if unknown_requires:
             raise ValueError(f"ROPD compact TASA milestone requires unknown ids: {unknown_requires}")
+        invalid_progress_requires = [
+            required_id for required_id in item["requires"] if progress_by_id[required_id] > float(item["progress"])
+        ]
+        if invalid_progress_requires:
+            raise ValueError(
+                "ROPD compact TASA milestone requires dependencies with non-increasing progress: "
+                f"{item['id']} requires {invalid_progress_requires}"
+            )
 
     for raw_item in bad_flags:
         if not isinstance(raw_item, dict):
@@ -2219,7 +2242,7 @@ def _parse_tasa_state_annotations(
 ) -> tuple[dict[str, Any] | None, dict[str, list[dict[str, Any]]]]:
     if not credit_assignment.request_tasa_state_evidence(args):
         return None, {}
-    schema = _parse_tasa_state_schema(payload.get("tasa_state_schema"))
+    schema = _parse_tasa_state_schema(args, payload.get("tasa_state_schema"))
     valid_predicate_ids = {
         str(item["id"])
         for item in list(schema.get("milestones", [])) + list(schema.get("bad_flags", []))
