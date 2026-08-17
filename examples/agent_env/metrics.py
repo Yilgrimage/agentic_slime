@@ -550,6 +550,14 @@ def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_ext
 
     if generated_reward_metrics:
         log_dict |= {f"reward/{key}": value for key, value in generated_reward_metrics.items()}
+        # Credit-assignment metadata is attached in reward_post_process, after
+        # generated-scope metrics are prepared. Keep generated reward metrics
+        # canonical, but log CA diagnostics from the actual train samples.
+        log_dict |= {
+            key: value
+            for key, value in reward_metrics(samples).items()
+            if key.startswith("reward/credit_assignment/")
+        }
     else:
         log_dict |= reward_metrics(samples)
 
