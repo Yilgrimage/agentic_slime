@@ -5,6 +5,7 @@ outcome: 10.0
 
 ropd:
   schema_mode: ca_compact
+  ca_scalar_reward_source: env_success
   join_key: task_id
   teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
   teacher_index_keys:
@@ -31,14 +32,14 @@ credit_assignment:
   enable: true
   request_process_step_evidence: true
   advantage_mode: outcome_reweight
-  beta: 0.2
+  reweight_aligned_scale: 1.5
+  reweight_opposed_scale: 0.5
   shaping_mode: milestone
-  normalization: episode_turn_zscore
-  milestone_reward: 2.0
-  predecessor_reward: 0.5
-  negative_reward: 0.0
-  success_milestone_tail_steps: 2
-  clip: 2.0
+  normalization: none
+  milestone_reward: 1.0
+  predecessor_reward: 0.0
+  negative_reward: -1.0
+  success_milestone_tail_steps: 0
   step_index_base: 1
 
 luffy:

@@ -6,7 +6,7 @@ from slime.utils.types import Sample
 
 from examples.agent_env import credit_assignment
 from examples.agent_env.advantage import segment_credit_assignment_advantage
-from examples.agent_env.rewards.ropd import _parse_ca_compact_batch_scores, _select_train_score
+from examples.agent_env.rewards.ropd import _ca_compact_result, _parse_ca_compact_batch_masks, _select_train_score
 
 
 def _sample(*, env_success: bool) -> Sample:
@@ -65,13 +65,12 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
         {"source": "student", "source_index": 1, "text": "Step 1\nstudent"},
     )
     payload = {
-        "schema_version": "ropd.ca_compact_batch_verifier.v1",
+        "schema_version": "ropd.ca_compact_batch_verifier.v2",
         "behaviors": [
             {
                 "behavior_id": "g1",
                 "polarity": "good",
                 "description": "good action",
-                "weight": 1.0,
                 "hits_by_trajectory": [
                     {"trajectory_id": "T0_REFERENCE", "step_indices": [1]},
                     {"trajectory_id": "S0_STUDENT", "step_indices": [1]},
@@ -82,7 +81,6 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
                 "behavior_id": "g2",
                 "polarity": "good",
                 "description": "good followup",
-                "weight": 1.0,
                 "hits_by_trajectory": [
                     {"trajectory_id": "T0_REFERENCE", "step_indices": []},
                     {"trajectory_id": "S0_STUDENT", "step_indices": [2]},
@@ -93,18 +91,12 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
                 "behavior_id": "b1",
                 "polarity": "bad",
                 "description": "bad action",
-                "weight": 1.0,
                 "hits_by_trajectory": [
                     {"trajectory_id": "T0_REFERENCE", "step_indices": []},
                     {"trajectory_id": "S0_STUDENT", "step_indices": []},
                     {"trajectory_id": "S1_STUDENT", "step_indices": [1]},
                 ],
             },
-        ],
-        "trajectory_scores": [
-            {"trajectory_id": "T0_REFERENCE", "process_score": 1.0, "quality": "strong"},
-            {"trajectory_id": "S0_STUDENT", "process_score": 0.8, "quality": "useful"},
-            {"trajectory_id": "S1_STUDENT", "process_score": 0.1, "quality": "weak"},
         ],
         "tasa_state_schema": {
             "milestones": [
@@ -128,13 +120,62 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
         ],
     }
 
-    scores = _parse_ca_compact_batch_scores(args, payload, answer_items=answer_items)
+    scores = _parse_ca_compact_batch_masks(args, payload, answer_items=answer_items)
 
     student_scores = [item for item in scores if item["trajectory_id"].startswith("S")]
     assert student_scores[0]["tasa_state_schema"]["milestones"][0]["id"] == "M1"
     assert student_scores[0]["tasa_state_schema"]["milestones"][0]["progress"] == 1.0
     assert student_scores[0]["tasa_state_changes"][1]["set"] == ["M2"]
     assert student_scores[1]["tasa_state_changes"][0]["set"] == ["B1"]
+
+    try:
+        _parse_ca_compact_batch_masks(
+            args,
+            {**payload, "trajectory_scores": []},
+            answer_items=answer_items,
+        )
+    except ValueError as exc:
+        assert "unsupported fields" in str(exc)
+    else:
+        raise AssertionError("ROPD compact CA accepted the removed trajectory_scores field")
+
+
+def test_ca_compact_result_uses_env_reward_without_synthetic_judge_score():
+    args = Namespace(
+        reward={
+            "outcome": 10.0,
+            "ropd": {
+                "schema_mode": "ca_compact",
+                "ca_scalar_reward_source": "env_success",
+            },
+        }
+    )
+    sample = _sample(env_success=True)
+    item = {
+        "trajectory_id": "S0_STUDENT",
+        "process_step_evidence": [
+            {"criterion_id": "g1", "positive_step_indices": [1], "negative_step_indices": []}
+        ],
+        "behaviors": [],
+    }
+
+    result = _ca_compact_result(
+        args,
+        sample=sample,
+        rubric={"schema_version": "ropd.ca_compact_rubric.v2"},
+        rubric_source="online",
+        rubric_call=None,
+        judge_call=None,
+        student_item=item,
+        student_position=1,
+    )
+
+    assert result.score == 10.0
+    assert result.raw["reward_score"] == 1.0
+    assert result.raw["process_step_evidence"] == item["process_step_evidence"]
+    assert "student_score" not in result.raw
+    assert "teacher_scores" not in result.raw
+    assert "process_score" not in result.raw
 
 
 def test_tasa_gae_requires_milestone_progress():
@@ -151,13 +192,12 @@ def test_tasa_gae_requires_milestone_progress():
         {"source": "student", "source_index": 1, "text": "Step 1\nstudent"},
     )
     payload = {
-        "schema_version": "ropd.ca_compact_batch_verifier.v1",
+        "schema_version": "ropd.ca_compact_batch_verifier.v2",
         "behaviors": [
             {
                 "behavior_id": "g1",
                 "polarity": "good",
                 "description": "good action",
-                "weight": 1.0,
                 "hits_by_trajectory": [
                     {"trajectory_id": "S0_STUDENT", "step_indices": [1]},
                     {"trajectory_id": "S1_STUDENT", "step_indices": []},
@@ -167,7 +207,6 @@ def test_tasa_gae_requires_milestone_progress():
                 "behavior_id": "g2",
                 "polarity": "good",
                 "description": "good followup",
-                "weight": 1.0,
                 "hits_by_trajectory": [
                     {"trajectory_id": "S0_STUDENT", "step_indices": []},
                     {"trajectory_id": "S1_STUDENT", "step_indices": [1]},
@@ -177,16 +216,11 @@ def test_tasa_gae_requires_milestone_progress():
                 "behavior_id": "b1",
                 "polarity": "bad",
                 "description": "bad action",
-                "weight": 1.0,
                 "hits_by_trajectory": [
                     {"trajectory_id": "S0_STUDENT", "step_indices": []},
                     {"trajectory_id": "S1_STUDENT", "step_indices": []},
                 ],
             },
-        ],
-        "trajectory_scores": [
-            {"trajectory_id": "S0_STUDENT", "process_score": 1.0, "quality": "strong"},
-            {"trajectory_id": "S1_STUDENT", "process_score": 0.0, "quality": "weak"},
         ],
         "tasa_state_schema": {
             "milestones": [{"id": "M1", "predicate": "state reached", "requires": []}],
@@ -202,7 +236,7 @@ def test_tasa_gae_requires_milestone_progress():
     }
 
     try:
-        _parse_ca_compact_batch_scores(args, payload, answer_items=answer_items)
+        _parse_ca_compact_batch_masks(args, payload, answer_items=answer_items)
     except ValueError as exc:
         assert "progress" in str(exc)
     else:

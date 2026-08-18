@@ -21,12 +21,10 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
     - ``outcome_plus_process`` (A): keep outcome GRPO as the anchor and add a
       residual process term, ``A_token = A_outcome + beta * A_process``.
     - ``outcome_reweight`` (B): preserve the sign of the outcome advantage and
-      use process credit only to redistribute magnitude inside a trajectory,
-      ``A_token = A_outcome * clamp_positive(1 + beta * sign(A_outcome) * A_process)``.
-      The ``sign(A_outcome)`` term makes positive process credit always move the
-      final advantage in the encouraging direction: it strengthens positive
-      outcome credit and weakens negative outcome credit. Negative process
-      credit does the reverse.
+      use discrete good/bad marks only to redistribute its magnitude. A mark
+      aligned with the outcome direction multiplies the advantage by the
+      configured aligned scale; an opposed mark multiplies it by the opposed
+      scale. Neutral tokens and zero advantages are unchanged.
     - ``outcome_bangbang_reweight`` (hard-B): preserve the sign of the outcome
       advantage with a discrete gate. Positive process marks force the token
       advantage to a configured positive boundary on positive-outcome trajectories and ``0`` on
@@ -64,7 +62,7 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
         rollout_data["returns"] = base_returns
         advantage_dump.maybe_dump_token_advantages(args, rollout_data, base_returns, None, base_returns)
         return
-    if beta == 0 and mode not in {"segment_reward_group_turn_norm", "teacher_anchored_value_gae"}:
+    if beta == 0 and mode in {"outcome_plus_process", "teacher_anchored_state_aggregation"}:
         rollout_data["advantages"] = [value for value in base_returns]
         rollout_data["returns"] = base_returns
         advantage_dump.maybe_dump_token_advantages(args, rollout_data, base_returns, None, base_returns)
@@ -74,7 +72,13 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
     if mode == "outcome_plus_process":
         advantages = _outcome_plus_process(base_returns, process_tensors, beta)
     elif mode == "outcome_reweight":
-        advantages = _outcome_reweight(base_returns, process_tensors, beta)
+        advantages, reweight_metrics = _outcome_reweight(
+            base_returns,
+            process_tensors,
+            aligned_scale=credit_assignment.reweight_aligned_scale(args),
+            opposed_scale=credit_assignment.reweight_opposed_scale(args),
+        )
+        rollout_data.update(reweight_metrics)
     elif mode == "outcome_bangbang_reweight":
         advantages, bangbang_metrics = _outcome_bangbang_reweight(
             base_returns,
@@ -138,23 +142,50 @@ def _outcome_plus_process(
 def _outcome_reweight(
     base_returns: list[torch.Tensor],
     process_tensors: list[torch.Tensor],
-    beta: float,
-) -> list[torch.Tensor]:
-    """Scheme B: sign-preserving process reweighting of outcome credit.
-
-    Positive process credit should make a sampled action more likely even when
-    the trajectory-level outcome advantage is negative. Multiplying by
-    ``sign(base)`` flips the process-credit effect for negative-outcome
-    trajectories while the positive clamp keeps this mode as a magnitude
-    redistribution rather than a sign-flipping additive advantage.
-    """
+    *,
+    aligned_scale: float,
+    opposed_scale: float,
+) -> tuple[list[torch.Tensor], dict[str, list[float]]]:
+    """Scheme B: sign-preserving discrete reweighting of outcome credit."""
 
     advantages: list[torch.Tensor] = []
+    aligned_token_count: list[float] = []
+    opposed_token_count: list[float] = []
+    marked_zero_advantage_token_count: list[float] = []
+    aligned_delta_abs: list[float] = []
+    opposed_delta_abs: list[float] = []
+    sign_flip_rate: list[float] = []
     for base, process in zip(base_returns, process_tensors, strict=True):
-        signed_process = torch.sign(base) * process
-        multiplier = torch.clamp(1.0 + beta * signed_process, min=1e-6)
-        advantages.append(base * multiplier)
-    return advantages
+        marked = process != 0
+        aligned = marked & ((base * process) > 0)
+        opposed = marked & ((base * process) < 0)
+        marked_zero_advantage = marked & (base == 0)
+        value = torch.where(aligned, base * aligned_scale, base)
+        value = torch.where(opposed, base * opposed_scale, value)
+        advantages.append(value)
+
+        aligned_count = float(aligned.sum().item())
+        opposed_count = float(opposed.sum().item())
+        marked_count = float(marked.sum().item())
+        aligned_token_count.append(aligned_count)
+        opposed_token_count.append(opposed_count)
+        marked_zero_advantage_token_count.append(float(marked_zero_advantage.sum().item()))
+        aligned_delta_abs.append(
+            float(torch.abs(value[aligned] - base[aligned]).mean().item()) if aligned_count else 0.0
+        )
+        opposed_delta_abs.append(
+            float(torch.abs(value[opposed] - base[opposed]).mean().item()) if opposed_count else 0.0
+        )
+        flips = marked & (base != 0) & ((base * value) < 0)
+        sign_flip_rate.append(float(flips.sum().item() / marked_count) if marked_count else 0.0)
+    return advantages, {
+        "ca_reweight_aligned_token_count": aligned_token_count,
+        "ca_reweight_opposed_token_count": opposed_token_count,
+        "ca_reweight_marked_zero_advantage_token_count": marked_zero_advantage_token_count,
+        "ca_reweight_aligned_delta_abs": aligned_delta_abs,
+        "ca_reweight_opposed_delta_abs": opposed_delta_abs,
+        "ca_reweight_sign_flip_rate": sign_flip_rate,
+    }
 
 
 def _outcome_bangbang_reweight(

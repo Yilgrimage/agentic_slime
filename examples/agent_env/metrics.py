@@ -89,8 +89,6 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ropd_answer_core_scores: list[float] = []
     ropd_answer_support_scores: list[float] = []
     ropd_process_scores: list[float] = []
-    ropd_ca_process_scores: list[float] = []
-    ropd_ca_teacher_process_scores: list[float] = []
     ropd_ca_train_scores: list[float] = []
     ropd_fatal_error_count = 0
     ropd_fatal_error_seen = False
@@ -232,9 +230,7 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         if answer_support_score is not None:
             ropd_answer_support_scores.append(answer_support_score)
         process_score = _float_or_none(raw.get("process_score"))
-        if process_score is not None and is_ca_compact:
-            ropd_ca_process_scores.append(process_score)
-        elif process_score is not None:
+        if process_score is not None and not is_ca_compact:
             ropd_process_scores.append(process_score)
         if "fatal_error" in raw:
             ropd_fatal_error_seen = True
@@ -255,9 +251,7 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
                     normalized_teacher_score = max(0.0, min(1.0, teacher_score / maximum_score))
                     if schema_mode == "rubric_shaping":
                         ropd_teacher_rubric_scores.append(normalized_teacher_score)
-                    elif is_ca_compact:
-                        ropd_ca_teacher_process_scores.append(normalized_teacher_score)
-                    else:
+                    elif not is_ca_compact:
                         ropd_teacher_answer_scores.append(normalized_teacher_score)
         if "teacher_below_student" in raw:
             ropd_teacher_below_student_seen = True
@@ -314,10 +308,6 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics["reward/ropd/answer_support_score_mean"] = _mean(ropd_answer_support_scores)
     if ropd_process_scores:
         metrics["reward/ropd/process_score_mean"] = _mean(ropd_process_scores)
-    if ropd_ca_process_scores:
-        metrics["reward/ropd_ca/process_score_mean"] = _mean(ropd_ca_process_scores)
-    if ropd_ca_teacher_process_scores:
-        metrics["reward/ropd_ca/teacher_process_score_mean"] = _mean(ropd_ca_teacher_process_scores)
     if ropd_fatal_error_seen:
         metrics["reward/ropd/fatal_error_rate"] = ropd_fatal_error_count / total
     for quality, count in ropd_final_answer_quality.items():

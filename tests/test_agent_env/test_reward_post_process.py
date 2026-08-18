@@ -193,46 +193,58 @@ def test_segment_credit_assignment_advantage_reweights_outcome_sign():
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "outcome_reweight",
-                "beta": 0.5,
+                "reweight_aligned_scale": 1.5,
+                "reweight_opposed_scale": 0.5,
             }
         },
     )
     rollout_data = {
-        "kl": [torch.zeros(2, dtype=torch.float32)],
-        "rewards": [2.0],
-        "process_advantages": [torch.tensor([2.0, -2.0], dtype=torch.float32)],
+        "kl": [torch.zeros(2, dtype=torch.float32), torch.zeros(2, dtype=torch.float32)],
+        "rewards": [2.0, -2.0],
+        "process_advantages": [
+            torch.tensor([3.0, -7.0], dtype=torch.float32),
+            torch.tensor([3.0, -7.0], dtype=torch.float32),
+        ],
     }
 
     segment_credit_assignment_advantage(args, rollout_data)
 
-    expected = 2.0 * torch.clamp(1.0 + 0.5 * torch.tensor([2.0, -2.0]), min=1e-6)
-    assert torch.allclose(rollout_data["advantages"][0], expected)
+    assert torch.allclose(rollout_data["advantages"][0], torch.tensor([3.0, 1.0]))
+    assert torch.allclose(rollout_data["advantages"][1], torch.tensor([-1.0, -3.0]))
     assert torch.all(rollout_data["advantages"][0] > 0)
+    assert torch.all(rollout_data["advantages"][1] < 0)
+    assert rollout_data["ca_reweight_aligned_token_count"] == [1.0, 1.0]
+    assert rollout_data["ca_reweight_opposed_token_count"] == [1.0, 1.0]
+    assert rollout_data["ca_reweight_sign_flip_rate"] == [0.0, 0.0]
 
 
-def test_segment_credit_assignment_advantage_reweight_clamps_sign():
+def test_segment_credit_assignment_advantage_reweight_leaves_neutral_and_zero_unchanged():
     args = Namespace(
         advantage_estimator="grpo",
         reward={
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "outcome_reweight",
-                "beta": 10.0,
             }
         },
     )
     rollout_data = {
-        "kl": [torch.zeros(2, dtype=torch.float32)],
-        "rewards": [2.0],
-        "process_advantages": [torch.tensor([-10.0, 10.0], dtype=torch.float32)],
+        "kl": [torch.zeros(3, dtype=torch.float32), torch.zeros(3, dtype=torch.float32)],
+        "rewards": [2.0, 0.0],
+        "process_advantages": [
+            torch.tensor([0.0, 100.0, -100.0], dtype=torch.float32),
+            torch.tensor([1.0, -1.0, 0.0], dtype=torch.float32),
+        ],
     }
 
     segment_credit_assignment_advantage(args, rollout_data)
 
-    assert torch.all(rollout_data["advantages"][0] > 0)
+    assert torch.allclose(rollout_data["advantages"][0], torch.tensor([2.0, 3.0, 1.0]))
+    assert torch.allclose(rollout_data["advantages"][1], torch.zeros(3))
+    assert rollout_data["ca_reweight_marked_zero_advantage_token_count"] == [0.0, 2.0]
 
 
-def test_credit_assignment_reweight_mode_uses_episode_local_process_normalization():
+def test_credit_assignment_reweight_mode_uses_direct_good_bad_masks():
     args = Namespace(
         advantage_estimator="grpo",
         rewards_normalization=False,
@@ -243,8 +255,9 @@ def test_credit_assignment_reweight_mode_uses_episode_local_process_normalizatio
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "outcome_reweight",
-                "beta": 0.5,
-                "clip": 10.0,
+                "normalization": "none",
+                "milestone_reward": 1.0,
+                "negative_reward": -1.0,
                 "step_index_base": 1,
             },
         },
@@ -263,7 +276,15 @@ def test_credit_assignment_reweight_mode_uses_episode_local_process_normalizatio
             ],
             "rm_reward": {
                 "score": 0.0,
-                "raw": {"process_step_evidence": [{"criterion_id": "m1", "positive_step_indices": [1]}]},
+                "raw": {
+                    "process_step_evidence": [
+                        {
+                            "criterion_id": "m1",
+                            "positive_step_indices": [1],
+                            "negative_step_indices": [2],
+                        }
+                    ]
+                },
             },
         },
     )
@@ -287,10 +308,11 @@ def test_credit_assignment_reweight_mode_uses_episode_local_process_normalizatio
 
     first_adv = torch.tensor(first.metadata["process_advantages"], dtype=torch.float32)
     second_adv = torch.tensor(second.metadata["process_advantages"], dtype=torch.float32)
-    assert torch.all(first_adv[:2] > 0)
-    assert torch.all(first_adv[2:] < 0)
+    assert torch.allclose(first_adv, torch.tensor([1.0, 1.0, -1.0, -1.0]))
     assert torch.allclose(second_adv, torch.zeros_like(second_adv))
-    assert first.metadata["credit_assignment"]["normalization"] == "episode_turn_zscore"
+    assert first.metadata["credit_assignment"]["normalization"] == "none"
+    assert first.metadata["credit_assignment"]["reweight_aligned_scale"] == 1.5
+    assert first.metadata["credit_assignment"]["reweight_opposed_scale"] == 0.5
 
 
 def test_segment_credit_assignment_advantage_uses_precomputed_segment_rewards_for_mode_c():

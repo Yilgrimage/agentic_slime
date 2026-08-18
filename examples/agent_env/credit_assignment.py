@@ -92,6 +92,20 @@ def beta(args: Any) -> float:
     return value
 
 
+def reweight_aligned_scale(args: Any) -> float:
+    value = float_value(config(args).get("reweight_aligned_scale", 1.5), 1.5)
+    if value < 1.0:
+        raise ValueError("reward.credit_assignment.reweight_aligned_scale must be >= 1")
+    return value
+
+
+def reweight_opposed_scale(args: Any) -> float:
+    value = float_value(config(args).get("reweight_opposed_scale", 0.5), 0.5)
+    if value <= 0.0 or value > 1.0:
+        raise ValueError("reward.credit_assignment.reweight_opposed_scale must be in (0, 1]")
+    return value
+
+
 def advantage_mode(args: Any) -> str:
     """Select how process credit is fused with scalar outcome credit.
 
@@ -159,7 +173,7 @@ def shaping_mode(args: Any) -> str:
 def normalization(args: Any) -> str:
     raw = config(args).get("normalization", None)
     if raw in (None, ""):
-        return "episode_turn_zscore" if advantage_mode(args) == "outcome_reweight" else "none"
+        return "none"
     value = str(raw).strip().lower()
     aliases = {
         "turn_zscore": "group_turn_zscore",
@@ -172,11 +186,9 @@ def normalization(args: Any) -> str:
     value = aliases.get(value, value)
     if value not in {"none", "group_turn_zscore", "episode_turn_zscore"}:
         raise ValueError("reward.credit_assignment.normalization must be none, group_turn_zscore, or episode_turn_zscore")
-    if advantage_mode(args) == "outcome_reweight" and value != "episode_turn_zscore":
-        raise ValueError("reward.credit_assignment.advantage_mode=outcome_reweight requires normalization=episode_turn_zscore")
-    if advantage_mode(args) == "outcome_bangbang_reweight" and value != "none":
+    if advantage_mode(args) in {"outcome_reweight", "outcome_bangbang_reweight"} and value != "none":
         raise ValueError(
-            "reward.credit_assignment.advantage_mode=outcome_bangbang_reweight requires normalization=none"
+            f"reward.credit_assignment.advantage_mode={advantage_mode(args)} requires normalization=none"
         )
     return value
 
@@ -834,6 +846,11 @@ def sample_has_process_credit_signal(args: Any, sample: Sample) -> bool:
     if not enabled(args) or not _is_student_train_sample(sample):
         return False
     mode = advantage_mode(args)
+    if mode in {"outcome_reweight", "outcome_bangbang_reweight"}:
+        # Sign-preserving reweighting cannot create a gradient when the scalar
+        # group advantage is zero, so it must not keep an otherwise constant
+        # reward group alive during dynamic sampling.
+        return False
     if mode == "teacher_anchored_state_aggregation":
         return False
     if mode == "teacher_anchored_value_gae":
@@ -1040,7 +1057,12 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
         response_length = len(values)
         process_mean = (sum(values) / response_length) if response_length else 0.0
         process_abs_mean = (sum(abs(value) for value in values) / response_length) if response_length else 0.0
-        cfg_beta = 0.0 if mode == "teacher_anchored_value_gae" else beta(args)
+        beta_modes = {
+            "outcome_plus_process",
+            "segment_reward_group_turn_norm",
+            "teacher_anchored_state_aggregation",
+        }
+        cfg_beta = beta(args) if mode in beta_modes else None
         sample_metadata["process_advantages"] = values
         if mode in {"teacher_anchored_state_aggregation", "teacher_anchored_value_gae"}:
             sample_metadata["process_advantage_masks"] = support_values
@@ -1048,6 +1070,8 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
             "enabled": True,
             "advantage_mode": mode,
             "beta": cfg_beta,
+            "reweight_aligned_scale": reweight_aligned_scale(args) if mode == "outcome_reweight" else None,
+            "reweight_opposed_scale": reweight_opposed_scale(args) if mode == "outcome_reweight" else None,
             "shaping_mode": shaping_mode(args),
             "normalization": normalization(args),
             "segment_reward_normalization": "group_turn_zscore"
@@ -1082,8 +1106,8 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
             "negative_token_rate": (negative / response_length) if response_length else 0.0,
             "process_value_mean": process_mean,
             "process_value_abs_mean": process_abs_mean,
-            "process_delta_mean": None if mode == "teacher_anchored_value_gae" else cfg_beta * process_mean,
-            "process_delta_abs_mean": None if mode == "teacher_anchored_value_gae" else cfg_beta * process_abs_mean,
+            "process_delta_mean": None if cfg_beta is None else cfg_beta * process_mean,
+            "process_delta_abs_mean": None if cfg_beta is None else cfg_beta * process_abs_mean,
         }
         tasa_stats = sample_metadata.pop("_tasa_credit_assignment", None)
         if isinstance(tasa_stats, dict):
@@ -1259,9 +1283,9 @@ def _attach_process_credit(
 ) -> None:
     """Attach raw or normalized process credit for schemes A/B.
 
-    Scheme B intentionally uses episode-local normalization only: its process
-    term is a strict within-trajectory redistribution of the scalar outcome
-    advantage and must not depend on other sampled episodes.
+    Scheme B consumes only the sign of direct judge marks. It therefore uses
+    raw ``+1/-1/0`` values and never normalizes neutral turns into non-zero
+    process credit.
     """
 
     cfg_clip = clip(args)
