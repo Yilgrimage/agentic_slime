@@ -503,7 +503,9 @@ class AppWorldBackend:
             )
             assistant_message = reply.message
             messages.append(assistant_message)
-            metadata["policy_usage"].append(reply.usage)
+            policy_usage = dict(reply.usage)
+            policy_usage["latency_s"] = reply.latency_s
+            metadata["policy_usage"].append(policy_usage)
             if policy_context_limit_reached(reply):
                 metadata["context_limit_hits"] = int(metadata.get("context_limit_hits", 0) or 0) + 1
                 truncated_reason = "context_limit_after_observation"

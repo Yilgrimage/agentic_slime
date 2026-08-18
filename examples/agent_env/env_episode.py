@@ -23,6 +23,11 @@ class PolicyReply:
 
 
 class PolicyCallError(RuntimeError):
+    # A policy transport failure aborts the episode, but it does not corrupt
+    # the process-isolated environment. The pool can safely reuse that worker;
+    # the next run_episode call resets the backend before use.
+    recoverable_worker = True
+
     def __init__(self, message: str, *, status: int | None = None, body: str = "") -> None:
         super().__init__(message)
         self.status = status

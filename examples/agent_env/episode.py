@@ -498,9 +498,14 @@ class PolicyGatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError("missing X-Agent-Env-Policy-Session header")
             session = self.gateway.session(str(session_id))
             _json_response(self, 200, session.chat_completion(body))
+        except (BrokenPipeError, ConnectionResetError):
+            logger.info("policy gateway client disconnected before response path=%s", self.path)
         except Exception as exc:
             logger.exception("policy gateway request failed path=%s", self.path)
-            _json_response(self, 500, {"ok": False, "error": _format_error(exc)})
+            try:
+                _json_response(self, 500, {"ok": False, "error": _format_error(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                logger.info("policy gateway client disconnected while reporting error path=%s", self.path)
 
     def log_message(self, fmt: str, *args: Any) -> None:
         if os.environ.get("AGENT_ENV_POLICY_GATEWAY_ACCESS_LOG", "0") in {"1", "true", "TRUE", "yes", "YES", "on", "ON"}:

@@ -34,6 +34,10 @@ class CapacityError(Exception):
     pass
 
 
+class RecoverableWorkerError(RuntimeError):
+    pass
+
+
 @dataclass
 class Worker:
     worker_id: str
@@ -114,7 +118,14 @@ def _backend_worker_loop(
                     raise ValueError(f"Unknown worker command: {cmd}")
                 conn.send({"ok": True, **(result or {})})
             except Exception as exc:
-                conn.send({"ok": False, "error": repr(exc), "traceback": traceback.format_exc()})
+                conn.send(
+                    {
+                        "ok": False,
+                        "error": repr(exc),
+                        "traceback": traceback.format_exc(),
+                        "recoverable": bool(getattr(exc, "recoverable_worker", False)),
+                    }
+                )
     except Exception as exc:
         try:
             conn.send({"ok": False, "event": "startup_failed", "error": repr(exc), "traceback": traceback.format_exc()})
@@ -246,6 +257,11 @@ class ProcessPoolEnvServer:
                 raise TimeoutError(f"{self.env_name} worker {worker.worker_id} timed out on {cmd}")
             result = worker.conn.recv()
             if not result.get("ok"):
+                if result.get("recoverable"):
+                    raise RecoverableWorkerError(
+                        f"{self.env_name} worker {worker.worker_id} failed recoverably on {cmd}: "
+                        f"{result.get('error', 'unknown worker error')}"
+                    )
                 raise RuntimeError(f"{self.env_name} worker {worker.worker_id} failed on {cmd}: {result}")
             worker.reset_count = int(result.get("reset_count", worker.reset_count) or worker.reset_count)
             worker.step_count = int(result.get("step_count", worker.step_count) or worker.step_count)
@@ -363,6 +379,11 @@ class ProcessPoolEnvServer:
                 forwarded,
                 timeout_s=self.worker_episode_timeout_s,
             )
+        except RecoverableWorkerError:
+            with self.lock:
+                self.leases.pop(lease.lease_id, None)
+            self._release_worker(lease)
+            raise
         except Exception:
             lease.worker.dead = True
             with self.lock:
@@ -510,6 +531,8 @@ class EnvRequestHandler(BaseHTTPRequestHandler):
                 return
             _json_response(self, 200, result)
         except CapacityError as exc:
+            _json_response(self, 503, {"ok": False, "error": _format_error(exc)})
+        except RecoverableWorkerError as exc:
             _json_response(self, 503, {"ok": False, "error": _format_error(exc)})
         except KeyError as exc:
             _json_response(self, 404, {"ok": False, "error": _format_error(exc)})

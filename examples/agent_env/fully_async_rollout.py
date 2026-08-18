@@ -108,6 +108,15 @@ def _max_inflight_groups(args: Any) -> int:
     return _default_max_inflight_groups(args)
 
 
+def _no_progress_timeout_s(args: Any) -> float:
+    timeouts = getattr(args, "timeouts", {}) or {}
+    if isinstance(timeouts, dict):
+        env_request_s = float(timeouts.get("env_request_s", 900.0))
+    else:
+        env_request_s = float(getattr(timeouts, "env_request_s", 900.0))
+    return max(300.0, 2.0 * env_request_s)
+
+
 def _add_metrics(metrics: dict[str, float], update: dict[str, float]) -> None:
     for key, value in update.items():
         metrics[key] = metrics.get(key, 0.0) + float(value)
@@ -194,8 +203,10 @@ async def _generate_rollout_async(args: Any, rollout_id: int, data_buffer: Any) 
     collected: dict[int, list[Sample]] = {}
     all_groups: list[list[Sample]] = []
     started = time.time()
+    last_progress = time.monotonic()
     last_log = started
     log_every = 30.0
+    no_progress_timeout_s = _no_progress_timeout_s(args)
 
     while len(collected) < target:
         drained = 0
@@ -219,11 +230,22 @@ async def _generate_rollout_async(args: Any, rollout_id: int, data_buffer: Any) 
                 metric_gatherer.on_dynamic_filter_drop(reason=dynamic_filter_output.reason)
                 continue
             collected[gid] = group
+            last_progress = time.monotonic()
 
         if not drained:
             await asyncio.sleep(0.05)
 
         now = time.time()
+        no_progress_s = time.monotonic() - last_progress
+        if no_progress_s > no_progress_timeout_s:
+            reason_counts = _padding_reason_counts(prefilter_metrics)
+            _stop_worker()
+            raise RuntimeError(
+                f"agent-env fully-async rollout {rollout_id} made no valid-group progress for "
+                f"{no_progress_s:.1f}s: collected={len(collected)}/{target}, "
+                f"queue={worker.queue_size()}, padding_reason_counts={reason_counts}. "
+                "Failing the run instead of retrying indefinitely."
+            )
         if now - last_log > log_every:
             logger.info(
                 "agent-env fully-async rollout %d: collected %d/%d, queue=%d, elapsed=%.1fs",
