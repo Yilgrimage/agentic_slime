@@ -61,6 +61,7 @@ _TEACHER_INDEX_CACHE: dict[str, tuple[int, int, dict[str, dict[str, Any]]]] = {}
 
 RUBRIC_SYSTEM_PROMPT = "你是一名教育评估与共享评分细则设计专家。只返回 JSON 对象本身。"
 JUDGE_SYSTEM_PROMPT = "你是一名答案评分专家。只返回 JSON 对象本身。"
+CA_JUDGE_SYSTEM_PROMPT = "你是一名 agentic trajectory credit-assignment judge。输出必须是单个 JSON 对象。"
 
 RUBRICATOR_PROMPT_TEMPLATE = """Rubricator 角色提示词
 
@@ -337,33 +338,34 @@ VERIFIER_SHAPING_PROMPT_TEMPLATE = """你是一名 agentic trajectory 评分专�
 - 只返回 JSON 对象本身。
 """
 
-CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-assignment judge。请一次性完成 behavior mining 和 step-index 标注。
+CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-assignment judge。请一次性完成 behavior mining 和 student step-index 标注。
 
-目标：为同一道任务生成少量关键进展 good behavior 和明显错误 bad behavior，并立刻标出每条 trajectory 命中这些 behavior 的 Step 编号。
+# 任务
+1. 根据任务、参考轨迹和 student trajectories，提炼少量可迁移的关键进展 good behavior 与明确错误 bad behavior。
+2. 为每条 student trajectory 标出命中各项 behavior 的 Step 编号。
 
-# 关键口径
-{reference_guidance}
-- 不判断最终任务是否真实成功；最终成功由外部 env verifier 决定。你只评价可观察过程质量。
-- `complete_task()` 只是结束 episode。任何只显示 complete_task、fail、Execution successful、或没有可见具体 API/action 参数的 step，都不得作为 good behavior 命中。
-- 如果 step 文本被 `[truncated ...]` 裁到看不清实际 API/action、参数或证据来源，宁可不给 good hit。
-- good hit 必须是 materially advances the task 的关键进展或 milestone，且必须能从该 Step 的可见 tool call / tool response 直接确认；不要把普通合理动作、意图文字、成功声明或隐含猜测标成 good hit。
-- bad hit 可以标注：无关/错误 API、编造结果、忽略 observation、重复无效动作、过早 complete_task、参数明显不合理。
-- 如果 bad hit 依赖“某个 item/API/action 不在 observation 中可见”这类缺失证据，而相关 observation 已被截断或省略，不要标注该 bad hit。
-- 每条 behavior 必须可以通过具体 Step N 判断命中。
-- 只返回紧凑 JSON，不要 rationale，不要 evidence 句子，不要 Markdown。
+# 判定口径
+- 最终任务是否成功由外部 env verifier 判断；本输出只描述可观察的过程行为及其 student 命中位置。
+- good hit 表示由可见 action、tool call 或 tool response 直接确认的关键任务进展或 milestone。
+- bad hit 表示由可见过程直接确认的错误调用、编造结果、忽略 observation、重复无效动作、过早终止或参数错误。
+- 终止调用、状态文字和意图陈述只作为上下文；它们需要可见的任务状态变化或执行证据才能构成 good hit。
+- 被压缩或省略的内容不构成命中证据；对应 `step_indices` 保持为空。
+- 每个 hit 都必须对应输入文本中实际存在的 `Step N`。
 {tasa_state_instructions}
 
 [Question]
 {question}
 
-[Trajectories]
-{answers}
+[Reference Trajectories]
+{references}
 
-[Valid Trajectory IDs]
-{trajectory_ids}
+[Student Trajectories]
+{students}
 
-[Additional Scoring Instructions]
-{extra_scoring_instructions}
+[Student Trajectory IDs]
+{student_trajectory_ids}
+
+{extra_scoring_section}
 
 # 输出格式
 返回一个 JSON object：
@@ -376,8 +378,8 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
       "polarity": "good",
       "description": "one concise observable behavior",
       "hits_by_trajectory": [
-        {"trajectory_id": "T0_REFERENCE", "step_indices": [1, 3]},
-        {"trajectory_id": "S0_STUDENT", "step_indices": []}
+        {"trajectory_id": "S0_STUDENT", "step_indices": [1, 3]},
+        {"trajectory_id": "S1_STUDENT", "step_indices": []}
       ]
     },
     {
@@ -385,8 +387,8 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
       "polarity": "bad",
       "description": "one concise observable failure behavior",
       "hits_by_trajectory": [
-        {"trajectory_id": "T0_REFERENCE", "step_indices": []},
-        {"trajectory_id": "S0_STUDENT", "step_indices": [2]}
+        {"trajectory_id": "S0_STUDENT", "step_indices": [2]},
+        {"trajectory_id": "S1_STUDENT", "step_indices": []}
       ]
     }
   ]
@@ -398,12 +400,10 @@ CA_COMPACT_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory credit-
 - `schema_version` 必须严格等于 `ropd.ca_compact_batch_verifier.v2`。
 - 生成 3 到 8 条 behavior，good 和 bad 都至少 1 条。
 - `behavior_id` 必须以 `g` 或 `b` 开头并唯一；`polarity` 只能是 `good` 或 `bad`。
-- 每条 `hits_by_trajectory` 必须覆盖所有输入 trajectory_id。
-- trajectory_id 必须严格来自 [Valid Trajectory IDs]，不要输出不存在的 T0_REFERENCE。
+- 每条 `hits_by_trajectory` 必须完整覆盖 [Student Trajectory IDs]，且顺序与该列表一致。
 - Step 编号只能来自对应 trajectory 文本里的 `Step N`。
 {tasa_state_output_constraints}
 - 输出字段只能是 schema 中出现的字段。
-- 只返回 JSON object，不要输出解释、Markdown 或其他文本。
 """
 
 RUBRICATOR_ANSWER_PROCESS_PROMPT_TEMPLATE = """你是一名 agentic task 评估专家。你的任务是为同一道业务问题生成一套 answer-first 的共享评分细则。
@@ -1755,24 +1755,28 @@ def _anonymous_answer_items(
     )
 
 
-def _trajectory_id(item: dict[str, Any]) -> str:
+def _student_trajectory_id(item: dict[str, Any]) -> str:
     source = str(item.get("source") or "")
+    if source != "student":
+        raise ValueError(f"compact CA trajectory ids are student-only, got source={source!r}")
     source_index = int(item.get("source_index", 0) or 0)
-    if source == "teacher":
-        return f"T{source_index}_REFERENCE"
-    if source == "student":
-        return f"S{source_index}_STUDENT"
-    return f"X{source_index}_UNKNOWN"
+    return f"S{source_index}_STUDENT"
 
 
 def _render_ca_compact_trajectory_block(answer_items: tuple[dict[str, Any], ...]) -> str:
     blocks = []
     for item in answer_items:
-        blocks.append(
-            f"[{_trajectory_id(item)} | answer_index={item.get('answer_index')}]\n"
-            f"{item.get('text')}"
-        )
+        blocks.append(f"[{_student_trajectory_id(item)}]\n{item.get('text')}")
     return "\n\n".join(blocks)
+
+
+def _render_ca_compact_reference_block(answer_items: tuple[dict[str, Any], ...]) -> str:
+    if not answer_items:
+        return "None"
+    return "\n\n".join(
+        f"[REFERENCE {index}]\n{item.get('text')}"
+        for index, item in enumerate(answer_items, start=1)
+    )
 
 
 def _tasa_state_prompt_parts(args: Any) -> tuple[str, str, str]:
@@ -1783,16 +1787,16 @@ def _tasa_state_prompt_parts(args: Any) -> tuple[str, str, str]:
 # TASA-GRPO semantic state evidence
 同时输出 `tasa_state_schema` 和 `tasa_state_changes`，用于构造 teacher-anchored semantic state baseline。
 规则：
-- `tasa_state_schema` 描述任务级 semantic state predicates，而不是 teacher action。
+- `tasa_state_schema` 描述任务级 semantic state predicates。
 - schema 必须锚定 teacher reference trajectory 和 task objective 抽象出的状态事实；student 可用不同路径达成同一 predicate。
-- milestone predicate 必须描述已经达成的可观察状态事实，例如“目标用户已确定”，不要写“调用了某个 API”。
+- milestone predicate 描述已经达成的可观察状态事实，例如“目标用户已确定”。
 - milestone 必须包含正数 `progress`，表示 teacher 参考路径中的粗粒度进展顺序；这是离散 rank，不是成功概率。
 - bad flag predicate 描述会污染后续状态的明确错误事实，例如“进入错误用户上下文”。
 - 总 predicate 数量控制在 3 到 8 个；id 使用 `M1`, `M2`... 和 `B1`, `B2`...
-- `requires` 只表达 milestone 之间的先后依赖，不能引用 bad flag。
-- `tasa_state_changes` 只标 student trajectories；每个 student trajectory_id 必须出现一次。
+- `requires` 使用 milestone id 表达 milestone 之间的先后依赖。
+- `tasa_state_changes` 完整覆盖 [Student Trajectory IDs]。
 - `changes[].step` 表示该 Step 的 action 执行后状态发生变化；step 编号必须来自该 trajectory 文本。
-- `set` 填该 step 后变为 true 的 predicate id；`unset` 通常为空，只有状态被明确纠正时才使用。
+- `set` 填该 step 后变为 true 的 predicate id；`unset` 填该 step 后被明确纠正的 predicate id。
 """
     example = """,
   "tasa_state_schema": {
@@ -1817,7 +1821,7 @@ def _tasa_state_prompt_parts(args: Any) -> tuple[str, str, str]:
 - TASA mode 下必须输出 `tasa_state_schema` 和 `tasa_state_changes`。
 - `tasa_state_schema.milestones` 和 `tasa_state_schema.bad_flags` 的总数必须是 3 到 8。
 - TASA-GAE mode 下每个 milestone 必须有正数 `progress`；依赖项的 progress 不应大于被依赖 milestone。
-- `tasa_state_changes[].trajectory_id` 必须覆盖所有 S*_STUDENT 且不能包含 teacher trajectory。
+- `tasa_state_changes[].trajectory_id` 必须完整覆盖 [Student Trajectory IDs]。
 - `set`/`unset` 中的 id 必须来自 `tasa_state_schema`。"""
     return instructions, example, constraints
 
@@ -1837,21 +1841,23 @@ def _build_ca_compact_verifier_prompt(
         }
         for item in answer_items
     )
-    has_reference = any(str(item.get("source") or "") == "teacher" for item in limited_items)
-    reference_guidance = (
-        "- T0_REFERENCE 是高质量参考轨迹，但不保证完美；可以帮助发现 good behavior。"
-        if has_reference
-        else "- 本批输入没有 reference trajectory；只基于任务要求和 student trajectories 的可见过程，判断关键进展和明显错误。"
+    reference_items = tuple(item for item in limited_items if str(item.get("source") or "") == "teacher")
+    student_items = tuple(item for item in limited_items if str(item.get("source") or "") == "student")
+    extra_scoring_instructions = _extra_scoring_instructions(args).strip()
+    extra_scoring_section = (
+        f"[Additional Scoring Instructions]\n{extra_scoring_instructions}"
+        if extra_scoring_instructions
+        else ""
     )
     tasa_state_instructions, tasa_state_json_example, tasa_state_output_constraints = _tasa_state_prompt_parts(args)
     return _render_template(
         CA_COMPACT_VERIFIER_PROMPT_TEMPLATE,
         {
             "question": _limit_reward_text(args, _ropd_question(sample), question_max_chars, field="question"),
-            "answers": _render_ca_compact_trajectory_block(limited_items),
-            "trajectory_ids": ", ".join(_trajectory_id(item) for item in limited_items),
-            "reference_guidance": reference_guidance,
-            "extra_scoring_instructions": _extra_scoring_instructions(args),
+            "references": _render_ca_compact_reference_block(reference_items),
+            "students": _render_ca_compact_trajectory_block(student_items),
+            "student_trajectory_ids": ", ".join(_student_trajectory_id(item) for item in student_items),
+            "extra_scoring_section": extra_scoring_section,
             "tasa_state_instructions": tasa_state_instructions,
             "tasa_state_json_example": tasa_state_json_example,
             "tasa_state_output_constraints": tasa_state_output_constraints,
@@ -2227,7 +2233,7 @@ def _parse_tasa_state_annotations(
         if isinstance(item, dict)
     }
     expected_student_ids = {
-        _trajectory_id(item)
+        _student_trajectory_id(item)
         for item in answer_items
         if str(item.get("source") or "") == "student"
     }
@@ -2256,8 +2262,12 @@ def _parse_ca_compact_batch_masks(
     unknown_top_level = sorted(set(payload) - allowed_top_level)
     if unknown_top_level:
         raise ValueError(f"ROPD compact CA verifier returned unsupported fields: {unknown_top_level}")
-    expected_ids = [_trajectory_id(item) for item in answer_items]
-    valid_steps = {_trajectory_id(item): _step_numbers(str(item.get("text") or "")) for item in answer_items}
+    student_items = tuple(item for item in answer_items if str(item.get("source") or "") == "student")
+    expected_ids = [_student_trajectory_id(item) for item in student_items]
+    valid_student_steps = {
+        _student_trajectory_id(item): _step_numbers(str(item.get("text") or ""))
+        for item in student_items
+    }
 
     raw_behaviors = payload.get("behaviors")
     if not isinstance(raw_behaviors, list) or not (3 <= len(raw_behaviors) <= 8):
@@ -2295,10 +2305,10 @@ def _parse_ca_compact_batch_masks(
             if not isinstance(hit, dict):
                 raise ValueError("ROPD compact CA hit item must be an object")
             trajectory_id = str(hit.get("trajectory_id") or "").strip()
-            if trajectory_id not in valid_steps:
+            if trajectory_id not in valid_student_steps:
                 raise ValueError(f"ROPD compact CA unknown trajectory_id={trajectory_id!r}")
             step_indices = _parse_step_indices(hit.get("step_indices", []))
-            invalid_steps = [step for step in step_indices if step not in valid_steps[trajectory_id]]
+            invalid_steps = [step for step in step_indices if step not in valid_student_steps[trajectory_id]]
             if invalid_steps:
                 raise ValueError(
                     f"ROPD compact CA step indices do not exist for {trajectory_id}: {invalid_steps}"
@@ -2333,15 +2343,18 @@ def _parse_ca_compact_batch_masks(
         args,
         payload,
         answer_items=answer_items,
-        valid_steps=valid_steps,
+        valid_steps=valid_student_steps,
     )
 
     scores: list[dict[str, Any]] = []
     for expected_index, item in enumerate(answer_items, start=1):
-        trajectory_id = _trajectory_id(item)
+        if str(item.get("source") or "") != "student":
+            continue
+        trajectory_id = _student_trajectory_id(item)
         scores.append(
             {
                 "answer_index": expected_index,
+                "source_index": int(item.get("source_index", 0) or 0),
                 "trajectory_id": trajectory_id,
                 "process_step_evidence": evidence_by_trajectory[trajectory_id],
                 "behaviors": behavior_items,
@@ -2935,21 +2948,22 @@ async def _score_bucket(
         prompt = _build_ca_compact_verifier_prompt(args, samples[0], answer_items=answer_items)
     else:
         prompt = _build_verifier_prompt(args, samples[0], rubric=rubric, answers=answers)
-    answer_item_records = [
-        {
+    answer_item_records = []
+    for idx, item in enumerate(answer_items, start=1):
+        record = {
             "answer_index": idx,
             "source": item["source"],
             "source_index": item["source_index"],
-            "trajectory_id": _trajectory_id(item),
             "text": item["text"],
         }
-        for idx, item in enumerate(answer_items, start=1)
-    ]
+        if item["source"] == "student":
+            record["trajectory_id"] = _student_trajectory_id(item)
+        answer_item_records.append(record)
     try:
         payload, judge_call = await call_json_judge_with_metadata(
             args,
             prompt,
-            system_prompt=JUDGE_SYSTEM_PROMPT,
+            system_prompt=CA_JUDGE_SYSTEM_PROMPT if compact_mode else JUDGE_SYSTEM_PROMPT,
             api_key_path=_role_api_key_path(args, "judge"),
             endpoint_pool_path=_role_endpoint_pool_path(args, "judge"),
             **_role_request_options(args, "judge", default_max_tokens=32768),
@@ -2985,9 +2999,9 @@ async def _score_bucket(
 
     if compact_mode:
         student_items_by_index: list[tuple[dict[str, Any], int] | None] = [None] * len(student_answers)
-        for position, (answer_item, score_item) in enumerate(zip(answer_items, scored_items, strict=True), start=1):
-            if answer_item["source"] == "student":
-                student_items_by_index[int(answer_item["source_index"])] = (score_item, position)
+        for score_item in scored_items:
+            source_index = int(score_item["source_index"])
+            student_items_by_index[source_index] = (score_item, int(score_item["answer_index"]))
         if any(item is None for item in student_items_by_index):
             raise ValueError("ROPD compact CA verifier did not return every student trajectory")
         _dump_artifact(

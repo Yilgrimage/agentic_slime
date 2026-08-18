@@ -6,7 +6,12 @@ from slime.utils.types import Sample
 
 from examples.agent_env import credit_assignment
 from examples.agent_env.advantage import segment_credit_assignment_advantage
-from examples.agent_env.rewards.ropd import _ca_compact_result, _parse_ca_compact_batch_masks, _select_train_score
+from examples.agent_env.rewards.ropd import (
+    _build_ca_compact_verifier_prompt,
+    _ca_compact_result,
+    _parse_ca_compact_batch_masks,
+    _select_train_score,
+)
 
 
 def _sample(*, env_success: bool) -> Sample:
@@ -72,7 +77,6 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
                 "polarity": "good",
                 "description": "good action",
                 "hits_by_trajectory": [
-                    {"trajectory_id": "T0_REFERENCE", "step_indices": [1]},
                     {"trajectory_id": "S0_STUDENT", "step_indices": [1]},
                     {"trajectory_id": "S1_STUDENT", "step_indices": []},
                 ],
@@ -82,7 +86,6 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
                 "polarity": "good",
                 "description": "good followup",
                 "hits_by_trajectory": [
-                    {"trajectory_id": "T0_REFERENCE", "step_indices": []},
                     {"trajectory_id": "S0_STUDENT", "step_indices": [2]},
                     {"trajectory_id": "S1_STUDENT", "step_indices": []},
                 ],
@@ -92,7 +95,6 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
                 "polarity": "bad",
                 "description": "bad action",
                 "hits_by_trajectory": [
-                    {"trajectory_id": "T0_REFERENCE", "step_indices": []},
                     {"trajectory_id": "S0_STUDENT", "step_indices": []},
                     {"trajectory_id": "S1_STUDENT", "step_indices": [1]},
                 ],
@@ -122,11 +124,11 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
 
     scores = _parse_ca_compact_batch_masks(args, payload, answer_items=answer_items)
 
-    student_scores = [item for item in scores if item["trajectory_id"].startswith("S")]
-    assert student_scores[0]["tasa_state_schema"]["milestones"][0]["id"] == "M1"
-    assert student_scores[0]["tasa_state_schema"]["milestones"][0]["progress"] == 1.0
-    assert student_scores[0]["tasa_state_changes"][1]["set"] == ["M2"]
-    assert student_scores[1]["tasa_state_changes"][0]["set"] == ["B1"]
+    assert [item["trajectory_id"] for item in scores] == ["S0_STUDENT", "S1_STUDENT"]
+    assert scores[0]["tasa_state_schema"]["milestones"][0]["id"] == "M1"
+    assert scores[0]["tasa_state_schema"]["milestones"][0]["progress"] == 1.0
+    assert scores[0]["tasa_state_changes"][1]["set"] == ["M2"]
+    assert scores[1]["tasa_state_changes"][0]["set"] == ["B1"]
 
     try:
         _parse_ca_compact_batch_masks(
@@ -138,6 +140,30 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
         assert "unsupported fields" in str(exc)
     else:
         raise AssertionError("ROPD compact CA accepted the removed trajectory_scores field")
+
+
+def test_ca_compact_prompt_uses_teacher_only_as_reference():
+    args = Namespace(reward={"ropd": {}})
+    sample = _sample(env_success=False)
+    sample.metadata["task_prompt"] = "Complete the requested task."
+    answer_items = (
+        {"source": "teacher", "source_index": 0, "answer_index": 2, "text": "Step 1\nteacher"},
+        {"source": "student", "source_index": 0, "answer_index": 1, "text": "Step 1\nstudent"},
+    )
+
+    prompt = _build_ca_compact_verifier_prompt(args, sample, answer_items=answer_items)
+
+    assert "[REFERENCE 1]" in prompt
+    assert "[S0_STUDENT]" in prompt
+    assert "answer_index" not in prompt
+    assert "[Student Trajectory IDs]\nS0_STUDENT" in prompt
+    assert "T0_REFERENCE" not in prompt
+    assert "complete_task" not in prompt
+    assert "[Additional Scoring Instructions]" not in prompt
+
+    prompt_without_teacher = _build_ca_compact_verifier_prompt(args, sample, answer_items=answer_items[1:])
+    assert "[Reference Trajectories]\nNone" in prompt_without_teacher
+    assert "[Student Trajectory IDs]\nS0_STUDENT" in prompt_without_teacher
 
 
 def test_ca_compact_result_uses_env_reward_without_synthetic_judge_score():
