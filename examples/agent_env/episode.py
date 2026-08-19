@@ -219,6 +219,7 @@ class PolicySession:
     sample: Sample
     sampling_params: dict[str, Any]
     tok: Any
+    policy_max_attempts: int = 1
     lock: threading.Lock = field(default_factory=threading.Lock)
     ledger: AgentTokenLedger | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -360,6 +361,7 @@ class PolicySession:
             self.sample,
             self.ledger.tokens,
             params,
+            max_attempts=self.policy_max_attempts,
         )
         if response_text and not token_ids:
             if bool(arg(self.args, "allow_policy_retokenize_fallback", False)):
@@ -542,7 +544,15 @@ class PolicyGateway:
         if authorization != expected:
             raise PermissionError("invalid policy gateway bearer token")
 
-    def create_session(self, args: Any, spec: AgentEnvSpec, sample: Sample, sampling_params: dict[str, Any]) -> PolicySession:
+    def create_session(
+        self,
+        args: Any,
+        spec: AgentEnvSpec,
+        sample: Sample,
+        sampling_params: dict[str, Any],
+        *,
+        policy_max_attempts: int = 1,
+    ) -> PolicySession:
         self.start()
         session_id = f"policy-{uuid.uuid4().hex[:16]}"
         sample.session_id = session_id
@@ -553,6 +563,7 @@ class PolicyGateway:
             sample=sample,
             sampling_params=copy.deepcopy(sampling_params),
             tok=tokenizer(args),
+            policy_max_attempts=max(1, int(policy_max_attempts)),
         )
         with self.lock:
             self.sessions[session_id] = session
@@ -613,6 +624,7 @@ async def generate_server_episode_rollout(
     *,
     spec: AgentEnvSpec,
     episode_payload: dict[str, Any] | None = None,
+    evaluation: bool = False,
 ) -> Sample:
     assert not arg(args, "partial_rollout", False), f"{spec.name} rollout does not support partial rollout yet."
 
@@ -621,7 +633,13 @@ async def generate_server_episode_rollout(
         sample.status = Sample.Status.PENDING
     sample.remove_sample = False
     gateway = get_policy_gateway()
-    session = gateway.create_session(args, spec, sample, sampling_params)
+    session = gateway.create_session(
+        args,
+        spec,
+        sample,
+        sampling_params,
+        policy_max_attempts=3 if evaluation else 1,
+    )
     final_score = 0.0
     success = False
     split = sample_metadata.get("split") or cfg_path(args, "task.split", spec.default_split)

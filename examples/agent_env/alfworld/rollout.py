@@ -99,6 +99,7 @@ async def generate(args: Any, sample: Sample, sampling_params: dict, evaluation:
         sampling_params,
         spec=ALFWORLD_SPEC,
         episode_payload=episode_payload,
+        evaluation=evaluation,
     )
 
 

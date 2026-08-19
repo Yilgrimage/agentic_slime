@@ -69,6 +69,60 @@ def test_policy_timeout_leaves_request_abort_to_sglang() -> None:
     assert client_timeouts == [27.0]
 
 
+def test_policy_eval_retry_starts_after_timed_out_client_closes() -> None:
+    calls = 0
+    active_clients = 0
+    max_active_clients = 0
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "text": "done",
+                "output_ids": [3],
+                "meta_info": {"finish_reason": {"type": "stop"}},
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            nonlocal active_clients, max_active_clients
+            active_clients += 1
+            max_active_clients = max(max_active_clients, active_clients)
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            nonlocal active_clients
+            active_clients -= 1
+
+        async def post(self, url, *, json, headers=None, timeout=None):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise httpx.ReadTimeout("policy timed out", request=httpx.Request("POST", url))
+            return FakeResponse()
+
+    args = Namespace(timeouts={"policy_s": 30}, router_policy="cache_aware")
+    sample = Sample(session_id="session-1")
+
+    with (
+        patch("slime.rollout.sglang_rollout.get_model_url", return_value="http://router:30000/generate"),
+        patch("httpx.AsyncClient", FakeAsyncClient),
+        patch("asyncio.sleep", return_value=None),
+    ):
+        result = asyncio.run(
+            call_policy(args, _spec(), sample, [1, 2], {"max_new_tokens": 4}, max_attempts=3)
+        )
+
+    assert result == ("done", [3], [], "stop")
+    assert calls == 3
+    assert max_active_clients == 1
+
+
 def test_recoverable_episode_failure_releases_worker_without_marking_it_dead() -> None:
     server = object.__new__(ProcessPoolEnvServer)
     server.lock = threading.Lock()
