@@ -1456,8 +1456,6 @@ async def call_policy(
     sample: Sample,
     input_ids: list[int],
     sampling_params: dict,
-    *,
-    max_attempts: int = 1,
 ) -> tuple[str, list[int], list[float], str]:
     from slime.rollout.sglang_rollout import get_model_url
 
@@ -1476,28 +1474,10 @@ async def call_policy(
     async def direct_post_model() -> dict:
         import httpx
 
-        attempts = max(1, int(max_attempts))
-        for attempt in range(attempts):
-            try:
-                # Closing the timed-out connection is SGLang's cancellation
-                # signal. Retry only after that request lifecycle has ended.
-                async with httpx.AsyncClient(timeout=httpx.Timeout(request_timeout_s), trust_env=False) as client:
-                    response = await client.post(url, json=payload, headers=headers)
-                    response.raise_for_status()
-                    return response.json()
-            except (httpx.TimeoutException, httpx.RequestError) as exc:
-                if attempt + 1 >= attempts:
-                    raise
-                logger.warning(
-                    "%s eval policy request failed; retrying attempt=%d/%d url=%s error=%r",
-                    spec.name,
-                    attempt + 1,
-                    attempts,
-                    url,
-                    exc,
-                )
-                await asyncio.sleep(0.5)
-        raise AssertionError("policy request attempts exhausted without a result")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(request_timeout_s), trust_env=False) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
 
     # The env-server policy gateway serves requests from HTTP worker threads.
     # Using Slime's distributed post helper there can wait inside Ray without

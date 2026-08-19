@@ -364,7 +364,7 @@ PY
 }
 
 eval_requested() {
-  [ -n "${EVAL_INTERVAL:-}" ] || [ -n "${EVAL_CONFIG:-}" ] || [ -n "${EVAL_PROMPT_DATA:-}" ]
+  [ -n "${EVAL_INTERVAL:-}" ] || [ -n "${EVAL_CONFIG:-}" ]
 }
 
 default_eval_splits() {
@@ -391,27 +391,38 @@ default_eval_splits() {
 }
 
 prepare_native_eval() {
+  local legacy_eval_var
+  for legacy_eval_var in \
+    EVAL_PROMPT_DATA \
+    EVAL_MAX_RESPONSE_LEN \
+    EVAL_TEMPERATURE \
+    EVAL_TOP_P \
+    EVAL_TOP_K; do
+    if [ -n "${!legacy_eval_var:-}" ]; then
+      echo "${legacy_eval_var} is not supported by agent-env native eval." >&2
+      echo "Set datasets and sampling only in examples/agent_env/${ENV_NAME}/eval_config.yaml or the selected EVAL_CONFIG." >&2
+      exit 1
+    fi
+  done
+
   eval_requested || return 0
 
   local default_eval_config="${REPO_DIR}/examples/agent_env/${ENV_NAME}/eval_config.yaml"
-  if [ -z "${EVAL_CONFIG:-}" ] && [ -z "${EVAL_PROMPT_DATA:-}" ] && [ -f "${default_eval_config}" ]; then
+  if [ -z "${EVAL_CONFIG:-}" ] && [ -f "${default_eval_config}" ]; then
     export EVAL_CONFIG="${default_eval_config}"
   fi
   if [ -n "${EVAL_CONFIG:-}" ]; then
     export EVAL_CONFIG="$(resolve_repo_path "${EVAL_CONFIG}")"
   fi
-  if [ -z "${EVAL_CONFIG:-}" ] && [ -z "${EVAL_PROMPT_DATA:-}" ]; then
-    echo "Native eval requested but ${ENV_NAME} has no eval_config.yaml and EVAL_PROMPT_DATA is empty." >&2
+  if [ -z "${EVAL_CONFIG:-}" ]; then
+    echo "Native eval requested but ${ENV_NAME} has no eval_config.yaml and EVAL_CONFIG is empty." >&2
     exit 1
   fi
+  [ -f "${EVAL_CONFIG}" ] || { echo "Missing native eval config: ${EVAL_CONFIG}" >&2; exit 1; }
 
   # Full-async rollout functions are training-only; Slime's stock rollout owns
   # native eval and calls the env-specific custom generate function per sample.
   export EVAL_FUNCTION_PATH=${EVAL_FUNCTION_PATH:-slime.rollout.sglang_rollout.generate_rollout}
-
-  if [ -n "${EVAL_PROMPT_DATA:-}" ] && [ -z "${EVAL_CONFIG:-}" ]; then
-    return 0
-  fi
 
   local eval_splits="${EVAL_SPLITS:-$(default_eval_splits)}"
   if [ -z "${eval_splits}" ]; then
@@ -775,27 +786,11 @@ EVAL_ARGS=()
 if [ -n "${EVAL_CONFIG:-}" ]; then
   EVAL_ARGS+=(--eval-config "${EVAL_CONFIG}")
 fi
-if [ -n "${EVAL_PROMPT_DATA:-}" ]; then
-  read -r -a EVAL_PROMPT_DATA_ARRAY <<< "${EVAL_PROMPT_DATA}"
-  EVAL_ARGS+=(--eval-prompt-data "${EVAL_PROMPT_DATA_ARRAY[@]}")
-fi
 if [ -n "${EVAL_INTERVAL:-}" ]; then
   EVAL_ARGS+=(--eval-interval "${EVAL_INTERVAL}")
 fi
 if [ -n "${EVAL_FUNCTION_PATH:-}" ]; then
   EVAL_ARGS+=(--eval-function-path "${EVAL_FUNCTION_PATH}")
-fi
-if [ -n "${EVAL_MAX_RESPONSE_LEN:-}" ]; then
-  EVAL_ARGS+=(--eval-max-response-len "${EVAL_MAX_RESPONSE_LEN}")
-fi
-if [ -n "${EVAL_TEMPERATURE:-}" ]; then
-  EVAL_ARGS+=(--eval-temperature "${EVAL_TEMPERATURE}")
-fi
-if [ -n "${EVAL_TOP_P:-}" ]; then
-  EVAL_ARGS+=(--eval-top-p "${EVAL_TOP_P}")
-fi
-if [ -n "${EVAL_TOP_K:-}" ]; then
-  EVAL_ARGS+=(--eval-top-k "${EVAL_TOP_K}")
 fi
 case "${SKIP_EVAL_BEFORE_TRAIN:-0}" in
   1|true|TRUE|yes|YES|on|ON)

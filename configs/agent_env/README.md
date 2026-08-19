@@ -76,10 +76,15 @@ not a task-specific driver script. Enable it from a run/train override with
 `EVAL_INTERVAL` and, when needed, `EVAL_CONFIG`. If `EVAL_CONFIG` is omitted and
 `examples/agent_env/<env>/eval_config.yaml` exists, the train adapter uses it.
 The adapter regenerates eval prompt-data under
-`${RUN_ROOT}/prompt_data/eval/`, exports the dataset variables referenced by
-the eval config, and sets `EVAL_FUNCTION_PATH` to Slime's stock
+`${RUN_ROOT}/prompt_data/eval/`, resolves those paths into the selected eval
+config, and sets `EVAL_FUNCTION_PATH` to Slime's stock
 `slime.rollout.sglang_rollout.generate_rollout` so full-async training still
 uses Slime's native eval loop.
+
+The selected eval config is the only owner of eval datasets and sampling
+semantics. Do not use legacy `EVAL_PROMPT_DATA`, `EVAL_MAX_RESPONSE_LEN`,
+`EVAL_TEMPERATURE`, `EVAL_TOP_P`, or `EVAL_TOP_K` overrides; agent-env launchers
+reject them instead of silently changing the protocol.
 
 Use `EVAL_SPLITS` and `EVAL_PROMPT_NUM_TASKS` only as explicit experiment
 overrides. Formal comparisons must evaluate the full intended split and record
@@ -88,8 +93,7 @@ the generated prompt-data files with the run artifacts.
 For checkpoint sweeps, use the same launcher in eval-sweep mode rather than
 writing a wrapper. Env-specific eval datasets, custom generate functions, and
 sampling defaults live in `examples/agent_env/<env>/eval_config.yaml`; the
-sweep launcher only fans out checkpoints to nodes and applies explicit
-command-line overrides.
+sweep launcher only fans out checkpoints to nodes and selects eval splits.
 
 Example:
 

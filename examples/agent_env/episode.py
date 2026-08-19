@@ -219,7 +219,6 @@ class PolicySession:
     sample: Sample
     sampling_params: dict[str, Any]
     tok: Any
-    policy_max_attempts: int = 1
     lock: threading.Lock = field(default_factory=threading.Lock)
     ledger: AgentTokenLedger | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -361,7 +360,6 @@ class PolicySession:
             self.sample,
             self.ledger.tokens,
             params,
-            max_attempts=self.policy_max_attempts,
         )
         if response_text and not token_ids:
             if bool(arg(self.args, "allow_policy_retokenize_fallback", False)):
@@ -550,8 +548,6 @@ class PolicyGateway:
         spec: AgentEnvSpec,
         sample: Sample,
         sampling_params: dict[str, Any],
-        *,
-        policy_max_attempts: int = 1,
     ) -> PolicySession:
         self.start()
         session_id = f"policy-{uuid.uuid4().hex[:16]}"
@@ -563,7 +559,6 @@ class PolicyGateway:
             sample=sample,
             sampling_params=copy.deepcopy(sampling_params),
             tok=tokenizer(args),
-            policy_max_attempts=max(1, int(policy_max_attempts)),
         )
         with self.lock:
             self.sessions[session_id] = session
@@ -617,14 +612,13 @@ def _requested_task_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-async def generate_server_episode_rollout(
+async def _generate_server_episode_rollout_once(
     args: Any,
     sample: Sample,
     sampling_params: dict,
     *,
     spec: AgentEnvSpec,
     episode_payload: dict[str, Any] | None = None,
-    evaluation: bool = False,
 ) -> Sample:
     assert not arg(args, "partial_rollout", False), f"{spec.name} rollout does not support partial rollout yet."
 
@@ -633,13 +627,7 @@ async def generate_server_episode_rollout(
         sample.status = Sample.Status.PENDING
     sample.remove_sample = False
     gateway = get_policy_gateway()
-    session = gateway.create_session(
-        args,
-        spec,
-        sample,
-        sampling_params,
-        policy_max_attempts=3 if evaluation else 1,
-    )
+    session = gateway.create_session(args, spec, sample, sampling_params)
     final_score = 0.0
     success = False
     split = sample_metadata.get("split") or cfg_path(args, "task.split", spec.default_split)
@@ -786,3 +774,52 @@ async def generate_server_episode_rollout(
         return sample
     finally:
         gateway.pop_session(session.session_id)
+
+
+async def generate_server_episode_rollout(
+    args: Any,
+    sample: Sample,
+    sampling_params: dict,
+    *,
+    spec: AgentEnvSpec,
+    episode_payload: dict[str, Any] | None = None,
+    evaluation: bool = False,
+) -> Sample:
+    """Run one episode, retrying only a complete failed eval task."""
+
+    template = copy.deepcopy(sample)
+    max_attempts = 3 if evaluation else 1
+    retry_errors: list[str] = []
+    result = sample
+    for attempt in range(max_attempts):
+        candidate = sample if attempt == 0 else copy.deepcopy(template)
+        result = await _generate_server_episode_rollout_once(
+            args,
+            candidate,
+            sampling_params,
+            spec=spec,
+            episode_payload=episode_payload,
+        )
+        result_metadata = metadata(result)
+        retryable = (
+            bool(result.remove_sample)
+            and result_metadata.get("discard_reason") == "server_episode_failure"
+        )
+        if not evaluation or not retryable:
+            break
+        retry_errors.append(str(result_metadata.get("error") or "server_episode_failure"))
+        if attempt + 1 < max_attempts:
+            logger.warning(
+                "%s native eval episode failed; retrying whole task attempt=%d/%d",
+                spec.name,
+                attempt + 2,
+                max_attempts,
+            )
+
+    if evaluation:
+        result_metadata = metadata(result)
+        result_metadata["eval_episode_attempts"] = attempt + 1
+        result_metadata["eval_episode_retry_count"] = attempt
+        if retry_errors:
+            result_metadata["eval_episode_retry_errors"] = retry_errors
+    return result

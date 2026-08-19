@@ -389,6 +389,7 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
     user_model_usage_totals: list[dict[str, Any]] = []
     truncated_reasons: dict[str, int] = {}
     discard_reasons: dict[str, int] = {}
+    eval_episode_retry_counts: list[int] = []
 
     for sample in real_samples:
         metadata = sample.metadata or {}
@@ -419,6 +420,8 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         discard_reason = metadata.get("discard_reason") if bool(getattr(sample, "remove_sample", False)) else None
         if discard_reason:
             discard_reasons[str(discard_reason)] = discard_reasons.get(str(discard_reason), 0) + 1
+        if "eval_episode_retry_count" in metadata:
+            eval_episode_retry_counts.append(int(metadata["eval_episode_retry_count"] or 0))
 
     total_turns = sum(turn_counts)
     total_format_errors = sum(format_error_counts)
@@ -435,6 +438,11 @@ def environment_metrics(samples: list[Any], *, prefix: str) -> dict[str, float]:
         metrics[f"{prefix}/env_score_mean"] = sum(env_scores) / len(env_scores)
     if env_rewards:
         metrics[f"{prefix}/env_reward_mean"] = sum(env_rewards) / len(env_rewards)
+    if eval_episode_retry_counts:
+        metrics[f"{prefix}/eval_episode_retry_rate"] = sum(
+            int(count > 0) for count in eval_episode_retry_counts
+        ) / len(eval_episode_retry_counts)
+        metrics[f"{prefix}/eval_episode_retry_count"] = float(sum(eval_episode_retry_counts))
     if user_model_call_counts:
         total_calls = sum(user_model_call_counts)
         metrics[f"{prefix}/usersim_call_count_total"] = total_calls
