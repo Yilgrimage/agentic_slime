@@ -367,15 +367,6 @@ eval_requested() {
   [ -n "${EVAL_INTERVAL:-}" ] || [ -n "${EVAL_CONFIG:-}" ] || [ -n "${EVAL_PROMPT_DATA:-}" ]
 }
 
-upper_name() {
-  printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_' | tr -c 'A-Z0-9_' '_'
-}
-
-eval_prompt_env_var() {
-  local split="$1"
-  printf '%s_%s_PROMPT_DATA\n' "$(upper_name "${ENV_NAME}")" "$(upper_name "${split}")"
-}
-
 default_eval_splits() {
   case "${ENV_NAME}" in
     alfworld)
@@ -442,7 +433,9 @@ prepare_native_eval() {
     eval_config_args=(--config "${eval_config}")
   fi
 
-  local split path var count count_args
+  local split path count count_args
+  local resolved_eval_config="${eval_dir}/eval_config.resolved.yaml"
+  local resolved_datasets=()
   for split in ${eval_splits}; do
     path="${eval_dir}/${split}.jsonl"
     count="${EVAL_PROMPT_NUM_TASKS:-}"
@@ -464,11 +457,15 @@ prepare_native_eval() {
       "${count_args[@]}" \
       "${EVAL_PROMPT_DATA_EXTRA_ARGS_ARRAY[@]}"
     validate_prompt_data "${path}"
-    var="$(eval_prompt_env_var "${split}")"
-    export "${var}=${path}"
-    export "$(upper_name "${ENV_NAME}")_EVAL_PROMPT_DATA=${path}"
-    export "$(upper_name "${ENV_NAME}")_EVAL_DATASET_NAME=${ENV_NAME}-${split}"
+    resolved_datasets+=(--dataset "${split}=${path}")
   done
+
+  "${SLIME_PYTHON}" "${REPO_DIR}/examples/agent_env/scripts/render_eval_config.py" \
+    --template "${EVAL_CONFIG}" \
+    --output "${resolved_eval_config}" \
+    --env-name "${ENV_NAME}" \
+    "${resolved_datasets[@]}"
+  export EVAL_CONFIG="${resolved_eval_config}"
 }
 
 export TMPDIR=${TMPDIR:-${LOCAL_RUNTIME_DIR}/tmp}
