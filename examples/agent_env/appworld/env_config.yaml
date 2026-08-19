@@ -40,6 +40,8 @@ appworld:
   only_tagged: null
   num_tasks: null
   max_interactions: 50
+  max_api_calls_per_interaction: 100
+  execution_timeout_s: 30
   raise_on_failure: false
   experiment_prefix: slime_agent_env
   include_api_overview: true

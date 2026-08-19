@@ -77,6 +77,10 @@ def _environment_config(raw: dict) -> dict:
         "only_tagged": _deep_get(raw, "appworld", "only_tagged", None),
         "num_tasks": _deep_get(raw, "appworld", "num_tasks", None),
         "max_interactions": int(_deep_get(raw, "appworld", "max_interactions", 20)),
+        "max_api_calls_per_interaction": int(
+            _deep_get(raw, "appworld", "max_api_calls_per_interaction", 1000)
+        ),
+        "execution_timeout_s": int(_deep_get(raw, "appworld", "execution_timeout_s", 100)),
         "raise_on_failure": bool(_deep_get(raw, "appworld", "raise_on_failure", False)),
         "experiment_prefix": str(_deep_get(raw, "appworld", "experiment_prefix", "slime_agent_env")),
         "include_api_overview": bool(_deep_get(raw, "appworld", "include_api_overview", True)),
@@ -364,6 +368,8 @@ class AppWorldBackend:
             self.task_id,
             experiment_name=self.experiment_name,
             max_interactions=int(self.config.get("max_interactions", 20)),
+            max_api_calls_per_interaction=int(self.config.get("max_api_calls_per_interaction", 1000)),
+            timeout_seconds=int(self.config.get("execution_timeout_s", 100)),
             raise_on_failure=bool(self.config.get("raise_on_failure", False)),
         )
         self.split = split
