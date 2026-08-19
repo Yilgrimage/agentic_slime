@@ -6,7 +6,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import reward_cfg_path
 from .extractors import bool_value, read_secret, runtime_env, truncate
@@ -115,6 +115,7 @@ async def call_json_judge(
     rate_limit_backoff_s: float | None = None,
     retry_backoff_s: float | None = None,
     endpoint_pool_path: str | None = None,
+    payload_validator: Callable[[Any], None] | None = None,
 ) -> Any:
     payload, _metadata = await call_json_judge_with_metadata(
         args,
@@ -133,6 +134,7 @@ async def call_json_judge(
         rate_limit_backoff_s=rate_limit_backoff_s,
         retry_backoff_s=retry_backoff_s,
         endpoint_pool_path=endpoint_pool_path,
+        payload_validator=payload_validator,
     )
     return payload
 
@@ -155,6 +157,7 @@ async def call_json_judge_with_metadata(
     rate_limit_backoff_s: float | None = None,
     retry_backoff_s: float | None = None,
     endpoint_pool_path: str | None = None,
+    payload_validator: Callable[[Any], None] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     import aiohttp
 
@@ -248,6 +251,8 @@ async def call_json_judge_with_metadata(
                 payload = extract_json_payload(content)
             except Exception as exc:
                 raise ValueError(f"judge returned non-JSON content: {truncate(content, 800)}") from exc
+            if payload_validator is not None:
+                payload_validator(payload)
             usage = data.get("usage") if isinstance(data, dict) else None
             usage = usage if isinstance(usage, dict) else {}
             metadata: dict[str, Any] = {

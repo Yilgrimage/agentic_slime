@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -34,6 +35,8 @@ from .extractors import (
 )
 from .llm_client import call_json_judge_with_metadata, judge_mode
 from .types import RewardResult
+
+logger = logging.getLogger(__name__)
 
 RUBRIC_SCHEMA_VERSION = "ropd.rubric.v1"
 BATCH_VERIFIER_SCHEMA_VERSION = "ropd.batch_verifier.v2"
@@ -2959,6 +2962,13 @@ async def _score_bucket(
         if item["source"] == "student":
             record["trajectory_id"] = _student_trajectory_id(item)
         answer_item_records.append(record)
+
+    def validate_payload(payload: Any) -> None:
+        if compact_mode:
+            _parse_ca_compact_batch_masks(args, payload, answer_items=answer_items)
+        else:
+            _parse_batch_scores(args, payload, rubric=rubric, expected=len(answer_items))
+
     try:
         payload, judge_call = await call_json_judge_with_metadata(
             args,
@@ -2968,6 +2978,7 @@ async def _score_bucket(
             endpoint_pool_path=_role_endpoint_pool_path(args, "judge"),
             **_role_request_options(args, "judge", default_max_tokens=32768),
             **_role_endpoint(args, "judge"),
+            payload_validator=validate_payload,
         )
         judge_call = {
             **judge_call,
@@ -2980,6 +2991,13 @@ async def _score_bucket(
             scored_items = _parse_batch_scores(args, payload, rubric=rubric, expected=len(answer_items))
     except Exception as exc:
         details = {"stage": "verifier", "type": type(exc).__name__, "message": str(exc)}
+        logger.warning(
+            "ROPD verifier exhausted retries bucket=%s sample_index=%s error_type=%s error=%s",
+            bucket_key,
+            samples[0].index,
+            type(exc).__name__,
+            str(exc),
+        )
         _dump_artifact(
             args,
             "verifier",
