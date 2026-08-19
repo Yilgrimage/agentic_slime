@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_WANDB_REWARD_METRICS_DEFINED = False
+_WANDB_DEFINED_STEP_METRICS: set[tuple[int, str, str, str]] = set()
+_WANDB_METRIC_DEFINITION_WARNING_EMITTED = False
 _GENERATED_ENV_PREFIX = "agent_env/generated/env/"
 _GENERATED_REWARD_PREFIX = "agent_env/generated/reward/"
 
@@ -524,12 +526,46 @@ def _pop_generated_scope_metrics(metrics: dict[str, Any]) -> tuple[dict[str, flo
     return generated_env, generated_reward
 
 
+def _define_wandb_step_metrics(args: Any, metric_names: Iterable[str], *, step_metric: str) -> None:
+    """Bind every emitted metric to its explicit train/eval clock.
+
+    W&B prefix globs such as ``rollout/*`` do not cover arbitrary nested or
+    environment-specific names. Register exact keys here so resumed runs use
+    the restored rollout/eval step instead of W&B's per-process ``_step``.
+    """
+
+    global _WANDB_METRIC_DEFINITION_WARNING_EMITTED
+    if not bool(getattr(args, "use_wandb", False)):
+        return
+    try:
+        import wandb
+
+        run = wandb.run
+        if run is None:
+            return
+        run_key = (id(run), str(getattr(run, "id", "")))
+        definitions = [(step_metric, None)]
+        definitions.extend((name, step_metric) for name in sorted(set(metric_names)) if name != step_metric)
+        for metric_name, metric_step in definitions:
+            cache_key = (*run_key, metric_name, step_metric)
+            if cache_key in _WANDB_DEFINED_STEP_METRICS:
+                continue
+            if metric_step is None:
+                wandb.define_metric(metric_name)
+            else:
+                wandb.define_metric(metric_name, step_metric=metric_step)
+            _WANDB_DEFINED_STEP_METRICS.add(cache_key)
+    except Exception:
+        if not _WANDB_METRIC_DEFINITION_WARNING_EMITTED:
+            logger.warning("Failed to bind W&B metrics to %s", step_metric, exc_info=True)
+            _WANDB_METRIC_DEFINITION_WARNING_EMITTED = True
+
+
 def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:
     from slime.ray.rollout import compute_metrics_from_samples, compute_perf_metrics_from_samples
     from slime.utils import logging_utils
     from slime.utils.metric_utils import compute_rollout_step
 
-    _define_reward_wandb_metrics(args)
     log_dict = {**(rollout_extra_metrics or {})}
     generated_env_metrics, generated_reward_metrics = _pop_generated_scope_metrics(log_dict)
 
@@ -554,6 +590,7 @@ def log_rollout_data_for_env(prefix: str, rollout_id, args, samples, rollout_ext
     log_dict |= {f"rollout/{k}": v for k, v in compute_metrics_from_samples(args, samples).items()}
     log_dict |= {f"perf/{k}": v for k, v in compute_perf_metrics_from_samples(args, samples, rollout_time).items()}
     log_dict["rollout/step"] = compute_rollout_step(args, rollout_id)
+    _define_wandb_step_metrics(args, log_dict, step_metric="rollout/step")
     logging_utils.log(args, log_dict, step_key="rollout/step")
     return True
 
@@ -620,19 +657,6 @@ def log_eval_rollout_data_for_env(prefix: str, rollout_id, args, data, extra_met
 
     step = compute_rollout_step(args, rollout_id)
     log_dict["eval/step"] = step
+    _define_wandb_step_metrics(args, log_dict, step_metric="eval/step")
     logging_utils.log(args, log_dict, step_key="eval/step")
     return True
-
-
-def _define_reward_wandb_metrics(args: Any) -> None:
-    global _WANDB_REWARD_METRICS_DEFINED
-    if _WANDB_REWARD_METRICS_DEFINED or not bool(getattr(args, "use_wandb", False)):
-        return
-    try:
-        import wandb
-
-        if wandb.run is not None:
-            wandb.define_metric("reward/*", step_metric="rollout/step")
-            _WANDB_REWARD_METRICS_DEFINED = True
-    except Exception:
-        return
