@@ -135,7 +135,7 @@ Usage:
 
 The public entrypoint resolves profiles once; internal roles consume resolved_launch.env.
 For --eval-sweep, set EVAL_SOURCE_RUN and EVAL_CKPT_STEPS. Optionally set
-EVAL_NODE_INDICES, EVAL_SPLITS, and EVAL_ROOT.
+EVAL_NODE_INDICES, EVAL_SPLITS, EVAL_ROOT, and EVAL_SGLANG_SERVER_CONCURRENCY.
 EOF
 }
 
@@ -1318,6 +1318,9 @@ main_eval_sweep() {
       "NUM_GPUS=${EVAL_NUM_GPUS:-8}"
       "TP_SIZE=${EVAL_TP_SIZE:-8}"
       "CP_SIZE=${EVAL_CP_SIZE:-1}"
+      # Native eval uses eight TP1 rollout engines by default. Keep their
+      # aggregate episode concurrency below the 48-worker AppWorld pool.
+      "SGLANG_SERVER_CONCURRENCY=${EVAL_SGLANG_SERVER_CONCURRENCY:-5}"
       "EVAL_INTERVAL=${EVAL_INTERVAL:-1}"
       "ENABLE_WANDB=${EVAL_ENABLE_WANDB:-0}"
       "USE_WANDB=${EVAL_USE_WANDB:-${EVAL_ENABLE_WANDB:-0}}"
