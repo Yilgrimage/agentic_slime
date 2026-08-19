@@ -1460,73 +1460,31 @@ async def call_policy(
     from slime.rollout.sglang_rollout import get_model_url
 
     url = get_model_url(args, "actor", "/generate")
-    abort_url = get_model_url(args, "actor", "/abort_request")
-    rid = uuid.uuid4().hex
     headers = None
     if sample.session_id and getattr(args, "router_policy", None) == "consistent_hashing":
         headers = {"X-SMG-Routing-Key": sample.session_id}
-    payload = {
-        "rid": rid,
-        "input_ids": input_ids,
-        "sampling_params": sampling_params,
-        "return_logprob": True,
-    }
+    payload = {"input_ids": input_ids, "sampling_params": sampling_params, "return_logprob": True}
     timeout_s = float(cfg_path(args, "timeouts.policy_s", 60.0))
-    # Return control to the env-side HTTP client before its matching deadline.
-    # This guard leaves enough time to abort the SGLang request and serialize
-    # the gateway error instead of writing to an already-closed socket.
+    # Return an HTTP error before the env-side client reaches the same deadline.
+    # Closing /generate is the cancellation signal; SGLang must own request ids,
+    # abort handling, and tokenizer-state cleanup within that request lifecycle.
     cleanup_margin_s = min(10.0, max(1.0, timeout_s * 0.1))
-    abort_timeout_s = min(5.0, max(0.5, cleanup_margin_s * 0.75))
     request_timeout_s = max(0.1, timeout_s - cleanup_margin_s)
-
-    async def abort_request(client: Any, reason: str) -> None:
-        try:
-            response = await client.post(abort_url, json={"rid": rid}, timeout=abort_timeout_s)
-            response.raise_for_status()
-            logger.warning(
-                "%s policy request aborted rid=%s session_id=%s reason=%s",
-                spec.name,
-                rid,
-                sample.session_id,
-                reason,
-            )
-        except Exception as abort_exc:
-            logger.warning(
-                "%s policy abort failed rid=%s session_id=%s reason=%s error=%r",
-                spec.name,
-                rid,
-                sample.session_id,
-                reason,
-                abort_exc,
-            )
 
     async def direct_post_model() -> dict:
         import httpx
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(request_timeout_s), trust_env=False) as client:
-            try:
-                response = await client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-                return response.json()
-            except asyncio.CancelledError:
-                await asyncio.shield(abort_request(client, "cancelled"))
-                raise
-            except httpx.TimeoutException:
-                await abort_request(client, "timeout")
-                raise
-            except httpx.RequestError:
-                await abort_request(client, "transport_error")
-                raise
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            return response.json()
 
     # The env-server policy gateway serves requests from HTTP worker threads.
     # Using Slime's distributed post helper there can wait inside Ray without
     # actually issuing SGLang /generate requests. Direct HTTP keeps the gateway
     # independent from Ray's internal async dispatch while still targeting the
     # same SGLang router URL.
-    output = await asyncio.wait_for(
-        direct_post_model(),
-        timeout=request_timeout_s,
-    )
+    output = await direct_post_model()
     text = output.get("text", "")
     meta = output.get("meta_info", {})
     token_logprobs = meta.get("output_token_logprobs") or []

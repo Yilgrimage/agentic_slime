@@ -28,8 +28,9 @@ def _spec() -> AgentEnvSpec:
     )
 
 
-def test_policy_timeout_aborts_the_matching_sglang_request() -> None:
-    calls: list[tuple[str, dict]] = []
+def test_policy_timeout_leaves_request_abort_to_sglang() -> None:
+    calls: list[tuple[str, dict, float | None]] = []
+    client_timeouts: list[float] = []
 
     class FakeResponse:
         def raise_for_status(self) -> None:
@@ -37,7 +38,7 @@ def test_policy_timeout_aborts_the_matching_sglang_request() -> None:
 
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            client_timeouts.append(float(kwargs["timeout"].read))
 
         async def __aenter__(self):
             return self
@@ -46,10 +47,8 @@ def test_policy_timeout_aborts_the_matching_sglang_request() -> None:
             return None
 
         async def post(self, url, *, json, headers=None, timeout=None):
-            calls.append((url, json))
-            if url.endswith("/generate"):
-                raise httpx.ReadTimeout("policy timed out", request=httpx.Request("POST", url))
-            return FakeResponse()
+            calls.append((url, json, timeout))
+            raise httpx.ReadTimeout("policy timed out", request=httpx.Request("POST", url))
 
     args = Namespace(timeouts={"policy_s": 30}, router_policy="cache_aware")
     sample = Sample(session_id="session-1")
@@ -64,9 +63,10 @@ def test_policy_timeout_aborts_the_matching_sglang_request() -> None:
     ):
         asyncio.run(call_policy(args, _spec(), sample, [1, 2], {"max_new_tokens": 4}))
 
-    assert calls[0][0].endswith("/generate")
-    assert calls[0][1]["rid"]
-    assert calls[1] == ("http://router:30000/abort_request", {"rid": calls[0][1]["rid"]})
+    assert len(calls) == 1
+    assert calls[0][0] == "http://router:30000/generate"
+    assert "rid" not in calls[0][1]
+    assert client_timeouts == [27.0]
 
 
 def test_recoverable_episode_failure_releases_worker_without_marking_it_dead() -> None:
