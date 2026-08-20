@@ -781,6 +781,50 @@ def test_tasa_debug_dump_exposes_state_value_and_segment_evidence(tmp_path, monk
         assert key in segment
 
 
+def test_credit_dump_prefers_trainable_student_over_luffy_teacher(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_ENV_CREDIT_DUMP_N", "1")
+    monkeypatch.setenv("AGENT_ENV_CREDIT_DUMP_TOTAL_N", "100")
+    monkeypatch.setenv("AGENT_ENV_CREDIT_DUMP_DIR", str(tmp_path))
+    args = Namespace(
+        n_samples_per_prompt=3,
+        reward={
+            "outcome": 1.0,
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_value_gae",
+                "tasa_min_peer_support": 1,
+                "tasa_local_normalization": "none",
+                "tasa_use_teacher_prior": True,
+                "tasa_outcome_scale": 1.0,
+            },
+        },
+    )
+    teacher = _tasa_sample(-1, changes=[])
+    teacher.rollout_id = 100
+    teacher.loss_mask = [0] * teacher.response_length
+    teacher.metadata["off_policy_sample"] = True
+    teacher.metadata["off_policy_loss_mask"] = [1] * teacher.response_length
+    students = [
+        _tasa_sample(0, changes=[{"step": 1, "set": ["M1"], "unset": []}]),
+        _tasa_sample(1, changes=[]),
+        _tasa_sample(2, changes=[]),
+    ]
+    for sample in students:
+        sample.rollout_id = 100
+
+    credit_assignment.attach_process_advantages(
+        args,
+        [teacher, *students],
+        scalar_rewards=[1.0, 1.0, 0.0, 0.0],
+    )
+
+    dump_file = next(tmp_path.glob("credit_assignment_pid*.jsonl"))
+    payloads = [json.loads(line) for line in dump_file.read_text().splitlines()]
+    assert len(payloads) == 1
+    assert payloads[0]["is_student_train_sample"] is True
+    assert payloads[0]["segments"]
+
+
 def test_tasa_train_token_coverage_excludes_environment_tokens():
     args = Namespace(
         n_samples_per_prompt=3,
