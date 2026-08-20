@@ -433,9 +433,12 @@ TASA_STATE_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory semanti
 # Milestone schema
 - 生成 3 到 8 个 milestone，id 严格使用 `M1`, `M2`, ...。
 - `predicate` 用一句简洁、可观察、可跨轨迹复用的状态事实表达。
+- milestone 集合必须覆盖任务成功所必需的全部子目标；多数据源、多个目标对象或多个约束不能因 reference 路径较长而省略。
+- 对文件、消息、订单等产物，milestone 必须包含任务要求的关键内容/目标条件；仅“文件已创建”“接口已调用”不是有意义的高 progress 状态。
 - `requires` 字段必须显式出现；没有依赖时写 `[]`。
 - `progress` 是 reference 路径中的正整数粗粒度顺序，不是成功概率。
 - 高阶 milestone 的 `requires` 必须引用更低 progress 的 milestone。
+- `requires` 表示逻辑成立条件，而不只是时间顺序。若某个高 progress 修改必须依赖先前选对对象、收集完整数据或验证内容，则必须显式依赖这些 milestone；只有真正独立的状态才可写 `[]`。
 - 每个 milestone 都必须在至少一条 reference trajectory 中由可见执行证据建立；student 中反复出现但 reference 未建立的失败模式不能进入 schema。
 
 [Question]

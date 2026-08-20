@@ -1330,9 +1330,13 @@ def _tasa_state_prior(
 ) -> float:
     root = tasa_prior_root(args)
     success = tasa_prior_success(args)
-    max_progress = max(progress_by_id.values()) if progress_by_id else 0.0
-    active_progress = max((progress_by_id[item_id] for item_id in state_ids if item_id in progress_by_id), default=0.0)
-    fraction = 0.0 if max_progress <= 0 else max(0.0, min(1.0, active_progress / max_progress))
+    total_progress = sum(max(0.0, value) for value in progress_by_id.values())
+    active_progress = sum(
+        max(0.0, progress_by_id[item_id])
+        for item_id in state_ids
+        if item_id in progress_by_id
+    )
+    fraction = 0.0 if total_progress <= 0 else max(0.0, min(1.0, active_progress / total_progress))
     return max(0.0, min(1.0, root + (success - root) * fraction))
 
 

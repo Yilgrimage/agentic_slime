@@ -268,6 +268,8 @@ def test_tasa_prompt_uses_only_milestone_centric_schema():
     assert "ropd.tasa_state_batch_verifier.v1" in prompt
     assert "transitions_by_trajectory" in prompt
     assert '"requires": []' in prompt
+    assert "milestone 集合必须覆盖任务成功所必需的全部子目标" in prompt
+    assert "仅“文件已创建”“接口已调用”不是有意义的高 progress 状态" in prompt
     assert '"behaviors"' not in prompt
     assert "bad_flags" not in prompt
 
@@ -608,6 +610,31 @@ def test_tasa_prerequisite_enforcement_filters_invalid_state_transition():
     assert strict_records[0].prerequisites_satisfied is False
     assert loose_records[0].next_state_key == "M3"
     assert loose_records[0].prerequisites_satisfied is True
+
+
+def test_tasa_teacher_prior_aggregates_active_progress_weights():
+    args = Namespace(
+        reward={
+            "credit_assignment": {
+                "tasa_prior_root": 0.1,
+                "tasa_prior_success": 0.9,
+            }
+        }
+    )
+    progress = {"M1": 1.0, "M2": 2.0, "M3": 3.0, "M4": 4.0}
+
+    assert credit_assignment._tasa_state_prior(args, state_ids=(), progress_by_id=progress) == 0.1
+    assert abs(
+        credit_assignment._tasa_state_prior(args, state_ids=("M3",), progress_by_id=progress) - 0.34
+    ) < 1e-9
+    assert abs(
+        credit_assignment._tasa_state_prior(
+            args,
+            state_ids=("M1", "M2", "M3", "M4"),
+            progress_by_id=progress,
+        )
+        - 0.9
+    ) < 1e-9
 
 
 def test_tasa_segment_local_gae_stops_at_each_boundary():
