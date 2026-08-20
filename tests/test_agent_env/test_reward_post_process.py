@@ -169,6 +169,53 @@ def test_credit_assignment_process_signal_keeps_zero_reward_group():
     assert output.keep
 
 
+def test_tasa_no_teacher_does_not_rescue_zero_variance_mc_group():
+    def tasa_sample() -> Sample:
+        return Sample(
+            group_index=0,
+            reward=0.0,
+            response_length=2,
+            loss_mask=[1, 1],
+            status=Sample.Status.COMPLETED,
+            metadata={
+                "token_segments": [
+                    {"kind": "assistant", "turn": 0, "token_count": 2, "loss_mask_sum": 2, "text": "a1"}
+                ],
+                "rm_reward": {
+                    "score": 0.0,
+                    "raw": {
+                        "tasa_state_schema": {
+                            "milestones": [
+                                {"id": "M1", "predicate": "state", "requires": [], "progress": 1.0}
+                            ]
+                        },
+                        "tasa_state_changes": [{"step": 1, "set": ["M1"], "unset": []}],
+                    },
+                },
+            },
+        )
+
+    base_credit = {
+        "enable": True,
+        "advantage_mode": "teacher_anchored_value_gae",
+        "tasa_min_peer_support": 1,
+        "step_index_base": 1,
+    }
+    no_teacher_args = Namespace(
+        n_samples_per_prompt=2,
+        reward_key=None,
+        reward={"credit_assignment": {**base_credit, "tasa_use_teacher_prior": False}},
+    )
+    full_args = Namespace(
+        n_samples_per_prompt=2,
+        reward_key=None,
+        reward={"credit_assignment": {**base_credit, "tasa_use_teacher_prior": True}},
+    )
+
+    assert not check_reward_nonzero_std(no_teacher_args, [tasa_sample(), tasa_sample()]).keep
+    assert check_reward_nonzero_std(full_args, [tasa_sample(), tasa_sample()]).keep
+
+
 def test_segment_credit_assignment_advantage_adds_process_term():
     args = Namespace(
         advantage_estimator="grpo",
@@ -440,7 +487,6 @@ def test_credit_assignment_tasa_builds_leave_one_out_state_baselines():
                     "raw": {
                         "tasa_state_schema": {
                             "milestones": [{"id": "M1", "predicate": "state reached", "requires": []}],
-                            "bad_flags": [],
                         },
                         "tasa_state_changes": [{"step": 1, "set": ["M1"], "unset": []}],
                     },

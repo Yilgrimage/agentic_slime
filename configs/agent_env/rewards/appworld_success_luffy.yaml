@@ -15,7 +15,6 @@ luffy:
     - task_id
   teacher_trace_keys:
     - teacher_response
-    - teacher_raw_trace_text
   policy_format: appworld_markdown_code
   insertion_mode: replace_anchor
   teacher_reward_source: constant

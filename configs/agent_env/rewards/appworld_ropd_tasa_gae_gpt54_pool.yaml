@@ -18,7 +18,7 @@ ropd:
   rate_limit_backoff_s: 10
   retry_backoff_s: 1
   response_format: json_object
-  judge_max_tokens: 4096
+  judge_max_tokens: 8192
   answer_mode: trace
   strip_reasoning: true
   strip_tool_call: 512
@@ -28,25 +28,16 @@ ropd:
 
 credit_assignment:
   enable: true
-  advantage_mode: teacher_anchored_state_aggregation
-  beta: 0.2
-  tasa_min_peer_support: 2
-  tasa_local_normalization: group_segment_zscore
+  advantage_mode: teacher_anchored_value_gae
+  tasa_min_peer_support: 4
+  tasa_local_normalization: group_segment_rms
+  tasa_use_teacher_prior: true
+  tasa_enforce_prerequisites: true
+  tasa_prior_kappa: 4.0
+  tasa_lambda: 0.8
+  tasa_prior_root: 0.1
+  tasa_prior_success: 0.9
+  tasa_outcome_scale: 10.0
+  tasa_teacher_weight: 1.0
   clip: 2.0
   step_index_base: 1
-
-luffy:
-  enable: true
-  mode: token_loss
-  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
-  teacher_index_keys:
-    - task_id
-  teacher_trace_keys:
-    - teacher_response
-  policy_format: appworld_markdown_code
-  insertion_mode: replace_anchor
-  teacher_reward_source: constant
-  teacher_reward: 10.0
-  off_policy_loss_coef: 1.0
-  off_policy_reshape: p_div_p_0.1
-  off_policy_reshape_eps: 0.1

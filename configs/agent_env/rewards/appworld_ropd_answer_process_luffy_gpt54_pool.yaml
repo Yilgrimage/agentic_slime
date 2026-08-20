@@ -12,9 +12,7 @@ ropd:
   teacher_index_keys:
     - task_id
   teacher_answer_keys:
-    - teacher_trace
-    - teacher_tool_trace
-    - teacher_full_trace_text
+    - teacher_reward_trace_payload
   allow_online_rubric: true
   concurrency: 8
   rubric_concurrency: 4
@@ -27,8 +25,8 @@ ropd:
   judge_max_tokens: 16384
   answer_mode: trace
   strip_reasoning: true
-  strip_tool_call: 80
-  strip_tool_response: 120
+  strip_tool_call: 512
+  strip_tool_response: true
   strip_assistant_response: true
   strip_system_prompt: true
   answer_weight: 0.5
@@ -43,7 +41,6 @@ luffy:
     - task_id
   teacher_trace_keys:
     - teacher_response
-    - teacher_raw_trace_text
   policy_format: appworld_markdown_code
   insertion_mode: replace_anchor
   teacher_reward_source: constant

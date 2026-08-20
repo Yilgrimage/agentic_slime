@@ -92,6 +92,28 @@ Recommended audit fields:
   identity, product/database hashes for WebShop, raw full trace path, and
   selection metadata such as best-of-N rank.
 
+AppWorld teachers use three non-interchangeable trace views:
+
+- `teacher_raw_trace_text` preserves the complete policy/output session for
+  audit. `teacher_response` is the LUFFY training view materialized from the
+  same structured turns with explicitly format-invalid turns removed.
+- `teacher_trace` / `teacher_tool_trace` is produced by the AppWorld reward
+  adapter from captured API execution evidence and is retained for audit.
+- `teacher_reward_trace_payload` stores the complete structured turns consumed
+  by ROPD/CA/TASA. Runtime compression renders this payload through the same
+  environment adapter used for student turns; pre-rendered text is not a
+  training fallback.
+
+AppWorld reward traces must declare
+`teacher_reward_evidence_schema=appworld.execution_evidence.v1`. Legacy traces
+containing raw Python plus `Execution successful.` are rejected rather than
+silently converted. Teacher materialization also refuses character truncation;
+reduce Judge inputs through the reward trace compression profile instead.
+For rejection sampling, set `--attempts-per-task N`: every attempt remains in
+the raw rollout JSONL, retries stop on strict environment success, and the
+selected teacher row records its one-based attempt number and deterministic
+selection rank.
+
 Validate a WebShop teacher file before launch:
 
 ```bash
@@ -101,6 +123,17 @@ python examples/agent_env/scripts/validate_teacher_jsonl.py \
   --expected-count 1021 \
   --min-coverage 0.9 \
   --min-success-rate 0.9 \
+  --require-success-only
+```
+
+Validate an AppWorld teacher file before launch:
+
+```bash
+python examples/agent_env/scripts/validate_teacher_jsonl.py \
+  --env appworld \
+  --teacher-jsonl "${ROOT_DIR}/data/teacher_traces/processed/appworld_teacher.jsonl" \
+  --expected-count 90 \
+  --min-coverage 1.0 \
   --require-success-only
 ```
 

@@ -107,10 +107,19 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ca_process_value_abs_means: list[float] = []
     ca_process_delta_means: list[float] = []
     ca_process_delta_abs_means: list[float] = []
-    ca_tasa_supported_token_rates: list[float] = []
+    ca_tasa_train_token_coverage_rates: list[float] = []
     ca_tasa_unique_states: list[float] = []
     ca_tasa_state_reuse_rates: list[float] = []
-    ca_tasa_supported_segment_rates: list[float] = []
+    ca_tasa_anchor_eligible_rates: list[float] = []
+    ca_tasa_teacher_prior_available_rates: list[float] = []
+    ca_tasa_mc_reliable_rates: list[float] = []
+    ca_tasa_prerequisite_valid_rates: list[float] = []
+    ca_tasa_semantic_segment_counts: list[float] = []
+    ca_tasa_semantic_segment_length_means: list[float] = []
+    ca_tasa_value_source_teacher_rates: list[float] = []
+    ca_tasa_value_source_mc_rates: list[float] = []
+    ca_tasa_value_source_teacher_mc_rates: list[float] = []
+    ca_tasa_value_source_none_rates: list[float] = []
     ca_tasa_peer_count_means: list[float] = []
     ca_tasa_state_reward_std_means: list[float] = []
     ca_tasa_local_outcome_corrs: list[float] = []
@@ -150,18 +159,30 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             process_delta_abs_mean = _float_or_none(ca.get("process_delta_abs_mean"))
             if process_delta_abs_mean is not None:
                 ca_process_delta_abs_means.append(process_delta_abs_mean)
-            tasa_supported_token_rate = _float_or_none(ca.get("tasa_supported_token_rate"))
-            if tasa_supported_token_rate is not None:
-                ca_tasa_supported_token_rates.append(tasa_supported_token_rate)
+            tasa_train_token_coverage_rate = _float_or_none(ca.get("tasa_train_token_coverage_rate"))
+            if tasa_train_token_coverage_rate is not None:
+                ca_tasa_train_token_coverage_rates.append(tasa_train_token_coverage_rate)
             tasa_unique_states = _float_or_none(ca.get("tasa_group_unique_states"))
             if tasa_unique_states is not None:
                 ca_tasa_unique_states.append(tasa_unique_states)
             tasa_state_reuse_rate = _float_or_none(ca.get("tasa_group_state_reuse_rate"))
             if tasa_state_reuse_rate is not None:
                 ca_tasa_state_reuse_rates.append(tasa_state_reuse_rate)
-            tasa_supported_segment_rate = _float_or_none(ca.get("tasa_group_supported_segment_rate"))
-            if tasa_supported_segment_rate is not None:
-                ca_tasa_supported_segment_rates.append(tasa_supported_segment_rate)
+            for key, target in (
+                ("tasa_group_anchor_eligible_rate", ca_tasa_anchor_eligible_rates),
+                ("tasa_group_teacher_prior_available_rate", ca_tasa_teacher_prior_available_rates),
+                ("tasa_group_mc_reliable_rate", ca_tasa_mc_reliable_rates),
+                ("tasa_group_prerequisite_valid_rate", ca_tasa_prerequisite_valid_rates),
+                ("tasa_group_semantic_segment_count", ca_tasa_semantic_segment_counts),
+                ("tasa_group_semantic_segment_length_mean", ca_tasa_semantic_segment_length_means),
+                ("tasa_group_value_source_teacher_rate", ca_tasa_value_source_teacher_rates),
+                ("tasa_group_value_source_mc_rate", ca_tasa_value_source_mc_rates),
+                ("tasa_group_value_source_teacher_mc_rate", ca_tasa_value_source_teacher_mc_rates),
+                ("tasa_group_value_source_none_rate", ca_tasa_value_source_none_rates),
+            ):
+                value = _float_or_none(ca.get(key))
+                if value is not None:
+                    target.append(value)
             tasa_peer_count_mean = _float_or_none(ca.get("tasa_group_peer_count_mean"))
             if tasa_peer_count_mean is not None:
                 ca_tasa_peer_count_means.append(tasa_peer_count_mean)
@@ -334,14 +355,28 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics["reward/credit_assignment/process_delta_mean"] = _mean(ca_process_delta_means)
     if ca_process_delta_abs_means:
         metrics["reward/credit_assignment/process_delta_abs_mean"] = _mean(ca_process_delta_abs_means)
-    if ca_tasa_supported_token_rates:
-        metrics["reward/credit_assignment/tasa_supported_token_rate_mean"] = _mean(ca_tasa_supported_token_rates)
+    if ca_tasa_train_token_coverage_rates:
+        metrics["reward/credit_assignment/tasa_train_token_coverage_rate_mean"] = _mean(
+            ca_tasa_train_token_coverage_rates
+        )
     if ca_tasa_unique_states:
         metrics["reward/credit_assignment/tasa_unique_states_mean"] = _mean(ca_tasa_unique_states)
     if ca_tasa_state_reuse_rates:
         metrics["reward/credit_assignment/tasa_state_reuse_rate_mean"] = _mean(ca_tasa_state_reuse_rates)
-    if ca_tasa_supported_segment_rates:
-        metrics["reward/credit_assignment/tasa_supported_segment_rate_mean"] = _mean(ca_tasa_supported_segment_rates)
+    for key, values in (
+        ("tasa_anchor_eligible_rate_mean", ca_tasa_anchor_eligible_rates),
+        ("tasa_teacher_prior_available_rate_mean", ca_tasa_teacher_prior_available_rates),
+        ("tasa_mc_reliable_rate_mean", ca_tasa_mc_reliable_rates),
+        ("tasa_prerequisite_valid_rate_mean", ca_tasa_prerequisite_valid_rates),
+        ("tasa_semantic_segment_count_mean", ca_tasa_semantic_segment_counts),
+        ("tasa_semantic_segment_length_mean", ca_tasa_semantic_segment_length_means),
+        ("tasa_value_source_teacher_rate_mean", ca_tasa_value_source_teacher_rates),
+        ("tasa_value_source_mc_rate_mean", ca_tasa_value_source_mc_rates),
+        ("tasa_value_source_teacher_mc_rate_mean", ca_tasa_value_source_teacher_mc_rates),
+        ("tasa_value_source_none_rate_mean", ca_tasa_value_source_none_rates),
+    ):
+        if values:
+            metrics[f"reward/credit_assignment/{key}"] = _mean(values)
     if ca_tasa_peer_count_means:
         metrics["reward/credit_assignment/tasa_peer_count_mean"] = _mean(ca_tasa_peer_count_means)
     if ca_tasa_state_reward_std_means:

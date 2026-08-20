@@ -30,6 +30,14 @@ and `reward_group_reference` also belong under `ropd.*`. Luffy is an
 independent teacher-token loss extension and belongs under top-level
 `luffy.*`; it may be combined with ROPD or with env reward profiles, but ROPD
 must not own Luffy settings.
+TASA modes use one milestone-centric judge schema and do not also request the
+generic good/bad behavior schema. `tasa_use_teacher_prior` controls only the
+teacher value-prior mask: set it to `false` for the pure student-MC ablation.
+`tasa_min_peer_support` controls the independent LOO-MC reliability mask, and
+`tasa_enforce_prerequisites` controls dependency projection. A semantic state
+cuts a segment only when at least one value-source mask is active; when both
+teacher and MC are active their values are combined through `tasa_prior_kappa`.
+TASA-GAE does not mean-center advantages; use RMS/std-only scaling if needed.
 When `ropd.answer_mode=trace`, student inputs must be rendered by the shared
 agent-env trace renderer from structured trajectory fields such as `turns`,
 `messages`, `token_segments`, `reward_trace`, `judge_trace`, or `ropd_trace`.
@@ -38,6 +46,9 @@ fallbacks. Teacher data for trace mode must likewise go through the shared
 teacher trace renderer and expose canonical trace fields, preferably
 `teacher_tool_trace` or `teacher_trace`; raw audit transcripts may be stored as
 `teacher_raw_trace_text` but must not be the primary judge input.
+AppWorld is stricter: reward profiles read only `teacher_reward_trace_payload`,
+which contains captured structured turns and is rendered at runtime through
+the same environment adapter and compression profile as student traces.
 `teacher_full_trace_text` is accepted only after canonicalization through the
 renderer. `teacher_response`/`teacher_answer` should not be used as trace keys.
 ROPD questions must come from explicit task metadata such as

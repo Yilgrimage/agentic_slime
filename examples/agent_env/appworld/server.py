@@ -17,6 +17,11 @@ from examples.agent_env.env_episode import (
     policy_context_limit_reached,
 )
 from examples.agent_env.appworld.patches import install_appworld_patches
+from examples.agent_env.appworld.reward_evidence import (
+    api_arguments,
+    build_api_call_evidence,
+    build_execution_evidence,
+)
 from examples.agent_env.prompting import require_prompt
 from examples.agent_env.server import serve_process_pool
 
@@ -196,6 +201,7 @@ class AppWorldBackend:
         self.final_score = 0.0
         self.done = False
         self.last_info: dict[str, Any] = {}
+        self._active_api_evidence: list[dict[str, Any]] | None = None
 
     def start(self) -> dict[str, Any]:
         install_appworld_patches()
@@ -221,12 +227,49 @@ class AppWorldBackend:
         return list(ids)
 
     def _close_world(self) -> None:
+        self._active_api_evidence = None
         if self.world is not None:
             try:
                 self.world.close()
             except Exception:
                 logger.debug("Failed to close AppWorld task %s", self.task_id, exc_info=True)
         self.world = None
+
+    def _install_api_evidence_capture(self) -> None:
+        assert self.world is not None
+        requester = getattr(self.world, "requester", None)
+        original_request = getattr(requester, "request", None)
+        if not callable(original_request):
+            raise RuntimeError("AppWorld requester.request is unavailable for reward evidence capture")
+
+        def request_with_evidence(*call_args: Any, **call_kwargs: Any) -> Any:
+            active = self._active_api_evidence
+            if active is None:
+                return original_request(*call_args, **call_kwargs)
+            app_name, api_name, arguments = api_arguments(call_args, call_kwargs)
+            try:
+                result = original_request(*call_args, **call_kwargs)
+            except Exception as exc:
+                active.append(
+                    build_api_call_evidence(
+                        app_name=app_name,
+                        api_name=api_name,
+                        arguments=arguments,
+                        error=exc,
+                    )
+                )
+                raise
+            active.append(
+                build_api_call_evidence(
+                    app_name=app_name,
+                    api_name=api_name,
+                    arguments=arguments,
+                    result=result,
+                )
+            )
+            return result
+
+        requester.request = request_with_evidence
 
     def _api_overview(self) -> str:
         if self.world is None or not self.config.get("include_api_overview", True):
@@ -333,16 +376,28 @@ class AppWorldBackend:
 
     def _execute_code(self, code: str) -> tuple[str, dict[str, Any]]:
         assert self.world is not None
+        if self._active_api_evidence is not None:
+            raise RuntimeError("AppWorld API evidence capture is already active")
+        self._active_api_evidence = []
+        error_info: dict[str, Any] = {}
         try:
-            return str(self.world.execute(code)), {}
+            observation = str(self.world.execute(code))
         except Exception as exc:
             logger.info("AppWorld tool execution failed for task %s", self.task_id, exc_info=True)
             observation = self._execution_error_observation(exc)
-            return observation, {
+            error_info = {
                 "tool_error": observation,
                 "execution_error": True,
                 "execution_error_type": type(exc).__name__,
             }
+        finally:
+            api_calls = list(self._active_api_evidence or [])
+            self._active_api_evidence = None
+        error_info["reward_evidence"] = build_execution_evidence(
+            observation=observation,
+            api_calls=api_calls,
+        )
+        return observation, error_info
 
     def reset(self, payload: dict[str, Any]) -> dict[str, Any]:
         split = str(payload.get("split") or self.split)
@@ -372,6 +427,7 @@ class AppWorldBackend:
             timeout_seconds=int(self.config.get("execution_timeout_s", 100)),
             raise_on_failure=bool(self.config.get("raise_on_failure", False)),
         )
+        self._install_api_evidence_capture()
         self.split = split
         self.reset_count += 1
         self.step_count = 0
@@ -421,7 +477,8 @@ class AppWorldBackend:
         answer = arguments.get("answer", arguments.get("message", None))
         status = str(arguments.get("status", "success"))
         if answer is None and not arguments.get("submit", False):
-            return "Finish requested without submitting an answer. Evaluating current AppWorld state.", {}
+            observation = "Finish requested without submitting an answer. Evaluating current AppWorld state."
+            return observation, {"reward_evidence": build_execution_evidence(observation=observation, api_calls=[])}
         code = f"print(apis.supervisor.complete_task(answer={answer!r}, status={status!r}))"
         return self._execute_code(code)
 
@@ -430,6 +487,7 @@ class AppWorldBackend:
         name, arguments, structured = _tool_action(payload.get("action"))
         self.step_count += 1
         info = dict(self.last_info)
+        info.pop("reward_evidence", None)
         info["last_action"] = name
         info["structured_action"] = structured
 
@@ -440,7 +498,7 @@ class AppWorldBackend:
         elif name in {"finish", "final_response", "submit"}:
             observation, error_info = self._finish(arguments)
             info.update(error_info)
-            if not error_info:
+            if not error_info.get("execution_error") and not error_info.get("tool_error"):
                 self.done = True
         elif name in {"format_error", "invalid_format"}:
             observation = self._format_error_observation()
@@ -470,6 +528,9 @@ class AppWorldBackend:
         info = reset.get("info") if isinstance(reset.get("info"), dict) else {}
         messages = self._initial_messages(str(payload.get("prompt") or ""), observation, info)
         metadata: dict[str, Any] = {
+            "env_name": "appworld",
+            "task_id": self.task_id,
+            "task_prompt": str(info.get("task_prompt") or info.get("instruction") or ""),
             "actions": [],
             "action_parse_modes": [],
             "format_checks": [],

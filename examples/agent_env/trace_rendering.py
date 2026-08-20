@@ -8,6 +8,8 @@ from typing import Any
 
 from slime.utils.types import Sample
 
+from examples.agent_env.appworld.reward_evidence import render_execution_evidence
+
 logger = logging.getLogger(__name__)
 _MISSING_REASONING_WARNED: set[str] = set()
 _APPWORLD_OFFICIAL_PROMPT_MARKERS = (
@@ -121,6 +123,7 @@ def render_trace_for_reward(
         rendered = _render_turns(
             turns,
             options=options,
+            env_name=resolved_env_name,
             initial_observation=_initial_observation_from_sample_metadata(
                 sample_metadata,
                 options=options,
@@ -276,6 +279,8 @@ def _render_structured_teacher_trace(
     try:
         return render_trace_for_reward(Sample(prompt="", metadata=payload), options=options, env_name=env_name)
     except ValueError:
+        if _trace_env_name(payload, explicit_env_name=env_name) == "appworld":
+            raise
         return ""
 
 
@@ -413,6 +418,7 @@ def _render_turns(
     turns: list[Any],
     *,
     options: TraceCompressionOptions,
+    env_name: str = "",
     initial_observation: str = "",
 ) -> str:
     lines: list[str] = []
@@ -444,17 +450,27 @@ def _render_turns(
             )
             if response_text:
                 parts.append(f"Assistant response:\n{response_text}")
-        action_text = _action_text(turn.get("action"))
+        env_action_text = _env_specific_tool_call_text(
+            turn,
+            env_name=env_name,
+            max_chars=_truncate_limit(options.strip_tool_call),
+        )
+        action_text = env_action_text if env_action_text is not None else _action_text(turn.get("action"))
         if action_text and _keeps_part(options.strip_tool_call):
-            action_text = compress_trace_text(
-                action_text,
-                options=options,
-                strip_assistant_response=False,
-            )
-            action_text = _compress_part_text(action_text, options.strip_tool_call, label="tool call")
+            if env_action_text is None:
+                action_text = compress_trace_text(
+                    action_text,
+                    options=options,
+                    strip_assistant_response=False,
+                )
+                action_text = _compress_part_text(action_text, options.strip_tool_call, label="tool call")
             if action_text:
                 parts.append(f"Tool call:\n{action_text}")
-        observation = _turn_observation(turn)
+        observation = _env_specific_tool_response_text(
+            turn,
+            env_name=env_name,
+            observation=_turn_observation(turn),
+        )
         if observation and _keeps_part(options.strip_tool_response):
             observation = _compress_part_text(
                 observation,
@@ -466,6 +482,46 @@ def _render_turns(
         if len(parts) > 1:
             lines.append("\n".join(parts))
     return "\n\n".join(lines).strip()
+
+
+def _env_specific_tool_call_text(
+    turn: dict[str, Any],
+    *,
+    env_name: str,
+    max_chars: int | None,
+) -> str | None:
+    if env_name != "appworld":
+        return None
+    action_name = _action_name(turn.get("action"))
+    if action_name not in {"execute", "python", "python_exec", "finish", "final_response", "submit"}:
+        return None
+    env_step = turn.get("env_step")
+    info = env_step.get("info") if isinstance(env_step, dict) else None
+    evidence = info.get("reward_evidence") if isinstance(info, dict) else None
+    if evidence is None:
+        raise ValueError(
+            f"AppWorld structured reward trace step is missing execution evidence for action={action_name!r}"
+        )
+    return render_execution_evidence(
+        evidence,
+        max_chars=max_chars,
+        observation=_turn_observation(turn),
+    )
+
+
+def _env_specific_tool_response_text(
+    turn: dict[str, Any],
+    *,
+    env_name: str,
+    observation: str,
+) -> str:
+    if env_name != "appworld":
+        return observation
+    env_step = turn.get("env_step")
+    info = env_step.get("info") if isinstance(env_step, dict) else None
+    if isinstance(info, dict) and info.get("reward_evidence") is not None:
+        return ""
+    return observation
 
 
 def _initial_observation_from_sample_metadata(
@@ -893,6 +949,12 @@ def _action_text(action: Any) -> str:
         if action.get("type") == "assistant_message":
             return str(action.get("content") or "").strip()
     return _message_text(action).strip()
+
+
+def _action_name(action: Any) -> str:
+    if not isinstance(action, dict):
+        return ""
+    return str(action.get("name") or action.get("tool") or "").strip().lower()
 
 
 def _turn_observation(turn: dict[str, Any]) -> str:

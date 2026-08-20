@@ -43,9 +43,10 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
       state-conditioned local REINFORCE baseline computed from teacher-anchored
       semantic state predicates. Tokens whose abstract state lacks enough peer
       support keep the original GRPO advantage exactly.
-    - ``teacher_anchored_value_gae`` (TASA-GAE): consume a teacher-prior,
-      student-outcome calibrated state value estimate. Supported tokens use the
-      segment GAE advantage directly; unsupported tokens keep vanilla GRPO.
+    - ``teacher_anchored_value_gae`` (TASA-GAE): consume the unified masked
+      teacher-prior/MC value estimate. Every on-policy student token uses the
+      segment-local GAE advantage directly; only LUFFY off-policy teacher tokens
+      retain their teacher loss advantage.
     """
 
     if getattr(args, "advantage_estimator", "grpo") not in {"grpo", "gspo", "cispo"}:
@@ -100,7 +101,13 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
         if not support_masks:
             raise ValueError("TASA-GAE requires response-aligned process_advantage_masks")
         support_tensors = _process_tensors(support_masks, base_returns)
-        advantages = _teacher_anchored_value_gae(base_returns, process_tensors, support_tensors)
+        advantages = _teacher_anchored_value_gae(
+            base_returns,
+            process_tensors,
+            support_tensors,
+            rollout_data.get("loss_masks"),
+            rollout_data.get("off_policy_loss_masks"),
+        )
     else:
         raise ValueError(f"Unsupported credit assignment advantage mode: {mode}")
 
@@ -296,13 +303,25 @@ def _teacher_anchored_value_gae(
     base_returns: list[torch.Tensor],
     local_tensors: list[torch.Tensor],
     support_tensors: list[torch.Tensor],
+    loss_masks: list[torch.Tensor] | None,
+    off_policy_masks: list[torch.Tensor] | None,
 ) -> list[torch.Tensor]:
-    """TASA-GAE: replace supported tokens with the value-layer GAE advantage."""
+    """Use TASA directly for students while preserving LUFFY teacher tokens."""
 
     advantages: list[torch.Tensor] = []
-    for base, local, support in zip(base_returns, local_tensors, support_tensors, strict=True):
-        supported = support > 0
-        advantages.append(torch.where(supported, local, base))
+    for index, (base, local, support) in enumerate(zip(base_returns, local_tensors, support_tensors, strict=True)):
+        teacher = torch.zeros_like(base, dtype=torch.bool)
+        if off_policy_masks and index < len(off_policy_masks) and off_policy_masks[index] is not None:
+            teacher = off_policy_masks[index].to(device=base.device, dtype=torch.bool, non_blocking=True)
+        trainable = torch.ones_like(base, dtype=torch.bool)
+        if loss_masks and index < len(loss_masks) and loss_masks[index] is not None:
+            trainable = loss_masks[index].to(device=base.device, dtype=torch.bool, non_blocking=True)
+        uncovered = trainable & ~teacher & (support <= 0)
+        if bool(uncovered.any().item()):
+            raise ValueError(
+                "TASA-GAE requires every on-policy trainable token to have a segment-local advantage"
+            )
+        advantages.append(torch.where(teacher, base, local))
     return advantages
 
 

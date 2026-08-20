@@ -14,10 +14,14 @@ from typing import Any
 
 from slime.utils.types import Sample
 
+from examples.agent_env.appworld.reward_evidence import (
+    SCHEMA_VERSION,
+    has_execution_evidence,
+    parse_execution_evidence_trace,
+)
 from examples.agent_env.trace_rendering import (
     TraceCompressionOptions,
     render_teacher_trace_for_reward,
-    render_trace_for_reward,
 )
 
 
@@ -97,13 +101,24 @@ def _row_prompt(row: dict[str, Any]) -> Any:
     return row.get("prompt")
 
 
-def _build_payload(args: argparse.Namespace, row_index: int, row: dict[str, Any]) -> dict[str, Any]:
+def _build_payload(
+    args: argparse.Namespace,
+    row_index: int,
+    row: dict[str, Any],
+    *,
+    request_id: str | None = None,
+) -> dict[str, Any]:
     metadata = _metadata(row)
     split = _row_split(row, args.split)
     task_index = _row_task_index(row_index, row)
     task_id = _row_task_id(row)
     task_key = str(metadata.get("task_key") or row.get("task_key") or f"{split}:{task_id or task_index}")
-    request_id = str(metadata.get("request_id") or row.get("request_id") or f"offline-{row_index}-{uuid.uuid4().hex[:12]}")
+    request_id = str(
+        request_id
+        or metadata.get("request_id")
+        or row.get("request_id")
+        or f"offline-{row_index}-{uuid.uuid4().hex[:12]}"
+    )
     sampling_params: dict[str, Any] = {
         "temperature": args.temperature,
         "top_p": args.top_p,
@@ -161,51 +176,119 @@ def _build_payload(args: argparse.Namespace, row_index: int, row: dict[str, Any]
     return payload
 
 
-def _limit_text(value: Any, max_chars: int) -> str:
-    text = str(value or "")
-    if max_chars > 0 and len(text) > max_chars:
-        return text[:max_chars] + "\n...[truncated]"
+def _result_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    metadata = result.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _teacher_turns(record: dict[str, Any], *, training_view: bool) -> list[dict[str, Any]]:
+    turns = _result_metadata(record).get("turns")
+    if not isinstance(turns, list):
+        raise ValueError("teacher rollout is missing metadata.turns for teacher materialization")
+    normalized = [turn for turn in turns if isinstance(turn, dict)]
+    if not training_view:
+        return normalized
+    return [turn for turn in normalized if _teacher_turn_is_valid(turn)]
+
+
+def _teacher_turn_is_valid(turn: dict[str, Any]) -> bool:
+    if turn.get("format_valid") is False:
+        return False
+    action = turn.get("action")
+    action_name = str(action.get("name") or "").strip().lower() if isinstance(action, dict) else ""
+    return action_name not in {"format_error", "invalid_format"}
+
+
+def _teacher_trace_sample(record: dict[str, Any], *, training_view: bool = True) -> Sample:
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    input_row = record.get("input") if isinstance(record.get("input"), dict) else {}
+    input_metadata = _metadata(input_row)
+    result_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    metadata = {**input_metadata, **result_metadata}
+    if training_view:
+        metadata["turns"] = _teacher_turns(record, training_view=True)
+    for key in ("env", "env_name", "environment", "task_id", "task_prompt", "instruction", "query"):
+        value = input_row.get(key)
+        if key not in metadata and value not in (None, "", []):
+            metadata[key] = value
+    return Sample(prompt=_row_prompt(input_row), metadata=metadata)
+
+
+def _teacher_reward_trace_payload(record: dict[str, Any]) -> dict[str, Any]:
+    sample = _teacher_trace_sample(record, training_view=True)
+    sample_metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+    payload: dict[str, Any] = {
+        "env_name": str(sample_metadata.get("env_name") or sample_metadata.get("environment") or "").strip(),
+        "turns": _teacher_turns(record, training_view=True),
+    }
+    for key in ("task_id", "task_prompt", "instruction", "query"):
+        value = sample_metadata.get(key)
+        if value not in (None, "", []):
+            payload[key] = value
+    return payload
+
+
+def _raw_policy_session(record: dict[str, Any], *, training_view: bool) -> str:
+    parts: list[str] = []
+    for turn in _teacher_turns(record, training_view=training_view):
+        assistant = turn.get("assistant_message")
+        content = assistant.get("content") if isinstance(assistant, dict) else ""
+        if content not in (None, "", []):
+            parts.append(str(content).strip())
+        env_step = turn.get("env_step")
+        observation = env_step.get("observation") if isinstance(env_step, dict) else ""
+        if observation not in (None, "", []):
+            parts.append("Output:\n```\n" + str(observation).strip() + "\n```")
+    text = "\n\n".join(part for part in parts if part).strip()
+    if not text:
+        view = "training" if training_view else "raw"
+        raise ValueError(f"teacher rollout produced an empty {view} policy session")
     return text
 
 
-def _teacher_trace_sample(record: dict[str, Any]) -> Sample:
-    result = record.get("result") if isinstance(record.get("result"), dict) else {}
-    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-    return Sample(prompt=_row_prompt(record.get("input") if isinstance(record.get("input"), dict) else {}), metadata=metadata)
-
-
-def _teacher_traces(record: dict[str, Any], max_chars: int) -> tuple[str, str, dict[str, Any]]:
-    sample = _teacher_trace_sample(record)
-    raw_text = render_trace_for_reward(
-        sample,
-        options=TraceCompressionOptions(
-            strip_reasoning=False,
-            strip_tool_response=False,
-            strip_assistant_response=False,
-            strip_system_prompt=False,
-        ),
-    )
+def _teacher_traces(record: dict[str, Any], max_chars: int) -> tuple[str, str, dict[str, Any], str, dict[str, Any]]:
+    reward_payload = _teacher_reward_trace_payload(record)
+    raw_text = _raw_policy_session(record, training_view=False)
+    policy_text = _raw_policy_session(record, training_view=True)
     tool_trace = render_teacher_trace_for_reward(
-        sample,
+        reward_payload,
         options=TraceCompressionOptions(
             strip_reasoning=True,
             strip_tool_response=False,
             strip_assistant_response=True,
             strip_system_prompt=True,
         ),
+        env_name=str(reward_payload.get("env_name") or ""),
         check_reasoning_presence=False,
     )
+    env_name = str(reward_payload.get("env_name") or "").strip().lower()
+    if env_name == "appworld":
+        parse_execution_evidence_trace(tool_trace)
     raw_truncated = max_chars > 0 and len(raw_text) > max_chars
+    policy_truncated = max_chars > 0 and len(policy_text) > max_chars
     tool_truncated = max_chars > 0 and len(tool_trace) > max_chars
+    if raw_truncated or policy_truncated or tool_truncated:
+        raise ValueError(
+            "teacher trace exceeds --teacher-max-chars; refusing to truncate policy or reward evidence "
+            f"(raw={len(raw_text)}, policy={len(policy_text)}, reward={len(tool_trace)}, limit={max_chars})"
+        )
+    all_turns = _teacher_turns(record, training_view=False)
+    valid_turns = _teacher_turns(record, training_view=True)
     metadata = {
         "teacher_raw_trace_chars_original": len(raw_text),
+        "teacher_policy_trace_chars_original": len(policy_text),
         "teacher_tool_trace_chars_original": len(tool_trace),
         "teacher_raw_trace_truncated": bool(raw_truncated),
+        "teacher_policy_trace_truncated": bool(policy_truncated),
         "teacher_tool_trace_truncated": bool(tool_truncated),
+        "teacher_turn_count_original": len(all_turns),
+        "teacher_turn_count": len(valid_turns),
+        "teacher_removed_format_error_turns": len(all_turns) - len(valid_turns),
     }
     if max_chars > 0:
         metadata["teacher_trace_max_chars"] = int(max_chars)
-    return _limit_text(raw_text, max_chars), _limit_text(tool_trace, max_chars), metadata
+    return raw_text, policy_text, reward_payload, tool_trace, metadata
 
 
 def _record_success(record: dict[str, Any]) -> bool:
@@ -219,12 +302,14 @@ def _teacher_row(record: dict[str, Any], max_chars: int) -> dict[str, Any]:
     input_metadata = _metadata(input_row)
     result_info = result.get("info") if isinstance(result.get("info"), dict) else {}
     task_id = str(record.get("task_id") or input_metadata.get("task_id") or "")
-    raw_trace, tool_trace, trace_metadata = _teacher_traces(record, max_chars)
+    raw_trace, policy_trace, reward_payload, tool_trace, trace_metadata = _teacher_traces(record, max_chars)
     row: dict[str, Any] = {
         "task_id": task_id,
         "task_index": record.get("task_index"),
         "split": record.get("split"),
         "teacher_raw_trace_text": raw_trace,
+        "teacher_response": policy_trace,
+        "teacher_reward_trace_payload": reward_payload,
         "teacher_full_trace_text": tool_trace,
         "teacher_trace": tool_trace,
         "teacher_tool_trace": tool_trace,
@@ -235,6 +320,8 @@ def _teacher_row(record: dict[str, Any], max_chars: int) -> dict[str, Any]:
         "teacher_request_id": record.get("request_id"),
         "teacher_elapsed_s": record.get("elapsed_s"),
     }
+    if has_execution_evidence(tool_trace):
+        row["teacher_reward_evidence_schema"] = SCHEMA_VERSION
     row.update(trace_metadata)
     for key in (
         "env",
@@ -277,9 +364,16 @@ def _post_json(url: str, payload: dict[str, Any], timeout_s: float) -> tuple[int
         return int(exc.code), parsed
 
 
-def _run_one(args: argparse.Namespace, row_index: int, row: dict[str, Any]) -> dict[str, Any]:
+def _run_one(
+    args: argparse.Namespace,
+    row_index: int,
+    row: dict[str, Any],
+    *,
+    attempt_index: int = 0,
+    request_id: str | None = None,
+) -> dict[str, Any]:
     url = f"{args.env_server_url.rstrip('/')}/run_episode"
-    payload = _build_payload(args, row_index, row)
+    payload = _build_payload(args, row_index, row, request_id=request_id)
     started = time.time()
     record: dict[str, Any] = {
         "row_index": row_index,
@@ -288,6 +382,7 @@ def _run_one(args: argparse.Namespace, row_index: int, row: dict[str, Any]) -> d
         "split": payload["split"],
         "task_key": payload["task_key"],
         "request_id": payload["request_id"],
+        "attempt_index": int(attempt_index),
         "input": row,
     }
     try:
@@ -310,6 +405,59 @@ def _run_one(args: argparse.Namespace, row_index: int, row: dict[str, Any]) -> d
             }
         )
     return record
+
+
+def _run_attempts(args: argparse.Namespace, row_index: int, row: dict[str, Any]) -> list[dict[str, Any]]:
+    collection_id = f"offline-{row_index}-{uuid.uuid4().hex[:12]}"
+    records: list[dict[str, Any]] = []
+    for attempt_index in range(int(args.attempts_per_task)):
+        record = _run_one(
+            args,
+            row_index,
+            row,
+            attempt_index=attempt_index,
+            request_id=f"{collection_id}-attempt-{attempt_index + 1}",
+        )
+        records.append(record)
+        if _record_success(record):
+            break
+    return records
+
+
+def _teacher_candidate(record: dict[str, Any]) -> bool:
+    if not bool(record.get("ok", False)):
+        return False
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    if not isinstance(metadata.get("turns"), list) or not metadata["turns"]:
+        return False
+    try:
+        return bool(_teacher_turns(record, training_view=True))
+    except ValueError:
+        return False
+
+
+def _teacher_selection_rank(record: dict[str, Any]) -> tuple[bool, float, bool, int, int, float, int]:
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    try:
+        score = float(result.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    return (
+        _record_success(record),
+        score,
+        bool(record.get("ok", False)),
+        -int(metadata.get("format_errors") or 0),
+        -int(metadata.get("turn_count") or 0),
+        -float(record.get("elapsed_s") or 0.0),
+        -int(record.get("attempt_index") or 0),
+    )
+
+
+def _select_teacher_record(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = [record for record in records if _teacher_candidate(record)]
+    return max(candidates, key=_teacher_selection_rank) if candidates else None
 
 
 def _select_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[tuple[int, dict[str, Any]]]:
@@ -350,6 +498,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--only-task-id", action="append", default=[])
     parser.add_argument("--only-task-index", action="append", default=[])
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument(
+        "--attempts-per-task",
+        type=int,
+        default=1,
+        help="Maximum attempts per task; retry only until strict env success. Every attempt is written to output JSONL.",
+    )
     parser.add_argument("--request-timeout-s", type=float, default=900.0)
     parser.add_argument("--policy-timeout-s", type=float, default=120.0)
     parser.add_argument("--max-turns", type=int, default=40)
@@ -373,7 +527,7 @@ def parse_args() -> argparse.Namespace:
         "--teacher-max-chars",
         type=int,
         default=0,
-        help="Per-field teacher text truncation limit. 0 keeps full trace text.",
+        help="Optional per-field validation limit; exceeding it fails instead of truncating. 0 keeps full traces.",
     )
     return parser.parse_args()
 
@@ -382,6 +536,10 @@ def main() -> None:
     args = parse_args()
     if args.concurrency < 1:
         raise ValueError("--concurrency must be positive")
+    if args.attempts_per_task < 1:
+        raise ValueError("--attempts-per-task must be positive")
+    if args.teacher_jsonl and not args.include_trace:
+        raise ValueError("--teacher-jsonl requires --include-trace so teacher materialization is auditable")
     if not args.policy_api_key and args.policy_api_key_path:
         args.policy_api_key = _read_secret(args.policy_api_key_path)
     rows = _select_rows(_jsonl_rows(Path(args.prompt_data)), args)
@@ -395,36 +553,47 @@ def main() -> None:
         teacher_output.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if args.append else "w"
     completed = 0
-    failed = 0
+    attempts = 0
+    failed_attempts = 0
     teachers = 0
     started = time.time()
     with output.open(mode, encoding="utf-8") as f:
         teacher_f = teacher_output.open(mode, encoding="utf-8") if teacher_output is not None else None
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-                future_to_row = {executor.submit(_run_one, args, idx, row): idx for idx, row in rows}
+                future_to_row = {executor.submit(_run_attempts, args, idx, row): idx for idx, row in rows}
                 for future in concurrent.futures.as_completed(future_to_row):
-                    record = future.result()
+                    records = future.result()
                     completed += 1
-                    failed += int(not bool(record.get("ok", False)))
-                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                    f.flush()
-                    if teacher_f is not None and (not args.teacher_success_only or _record_success(record)):
-                        teacher_f.write(json.dumps(_teacher_row(record, args.teacher_max_chars), ensure_ascii=False) + "\n")
-                        teacher_f.flush()
-                        teachers += 1
+                    attempts += len(records)
+                    failed_attempts += sum(int(not bool(record.get("ok", False))) for record in records)
+                    for record in records:
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        f.flush()
+                    selected = _select_teacher_record(records)
+                    if teacher_f is not None and selected is not None:
+                        if not args.teacher_success_only or _record_success(selected):
+                            teacher_row = _teacher_row(selected, args.teacher_max_chars)
+                            teacher_row["teacher_attempt_count"] = len(records)
+                            teacher_row["teacher_selected_attempt"] = int(selected.get("attempt_index") or 0) + 1
+                            teacher_row["teacher_selection_rank"] = list(_teacher_selection_rank(selected))
+                            teacher_f.write(json.dumps(teacher_row, ensure_ascii=False) + "\n")
+                            teacher_f.flush()
+                            teachers += 1
+                    final_record = records[-1]
                     print(
                         "rollout "
-                        f"{completed}/{len(rows)} ok={record.get('ok')} "
-                        f"task={record.get('task_id') or record.get('task_index')} "
-                        f"elapsed={float(record.get('elapsed_s') or 0.0):.1f}s",
+                        f"{completed}/{len(rows)} ok={final_record.get('ok')} "
+                        f"task={final_record.get('task_id') or final_record.get('task_index')} "
+                        f"attempts={len(records)} success={_record_success(final_record)} "
+                        f"elapsed={sum(float(item.get('elapsed_s') or 0.0) for item in records):.1f}s",
                         flush=True,
                     )
         finally:
             if teacher_f is not None:
                 teacher_f.close()
     print(
-        f"wrote {completed} rows to {output} failed={failed} "
+        f"wrote {attempts} attempts for {completed} tasks to {output} failed_attempts={failed_attempts} "
         f"teacher_rows={teachers} total_elapsed={time.time() - started:.1f}s",
         flush=True,
     )

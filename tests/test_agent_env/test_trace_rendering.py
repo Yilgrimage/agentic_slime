@@ -2,6 +2,13 @@ import pytest
 
 from slime.utils.types import Sample
 
+from examples.agent_env.appworld.reward_evidence import (
+    SCHEMA_VERSION,
+    build_api_call_evidence,
+    build_execution_evidence,
+    render_execution_evidence,
+)
+from examples.agent_env.appworld.server import AppWorldBackend
 from examples.agent_env.trace_rendering import (
     TraceCompressionOptions,
     compress_trace_text,
@@ -175,3 +182,315 @@ def test_appworld_sanitizer_is_env_scoped() -> None:
     rendered = render_trace_for_reward(sample, options=TraceCompressionOptions())
 
     assert "python REPL environment" in rendered
+
+
+def test_appworld_structured_turn_uses_execution_evidence_instead_of_python() -> None:
+    evidence = build_execution_evidence(
+        observation="Execution successful.",
+        api_calls=[
+            build_api_call_evidence(
+                app_name="spotify",
+                api_name="show_queue",
+                arguments={"access_token": "secret-token", "limit": 200},
+                result={"items": [{"id": index, "name": "song"} for index in range(30)]},
+            ),
+            build_api_call_evidence(
+                app_name="supervisor",
+                api_name="complete_task",
+                arguments={"answer": "27", "status": "success"},
+                result={"message": "Execution successful."},
+            ),
+        ],
+    )
+    sample = Sample(
+        prompt="prompt",
+        metadata={
+            "env_name": "appworld",
+            "task_prompt": "Count the songs in the queue.",
+            "turns": [
+                {
+                    "action": {
+                        "type": "tool_call",
+                        "name": "execute",
+                        "arguments": {"code": "print(apis.spotify.show_queue(access_token='secret-token'))"},
+                    },
+                    "env_step": {"observation": "Execution successful.", "info": {"reward_evidence": evidence}},
+                }
+            ],
+        },
+    )
+
+    rendered = render_trace_for_reward(
+        sample,
+        options=TraceCompressionOptions(strip_tool_call=256, strip_tool_response=120),
+    )
+
+    assert "AppWorld execution evidence" in rendered
+    assert "spotify.show_queue" in rendered
+    assert "supervisor.complete_task" in rendered
+    assert '"answer":"27"' in rendered
+    assert "secret-token" not in rendered
+    assert "print(apis.spotify" not in rendered
+    assert "Execution successful." not in rendered
+
+
+def test_appworld_structured_turn_rejects_missing_execution_evidence() -> None:
+    sample = Sample(
+        prompt="prompt",
+        metadata={
+            "env_name": "appworld",
+            "task_prompt": "Update the calendar.",
+            "turns": [
+                {
+                    "action": {"type": "tool_call", "name": "execute", "arguments": {"code": "pass"}},
+                    "env_step": {"observation": "Execution successful.", "info": {}},
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="missing execution evidence"):
+        render_trace_for_reward(sample, options=TraceCompressionOptions(strip_tool_call=256))
+
+
+def test_appworld_structured_teacher_does_not_fall_back_when_evidence_is_missing() -> None:
+    teacher = {
+        "env_name": "appworld",
+        "task_prompt": "Update the calendar.",
+        "turns": [
+            {
+                "action": {"type": "tool_call", "name": "execute", "arguments": {"code": "pass"}},
+                "env_step": {"observation": "Execution successful.", "info": {}},
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="missing execution evidence"):
+        render_teacher_trace_for_reward(
+            teacher,
+            options=TraceCompressionOptions(strip_tool_call=256),
+            env_name="appworld",
+        )
+
+
+def test_appworld_evidence_budget_preserves_api_identity_and_terminal_answer() -> None:
+    evidence = {
+        "schema_version": SCHEMA_VERSION,
+        "code_execution": "ok",
+        "output_kind": "no_stdout",
+        "api_calls": [
+            {
+                "api": f"calendar.lookup_event_{index}",
+                "status": "returned",
+                "arguments": {"query": "x" * 500},
+                "result_summary": {"rows": ["y" * 500]},
+            }
+            for index in range(8)
+        ]
+        + [
+            {
+                "api": "supervisor.complete_task",
+                "status": "returned",
+                "arguments": {"answer": "final exact answer", "status": "success"},
+            }
+        ],
+    }
+
+    rendered = render_execution_evidence(evidence, max_chars=128)
+
+    for index in range(8):
+        assert f"calendar.lookup_event_{index}" in rendered
+    assert "supervisor.complete_task" in rendered
+    assert "final exact answer" in rendered
+    assert "configured_budget_exceeded" in rendered
+
+
+def test_appworld_evidence_uses_structured_compaction_before_identity_only() -> None:
+    evidence = build_execution_evidence(
+        observation="Execution successful.",
+        api_calls=[
+            build_api_call_evidence(
+                app_name="spotify",
+                api_name="show_queue",
+                arguments={"limit": 200, "query": "recent favorites"},
+                result={"items": [{"id": index, "name": "song-" + "x" * 60} for index in range(30)]},
+            )
+        ],
+    )
+
+    rendered = render_execution_evidence(evidence, max_chars=512)
+
+    assert len(evidence["api_calls"][0]["result_summary"]["items"]) == 30
+    assert '"details_compacted":"structured"' in rendered
+    assert '"arguments"' in rendered
+    assert '"limit":200' in rendered
+    assert '"result_summary"' in rendered
+    assert '"item_count"' in rendered
+    assert "configured_budget_exceeded" not in rendered
+
+
+def test_appworld_execution_evidence_carries_safe_stdout_without_raw_tool_response() -> None:
+    evidence = build_execution_evidence(
+        observation='Collected 57 songs: {"title": "A Love That Never Was", "like_count": 18}',
+        api_calls=[
+            build_api_call_evidence(
+                app_name="spotify",
+                api_name="show_song",
+                arguments={"song_id": 78},
+                result={"id": 78, "title": "A Love That Never Was", "like_count": 18},
+            )
+        ],
+    )
+    sample = Sample(
+        prompt="prompt",
+        metadata={
+            "env_name": "appworld",
+            "task_prompt": "Find the most-liked song.",
+            "turns": [
+                {
+                    "action": {"type": "tool_call", "name": "execute", "arguments": {"code": "..."}},
+                    "env_step": {
+                        "observation": 'Collected 57 songs: {"title": "A Love That Never Was", "like_count": 18}',
+                        "info": {"reward_evidence": evidence},
+                    },
+                }
+            ],
+        },
+    )
+
+    rendered = render_trace_for_reward(
+        sample,
+        options=TraceCompressionOptions(strip_tool_call=512, strip_tool_response=True),
+    )
+
+    assert '"output_summary":"Collected 57 songs' in rendered
+    assert "A Love That Never Was" in rendered
+    assert "Tool response:" not in rendered
+
+
+def test_appworld_execution_evidence_suppresses_sensitive_api_output() -> None:
+    password_evidence = build_execution_evidence(
+        observation='[{"account_name":"spotify","password":"secret-password"}]',
+        api_calls=[
+            build_api_call_evidence(
+                app_name="supervisor",
+                api_name="show_account_passwords",
+                arguments={"account_name": "spotify"},
+                result={"password": "secret-password"},
+            )
+        ],
+    )
+    login_evidence = build_execution_evidence(
+        observation="secret-login-token",
+        api_calls=[
+            build_api_call_evidence(
+                app_name="spotify",
+                api_name="login",
+                arguments={"password": "secret-password"},
+                result="secret-login-token",
+            )
+        ],
+    )
+
+    password_rendered = render_execution_evidence(
+        password_evidence,
+        max_chars=512,
+        observation='[{"account_name":"spotify","password":"secret-password"}]',
+    )
+    login_rendered = render_execution_evidence(
+        login_evidence,
+        max_chars=512,
+        observation="secret-login-token",
+    )
+
+    assert "secret-password" not in password_rendered
+    assert "secret-login-token" not in login_rendered
+    assert "show_account_passwords" in password_rendered
+    assert "spotify.login" in login_rendered
+
+
+def test_appworld_backend_captures_evaluated_api_calls_without_changing_execution() -> None:
+    class FakeRequester:
+        def request(self, *args: object, **kwargs: object) -> dict[str, object]:
+            assert kwargs["_app_name"] == "calendar"
+            assert kwargs["_api_name"] == "create_event"
+            return {"event_id": 17, "title": kwargs["title"]}
+
+    class FakeWorld:
+        def __init__(self) -> None:
+            self.requester = FakeRequester()
+
+        def execute(self, code: str) -> str:
+            assert code == "create event"
+            result = self.requester.request(
+                _app_name="calendar",
+                _api_name="create_event",
+                title="Weekly sync",
+                password="not-for-the-judge",
+            )
+            assert result == {"event_id": 17, "title": "Weekly sync"}
+            return "Execution successful."
+
+    backend = AppWorldBackend.__new__(AppWorldBackend)
+    backend.world = FakeWorld()
+    backend.task_id = "fake-task"
+    backend._active_api_evidence = None
+    backend._install_api_evidence_capture()
+
+    observation, info = backend._execute_code("create event")
+
+    assert observation == "Execution successful."
+    evidence = info["reward_evidence"]
+    assert evidence["output_kind"] == "no_stdout"
+    assert evidence["api_calls"] == [
+        {
+            "api": "calendar.create_event",
+            "status": "returned",
+            "arguments": {"title": "Weekly sync", "password": "[REDACTED]"},
+            "result_summary": {"event_id": 17, "title": "Weekly sync"},
+        }
+    ]
+
+
+def test_appworld_finish_evidence_does_not_prevent_episode_completion() -> None:
+    class FakeRequester:
+        def request(self, *args: object, **kwargs: object) -> dict[str, str]:
+            return {"message": "task submitted"}
+
+    class FakeWorld:
+        def __init__(self) -> None:
+            self.requester = FakeRequester()
+
+        def execute(self, code: str) -> str:
+            assert "apis.supervisor.complete_task" in code
+            self.requester.request(
+                _app_name="supervisor",
+                _api_name="complete_task",
+                answer="done",
+                status="success",
+            )
+            return "Execution successful."
+
+        def task_completed(self) -> bool:
+            return False
+
+    backend = AppWorldBackend.__new__(AppWorldBackend)
+    backend.world = FakeWorld()
+    backend.task_id = "fake-task"
+    backend.task_ids = ["fake-task"]
+    backend.task_index = 0
+    backend.reset_count = 1
+    backend.step_count = 0
+    backend.final_score = 0.0
+    backend.done = False
+    backend.last_info = {}
+    backend._active_api_evidence = None
+    backend._evaluate = lambda: {"success": True}
+    backend._install_api_evidence_capture()
+
+    result = backend.step(
+        {"action": {"type": "tool_call", "name": "finish", "arguments": {"answer": "done"}}}
+    )
+
+    assert result["done"] is True
+    assert result["info"]["reward_evidence"]["api_calls"][0]["api"] == "supervisor.complete_task"

@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from examples.agent_env.appworld.reward_evidence import SCHEMA_VERSION, parse_execution_evidence_trace
+from examples.agent_env.trace_rendering import TraceCompressionOptions, render_teacher_trace_for_reward
+
 
 TRACE_KEYS = (
     "teacher_tool_trace",
@@ -173,6 +176,11 @@ def validate(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
     scored_rows = sum(1 for row in rows if _score(row) is not None)
     instruction_mismatches = 0
     price_mismatches = 0
+    appworld_evidence_rows = 0
+    appworld_invalid_evidence_rows = 0
+    appworld_missing_raw_session_rows = 0
+    appworld_missing_policy_session_rows = 0
+    appworld_invalid_payload_rows = 0
     for row, trace in zip(rows, traces, strict=True):
         expected_instruction = str(
             _first(row, ("teacher_instruction", "instruction", "instruction_text", "query", "task_prompt")) or ""
@@ -183,6 +191,34 @@ def validate(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
                 instruction_mismatches += 1
             if _price(expected_instruction) != _price(observed_instruction):
                 price_mismatches += 1
+        if args.env == "appworld":
+            row_invalid_evidence = False
+            try:
+                evidence_blocks = parse_execution_evidence_trace(trace)
+            except ValueError:
+                evidence_blocks = []
+                row_invalid_evidence = True
+            schema = str(_first(row, ("teacher_reward_evidence_schema",)) or "")
+            if evidence_blocks and schema == SCHEMA_VERSION:
+                appworld_evidence_rows += 1
+            else:
+                row_invalid_evidence = True
+            if row_invalid_evidence:
+                appworld_invalid_evidence_rows += 1
+            if not str(row.get("teacher_raw_trace_text") or "").strip():
+                appworld_missing_raw_session_rows += 1
+            if not str(row.get("teacher_response") or "").strip():
+                appworld_missing_policy_session_rows += 1
+            payload = row.get("teacher_reward_trace_payload")
+            try:
+                payload_trace = render_teacher_trace_for_reward(
+                    payload,
+                    options=TraceCompressionOptions(),
+                    env_name="appworld",
+                )
+                parse_execution_evidence_trace(payload_trace)
+            except (TypeError, ValueError):
+                appworld_invalid_payload_rows += 1
 
     summary: dict[str, Any] = {
         "teacher_jsonl": str(args.teacher_jsonl),
@@ -202,6 +238,17 @@ def validate(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
         "instruction_mismatch_rows": instruction_mismatches,
         "price_mismatch_rows": price_mismatches,
     }
+    if args.env == "appworld":
+        summary.update(
+            {
+                "execution_evidence_schema": SCHEMA_VERSION,
+                "execution_evidence_rows": appworld_evidence_rows,
+                "invalid_execution_evidence_rows": appworld_invalid_evidence_rows,
+                "missing_raw_policy_session_rows": appworld_missing_raw_session_rows,
+                "missing_training_policy_session_rows": appworld_missing_policy_session_rows,
+                "invalid_structured_payload_rows": appworld_invalid_payload_rows,
+            }
+        )
     if args.prompt_data:
         summary.update(_coverage(rows, _prompt_rows(Path(args.prompt_data), args.split), args.split))
     elif args.expected_count > 0:
@@ -218,6 +265,14 @@ def validate(args: argparse.Namespace) -> tuple[dict[str, Any], list[str]]:
         errors.append(f"{summary['duplicate_task_ids']} duplicate task_id entries")
     if args.env == "webshop" and summary["price_mismatch_rows"]:
         errors.append(f"{summary['price_mismatch_rows']} WebShop rows have price/instruction mismatch")
+    if args.env == "appworld" and appworld_invalid_evidence_rows:
+        errors.append(f"{appworld_invalid_evidence_rows} AppWorld rows lack valid structured execution evidence")
+    if args.env == "appworld" and appworld_missing_raw_session_rows:
+        errors.append(f"{appworld_missing_raw_session_rows} AppWorld rows lack raw policy sessions")
+    if args.env == "appworld" and appworld_missing_policy_session_rows:
+        errors.append(f"{appworld_missing_policy_session_rows} AppWorld rows lack LUFFY training policy sessions")
+    if args.env == "appworld" and appworld_invalid_payload_rows:
+        errors.append(f"{appworld_invalid_payload_rows} AppWorld rows lack valid structured reward payloads")
     if args.require_success_only and success_rows != len(rows):
         errors.append(f"{len(rows) - success_rows} rows are not successful")
     if args.min_success_rate and summary["success_rate"] < args.min_success_rate:
