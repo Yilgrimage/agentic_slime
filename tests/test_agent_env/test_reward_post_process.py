@@ -40,6 +40,108 @@ def test_luffy_teacher_sample_uses_same_grpo_normalizer_as_students():
     assert abs(rewards[-1] - 2.474873) < 1e-4
 
 
+def _tasa_luffy_student(reward: float, *, sample_index: int) -> Sample:
+    return Sample(
+        group_index=0,
+        index=sample_index,
+        reward=reward,
+        response_length=2,
+        loss_mask=[1, 1],
+        status=Sample.Status.COMPLETED,
+        metadata={
+            "token_segments": [
+                {"kind": "assistant", "turn": 0, "token_count": 2, "loss_mask_sum": 2, "text": "a1"}
+            ],
+            "rm_reward": {
+                "score": reward,
+                "raw": {
+                    "tasa_state_schema": {
+                        "milestones": [
+                            {"id": "M1", "predicate": "shared state", "requires": [], "progress": 1.0}
+                        ]
+                    },
+                    "tasa_state_changes": [{"step": 1, "set": ["M1"], "unset": []}],
+                },
+            },
+        },
+    )
+
+
+def _tasa_luffy_args() -> Namespace:
+    return Namespace(
+        advantage_estimator="grpo",
+        rewards_normalization=True,
+        grpo_std_normalization=True,
+        n_samples_per_prompt=16,
+        reward_key=None,
+        reward={
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_value_gae",
+                "tasa_min_peer_support": 4,
+                "tasa_local_normalization": "none",
+                "tasa_use_teacher_prior": True,
+                "tasa_enforce_prerequisites": True,
+                "tasa_prior_kappa": 4.0,
+                "tasa_lambda": 0.5,
+                "tasa_prior_root": 0.1,
+                "tasa_prior_success": 0.9,
+                "tasa_outcome_scale": 10.0,
+                "tasa_teacher_weight": 1.0,
+                "clip": 2.0,
+                "step_index_base": 1,
+            }
+        },
+    )
+
+
+def test_tasa_luffy_teacher_is_excluded_from_state_value_estimation():
+    def run(teacher_reward: float) -> tuple[list[Sample], list[float]]:
+        students = [_tasa_luffy_student(10.0 if index % 2 == 0 else 0.0, sample_index=index) for index in range(15)]
+        teacher = _sample(teacher_reward, off_policy=True)
+        samples = [*students, teacher]
+        _, normalized = post_process_rewards(_tasa_luffy_args(), samples)
+        return samples, normalized
+
+    low_teacher, low_normalized = run(10.0)
+    high_teacher, high_normalized = run(100.0)
+
+    assert low_normalized != high_normalized
+    assert low_teacher[-1].metadata["process_advantages"] == [0.0]
+    assert low_teacher[-1].metadata["process_advantage_masks"] == [0.0]
+    assert high_teacher[-1].metadata["process_advantages"] == [0.0]
+    assert high_teacher[-1].metadata["process_advantage_masks"] == [0.0]
+    for low, high in zip(low_teacher[:-1], high_teacher[:-1], strict=True):
+        assert low.metadata["process_advantages"] == high.metadata["process_advantages"]
+        assert low.metadata["credit_assignment"]["tasa_group_peer_count_histogram"]["14"] > 0
+
+
+def test_tasa_luffy_keeps_student_and_teacher_advantages_isolated():
+    args = Namespace(
+        advantage_estimator="grpo",
+        reward={
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_value_gae",
+                "tasa_teacher_weight": 0.5,
+            }
+        },
+    )
+    rollout_data = {
+        "kl": [torch.zeros(2), torch.zeros(2)],
+        "rewards": [-0.5, 1.5],
+        "process_advantages": [torch.tensor([0.4, -0.2]), torch.zeros(2)],
+        "process_advantage_masks": [torch.ones(2), torch.zeros(2)],
+        "loss_masks": [torch.ones(2), torch.zeros(2)],
+        "off_policy_loss_masks": [torch.zeros(2), torch.ones(2)],
+    }
+
+    segment_credit_assignment_advantage(args, rollout_data)
+
+    assert torch.allclose(rollout_data["advantages"][0], torch.tensor([0.4, -0.2]))
+    assert torch.allclose(rollout_data["advantages"][1], torch.tensor([0.75, 0.75]))
+
+
 def test_reward_group_dump_records_raw_and_normalized_rewards(tmp_path, monkeypatch):
     monkeypatch.setenv("RUN_ROOT", str(tmp_path))
     monkeypatch.setenv("AGENT_ENV_REWARD_GROUP_DUMP_N", "10")
