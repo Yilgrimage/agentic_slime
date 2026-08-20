@@ -423,6 +423,7 @@ TASA_STATE_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory semanti
 - student 可以采用与 reference 不同的路径；只要达成同一状态事实，就应命中同一 milestone。
 - 终止调用、`Execution successful`、格式整洁或 agent 声称完成任务都不能单独证明 milestone 成立。
 - 只能依据该 step 中可见的结构化执行证据判断状态变化；代码文本、计划、注释和预期结果都不是执行证据。
+- 执行证据中的 app、API、目标实体和参数必须与 predicate 精确对应；另一 app 的登录、另一对象的查询或参数不符的写操作不能 set 当前 milestone。
 - API `status=returned` 只表示调用返回，不等于业务成功。未授权/未登录、错误消息、空结果或错误对象都不能证明 predicate；必须结合可见 result/output 判断。
 - `code_execution=error` 本身不能证明任何状态；但若同一步较早的 API 调用已有明确返回值或副作用证据，后续 Python 错误不会自动抹掉已发生的事实。若结果被省略且 API 名称本身不足以证明 predicate，则不得 set。
 - predicate 若声称覆盖“全部”“目标集合”或完整核验，抽查单个/部分对象不足以 set；必须有可见结果证明所需范围已完整覆盖。
