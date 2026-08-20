@@ -1101,12 +1101,9 @@ def _maybe_dump_credit_assignment(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"credit_assignment_pid{os.getpid()}.jsonl"
     total_limit = _dump_total_limit(args)
-    ordered_indices = sorted(
-        range(len(samples)),
-        key=lambda idx: (not _is_student_train_sample(samples[idx]), idx),
-    )
+    student_indices = [idx for idx, sample in enumerate(samples) if _is_student_train_sample(sample)]
     with out_path.open("a", encoding="utf-8") as handle:
-        for idx in ordered_indices:
+        for idx in student_indices:
             sample = samples[idx]
             slot = dump.reserve_dump_slot(
                 namespace="credit_assignment",

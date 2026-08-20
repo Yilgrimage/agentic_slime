@@ -800,7 +800,7 @@ def test_credit_dump_prefers_trainable_student_over_luffy_teacher(tmp_path, monk
         },
     )
     teacher = _tasa_sample(-1, changes=[])
-    teacher.rollout_id = 100
+    teacher.rollout_id = 99
     teacher.loss_mask = [0] * teacher.response_length
     teacher.metadata["off_policy_sample"] = True
     teacher.metadata["off_policy_loss_mask"] = [1] * teacher.response_length
