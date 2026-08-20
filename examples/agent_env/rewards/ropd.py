@@ -418,13 +418,16 @@ TASA_STATE_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory semanti
 - 最高 progress 的最后一个 milestone 必须描述任务完整成功，而不是部分完成、尝试执行或单个子目标完成。
 - 错误目标、违规操作、无效尝试和其它负向事实不定义为 milestone；它们只有在破坏已有正向状态时才通过对应 milestone 的 `unset_step` 表示。
 - `set_step=t` 表示执行完 `Step t` 的 action 后，该 milestone 从 false 变为 true。
-- `unset_step=t` 表示执行完 `Step t` 的 action 后，该 milestone 从 true 退化为 false。
+- `unset_step=t` 表示执行完 `Step t` 的 action 后，该 milestone 从 true 退化为 false；milestone 已为 false 时不得重复 unset。
 - 同一 milestone 可以在一条 trajectory 中多次 set/unset。
 - student 可以采用与 reference 不同的路径；只要达成同一状态事实，就应命中同一 milestone。
 - 终止调用、`Execution successful`、格式整洁或 agent 声称完成任务都不能单独证明 milestone 成立。
-- 只能依据该 step 中可见的结构化执行证据判断状态变化；代码文本、计划、注释和预期结果都不是执行证据。执行报错或证据缺失时不得 set。
+- 只能依据该 step 中可见的结构化执行证据判断状态变化；代码文本、计划、注释和预期结果都不是执行证据。
+- API `status=returned` 只表示调用返回，不等于业务成功。未授权/未登录、错误消息、空结果或错误对象都不能证明 predicate；必须结合可见 result/output 判断。
+- `code_execution=error` 本身不能证明任何状态；但若同一步较早的 API 调用已有明确返回值或副作用证据，后续 Python 错误不会自动抹掉已发生的事实。若结果被省略且 API 名称本身不足以证明 predicate，则不得 set。
 - predicate 若声称覆盖“全部”“目标集合”或完整核验，抽查单个/部分对象不足以 set；必须有可见结果证明所需范围已完整覆盖。
 - `set_steps` 只记录 false→true 的首次转变；milestone 保持为 true 时不得在后续 step 重复 set，除非中间先有对应 unset。
+- predicate 若描述“已读取/已创建/已确认”等历史完成事实，后续 logout、无关错误或再次查询失败不会使该事实变回 false；只有可见执行证据明确撤销、删除或破坏 predicate 所描述的状态时才能 unset。
 - 被压缩或省略的内容不能作为状态证据。
 
 # Milestone schema
@@ -2266,6 +2269,24 @@ def _parse_tasa_milestone_batch(
                 raise ValueError(
                     f"ROPD compact TASA milestone {milestone_id} cannot set and unset on the same steps: {overlap}"
                 )
+            active = False
+            for step, transition_kind in sorted(
+                [(step, "set") for step in set_steps] + [(step, "unset") for step in unset_steps]
+            ):
+                if transition_kind == "set":
+                    if active:
+                        raise ValueError(
+                            f"ROPD compact TASA milestone {milestone_id} repeats set while true "
+                            f"for {trajectory_id} at step {step}"
+                        )
+                    active = True
+                else:
+                    if not active:
+                        raise ValueError(
+                            f"ROPD compact TASA milestone {milestone_id} unsets while false "
+                            f"for {trajectory_id} at step {step}"
+                        )
+                    active = False
             invalid = [step for step in set_steps + unset_steps if step not in valid_steps[trajectory_id]]
             if invalid:
                 raise ValueError(

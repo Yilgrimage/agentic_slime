@@ -6,6 +6,7 @@ outcome: 10.0
 ropd:
   schema_mode: ca_compact
   ca_scalar_reward_source: env_success
+  require_teacher: true
   join_key: task_id
   teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
   teacher_index_keys:

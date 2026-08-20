@@ -177,6 +177,52 @@ def test_ca_compact_parser_accepts_tasa_state_annotations():
         raise AssertionError("ROPD compact CA accepted the removed trajectory_scores field")
 
 
+def test_tasa_parser_rejects_non_alternating_state_transitions():
+    args = Namespace(
+        reward={
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_value_gae",
+            }
+        }
+    )
+    answer_items = (
+        {"source": "student", "source_index": 0, "text": "Step 1\naction\nStep 2\naction"},
+    )
+
+    def payload(*, set_steps, unset_steps):
+        return {
+            "schema_version": "ropd.tasa_state_batch_verifier.v1",
+            "milestones": [
+                {
+                    "id": f"M{index}",
+                    "predicate": f"state {index}",
+                    "requires": [] if index == 1 else [f"M{index - 1}"],
+                    "progress": index,
+                    "transitions_by_trajectory": [
+                        {
+                            "trajectory_id": "S0_STUDENT",
+                            "set_steps": set_steps if index == 1 else [],
+                            "unset_steps": unset_steps if index == 1 else [],
+                        }
+                    ],
+                }
+                for index in range(1, 4)
+            ],
+        }
+
+    for invalid_payload, expected in (
+        (payload(set_steps=[], unset_steps=[1]), "unsets while false"),
+        (payload(set_steps=[1, 2], unset_steps=[]), "repeats set while true"),
+    ):
+        try:
+            _parse_ca_compact_batch_masks(args, invalid_payload, answer_items=answer_items)
+        except ValueError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("TASA accepted a non-alternating milestone state machine")
+
+
 def test_ca_compact_prompt_uses_teacher_only_as_reference():
     args = Namespace(reward={"ropd": {}})
     sample = _sample(env_success=False)
