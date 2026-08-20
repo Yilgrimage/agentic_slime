@@ -327,6 +327,7 @@ def test_appworld_evidence_budget_preserves_state_changing_call_arguments() -> N
                     "description": "Dinner with Colleagues",
                     "user_id": 917,
                 },
+                "result_summary": {"message": "Payment request created.", "payment_request_id": 6097},
             }
         ],
     }
@@ -338,6 +339,8 @@ def test_appworld_evidence_budget_preserves_state_changing_call_arguments() -> N
     assert '"amount":41.0' in rendered
     assert "Dinner with Colleagues" in rendered
     assert '"user_id":917' in rendered
+    assert "Payment request created." in rendered
+    assert '"payment_request_id":6097' in rendered
 
 
 def test_appworld_evidence_uses_structured_compaction_before_identity_only() -> None:

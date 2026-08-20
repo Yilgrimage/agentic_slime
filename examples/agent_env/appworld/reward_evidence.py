@@ -189,7 +189,13 @@ def render_execution_evidence(
     for item in payload["api_calls"]:
         reduced = {key: item[key] for key in ("api", "status", "count") if key in item}
         if _is_terminal_call(item) or _is_state_changing_call(item):
-            for key in ("arguments", "argument_samples", "error"):
+            for key in (
+                "arguments",
+                "argument_samples",
+                "result_summary",
+                "result_samples",
+                "error",
+            ):
                 if key in item:
                     reduced[key] = _compact_render_value(item[key])
         reduced_calls.append(reduced)
