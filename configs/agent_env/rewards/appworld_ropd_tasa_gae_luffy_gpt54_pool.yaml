@@ -8,7 +8,7 @@ ropd:
   ca_scalar_reward_source: env_success
   require_teacher: true
   join_key: task_id
-  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
+  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_structured_train_bestofn_teacher.jsonl
   teacher_index_keys:
     - task_id
   teacher_answer_keys:
@@ -46,7 +46,7 @@ credit_assignment:
 luffy:
   enable: true
   mode: token_loss
-  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
+  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_structured_train_bestofn_teacher.jsonl
   teacher_index_keys:
     - task_id
   teacher_trace_keys:
