@@ -187,7 +187,15 @@ def render_execution_evidence(
     # Preserve every API identity and terminal submission before optional details.
     reduced_calls = []
     for item in payload["api_calls"]:
-        reduced = {key: item[key] for key in ("api", "status", "count") if key in item}
+        reduced = {
+            key: item[key]
+            for key in ("api", "status", "count", "distinct_argument_count")
+            if key in item
+        }
+        if "count" in item:
+            for key in ("arguments", "argument_samples"):
+                if key in item:
+                    reduced[key] = _compact_render_value(item[key])
         if _is_terminal_call(item) or _is_state_changing_call(item):
             for key in (
                 "arguments",
@@ -217,7 +225,18 @@ def render_execution_evidence(
         "code_execution": payload["code_execution"],
         "output_kind": payload["output_kind"],
         "api_sequence": [
-            {key: item[key] for key in ("api", "status", "count") if key in item}
+            {
+                key: item[key]
+                for key in (
+                    "api",
+                    "status",
+                    "count",
+                    "distinct_argument_count",
+                    "arguments",
+                    "argument_samples",
+                )
+                if key in item
+            }
             for item in payload["api_calls"]
         ],
         "terminal_calls": terminal_calls,
@@ -270,7 +289,11 @@ def _aggregate_calls(calls: list[Any]) -> list[dict[str, Any]]:
 
 
 def _structured_call_summary(call: dict[str, Any]) -> dict[str, Any]:
-    summary = {key: call[key] for key in ("api", "status", "count") if key in call}
+    summary = {
+        key: call[key]
+        for key in ("api", "status", "count", "distinct_argument_count")
+        if key in call
+    }
     for key in ("arguments", "argument_samples", "result_summary", "result_samples", "error"):
         if key in call:
             summary[key] = _compact_render_value(call[key])
@@ -329,6 +352,8 @@ def _aggregate_call_group(group: list[dict[str, Any]]) -> dict[str, Any]:
             aggregated[plural] = values
         else:
             aggregated[plural] = [values[0], values[1], {"__omitted_calls__": len(values) - 4}, values[-2], values[-1]]
+        if field == "arguments":
+            aggregated["distinct_argument_count"] = len({_json(value) for value in values})
     errors = [item.get("error") for item in group if item.get("error")]
     if errors:
         aggregated["error"] = errors[0] if len(errors) == 1 else errors

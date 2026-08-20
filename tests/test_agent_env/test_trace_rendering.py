@@ -390,6 +390,30 @@ def test_appworld_evidence_uses_structured_compaction_before_identity_only() -> 
     assert "configured_budget_exceeded" not in rendered
 
 
+def test_appworld_identity_compaction_preserves_repeated_call_target_coverage() -> None:
+    evidence = build_execution_evidence(
+        observation="Execution successful.",
+        api_calls=[
+            build_api_call_evidence(
+                app_name="spotify",
+                api_name="show_song",
+                arguments={"song_id": song_id, "access_token": "secret-token"},
+                result={"song_id": song_id, "title": "x" * 300},
+            )
+            for song_id in (10, 11, 12, 12, 13, 14)
+        ],
+    )
+
+    rendered = render_execution_evidence(evidence, max_chars=128)
+
+    assert '"count":6' in rendered
+    assert '"distinct_argument_count":5' in rendered
+    assert '"song_id":10' in rendered
+    assert '"song_id":14' in rendered
+    assert "secret-token" not in rendered
+    assert "configured_budget_exceeded" in rendered
+
+
 def test_appworld_execution_evidence_carries_safe_stdout_without_raw_tool_response() -> None:
     evidence = build_execution_evidence(
         observation='Collected 57 songs: {"title": "A Love That Never Was", "like_count": 18}',
