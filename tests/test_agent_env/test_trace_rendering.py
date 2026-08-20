@@ -343,6 +343,29 @@ def test_appworld_evidence_budget_preserves_state_changing_call_arguments() -> N
     assert '"payment_request_id":6097' in rendered
 
 
+def test_appworld_evidence_drops_only_generic_execution_confirmation() -> None:
+    evidence = {
+        "schema_version": SCHEMA_VERSION,
+        "code_execution": "ok",
+        "output_kind": "no_stdout",
+        "api_calls": [
+            {
+                "api": "venmo.create_payment_request",
+                "status": "returned",
+                "result_summary": {
+                    "message": "Execution successful.",
+                    "payment_request_id": 6097,
+                },
+            }
+        ],
+    }
+
+    rendered = render_execution_evidence(evidence, max_chars=128)
+
+    assert "Execution successful." not in rendered
+    assert '"payment_request_id":6097' in rendered
+
+
 def test_appworld_evidence_uses_structured_compaction_before_identity_only() -> None:
     evidence = build_execution_evidence(
         observation="Execution successful.",

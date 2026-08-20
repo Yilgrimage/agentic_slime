@@ -364,13 +364,43 @@ def _is_sensitive_call(call: dict[str, Any]) -> bool:
 
 
 def _sanitize_call_for_render(call: Any) -> Any:
-    if not isinstance(call, dict) or not _is_sensitive_call(call):
+    if not isinstance(call, dict):
         return call
-    return {
-        key: value
-        for key, value in call.items()
-        if key not in {"result_summary", "result_samples"}
-    }
+    sanitized = dict(call)
+    if _is_sensitive_call(call):
+        sanitized.pop("result_summary", None)
+        sanitized.pop("result_samples", None)
+        return sanitized
+    for key in ("result_summary", "result_samples"):
+        if key not in sanitized:
+            continue
+        value = _sanitize_result_for_render(sanitized[key])
+        if value in (None, "", {}, []):
+            sanitized.pop(key)
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def _sanitize_result_for_render(value: Any) -> Any:
+    """Remove AppWorld's generic execution acknowledgement from reward evidence."""
+
+    if isinstance(value, str):
+        return None if value.strip() == "Execution successful." else value
+    if isinstance(value, Mapping):
+        sanitized = {
+            str(key): item
+            for key, raw in value.items()
+            if (item := _sanitize_result_for_render(raw)) not in (None, "", {}, [])
+        }
+        return sanitized
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [
+            item
+            for raw in value
+            if (item := _sanitize_result_for_render(raw)) not in (None, "", {}, [])
+        ]
+    return value
 
 
 def _shape_summary(value: Any) -> dict[str, Any]:
