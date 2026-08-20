@@ -10,7 +10,8 @@ from slime.utils.types import Sample
 from examples.agent_env.rollout import arg, metadata, tokenizer
 from examples.agent_env.rewards.config import reward_cfg_path
 from examples.agent_env.rewards.extractors import bool_value, float_value
-from examples.agent_env.teacher_data import teacher_trace_text
+from examples.agent_env.teacher_data import teacher_trace_text, teacher_trace_value
+from examples.agent_env.trace_rendering import compact_trace_part
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,8 @@ class TeacherSegment:
     text: str
     trainable: bool
     kind: str
+    source_chars: int | None = None
+    truncated: bool = False
 
 
 def luffy_enabled(args: Any) -> bool:
@@ -30,16 +33,31 @@ def apply_luffy_teacher_sample(args: Any, group: list[Sample]) -> list[Sample]:
     if not group:
         return group
     anchor_pos, anchor = _anchor_sample(group)
-    teacher_text = teacher_trace_text(
-        args,
-        anchor,
-        config_prefix="luffy",
-        env_var="AGENT_ENV_LUFFY_TEACHER_INDEX_PATH",
-        key_config_name="teacher_trace_keys",
-    )
-    if not teacher_text:
-        raise RuntimeError(f"LUFFY token loss is enabled but no teacher trace matched sample index={anchor.index}")
-    segments = _teacher_segments(args, anchor, teacher_text)
+    policy_format = _policy_format(args)
+    if policy_format == "appworld_structured_turns":
+        teacher_payload = teacher_trace_value(
+            args,
+            anchor,
+            config_prefix="luffy",
+            env_var="AGENT_ENV_LUFFY_TEACHER_INDEX_PATH",
+            key_config_name="teacher_trace_keys",
+        )
+        if teacher_payload in (None, "", []):
+            raise RuntimeError(
+                f"LUFFY token loss is enabled but no structured teacher trace matched sample index={anchor.index}"
+            )
+        segments = _segments_from_appworld_structured_turns(args, teacher_payload)
+    else:
+        teacher_text = teacher_trace_text(
+            args,
+            anchor,
+            config_prefix="luffy",
+            env_var="AGENT_ENV_LUFFY_TEACHER_INDEX_PATH",
+            key_config_name="teacher_trace_keys",
+        )
+        if not teacher_text:
+            raise RuntimeError(f"LUFFY token loss is enabled but no teacher trace matched sample index={anchor.index}")
+        segments = _teacher_segments(args, anchor, teacher_text)
     if not segments or not any(segment.trainable for segment in segments):
         raise RuntimeError(f"LUFFY teacher trace produced no trainable policy segments for sample index={anchor.index}")
 
@@ -79,7 +97,14 @@ def _mode(args: Any) -> str:
 
 def _policy_format(args: Any) -> str:
     value = str(_cfg(args, "policy_format", "auto") or "auto").strip().lower()
-    valid = {"auto", "text_action_xml", "appworld_markdown_code", "appworld_code_tag", "raw"}
+    valid = {
+        "auto",
+        "text_action_xml",
+        "appworld_markdown_code",
+        "appworld_code_tag",
+        "appworld_structured_turns",
+        "raw",
+    }
     if value not in valid:
         raise ValueError(f"Unsupported reward.luffy.policy_format={value!r}; expected one of {sorted(valid)}")
     return value
@@ -136,6 +161,66 @@ def _segments_from_appworld_markdown(text: str, *, policy_format: str) -> list[T
                     kind="tool_response",
                 )
             )
+    return segments
+
+
+def _segments_from_appworld_structured_turns(args: Any, payload: Any) -> list[TeacherSegment]:
+    if not isinstance(payload, dict):
+        raise ValueError("LUFFY appworld_structured_turns requires a structured teacher payload")
+    env_name = str(payload.get("env_name") or "").strip().lower()
+    if env_name != "appworld":
+        raise ValueError(f"LUFFY appworld_structured_turns requires env_name='appworld', got {env_name!r}")
+    turns = payload.get("turns")
+    if not isinstance(turns, list) or not turns:
+        raise ValueError("LUFFY AppWorld teacher payload has no structured turns")
+
+    response_limit = _cfg(args, "tool_response_max_chars", 2048)
+    if isinstance(response_limit, bool):
+        raise ValueError("reward.luffy.tool_response_max_chars must be a positive integer")
+    try:
+        response_limit = int(response_limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("reward.luffy.tool_response_max_chars must be a positive integer") from exc
+    if response_limit <= 0:
+        raise ValueError("reward.luffy.tool_response_max_chars must be a positive integer")
+
+    segments: list[TeacherSegment] = []
+    for turn_index, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            raise ValueError(f"LUFFY AppWorld teacher turn {turn_index} is not a mapping")
+        if turn.get("format_valid") is False:
+            raise ValueError(f"LUFFY AppWorld teacher turn {turn_index} is format-invalid")
+        action = turn.get("action")
+        if not isinstance(action, dict) or str(action.get("name") or "").strip().lower() != "execute":
+            raise ValueError(f"LUFFY AppWorld teacher turn {turn_index} is missing an execute action")
+        arguments = action.get("arguments")
+        code = str(arguments.get("code") or "").strip() if isinstance(arguments, dict) else ""
+        if not code:
+            raise ValueError(f"LUFFY AppWorld teacher turn {turn_index} has no executable code")
+        rendered_code = _render_appworld_code(code, policy_format="appworld_markdown_code")
+        segments.append(
+            TeacherSegment(
+                text=rendered_code,
+                trainable=True,
+                kind="assistant_code",
+                source_chars=len(code),
+            )
+        )
+
+        env_step = turn.get("env_step")
+        observation = str(env_step.get("observation") or "").strip() if isinstance(env_step, dict) else ""
+        if not observation:
+            continue
+        compacted = compact_trace_part(observation, response_limit, label="AppWorld tool response")
+        segments.append(
+            TeacherSegment(
+                text=f"\nTool response:\n{compacted}\n",
+                trainable=False,
+                kind="tool_response",
+                source_chars=len(observation),
+                truncated=len(compacted) < len(observation),
+            )
+        )
     return segments
 
 
@@ -257,6 +342,8 @@ def _build_teacher_sample(args: Any, anchor: Sample, segments: list[TeacherSegme
                 "loss_mask_sum": 0,
                 "off_policy_loss_mask_sum": len(ids) if segment.trainable else 0,
                 "text": segment.text,
+                "source_chars": segment.source_chars,
+                "truncated": segment.truncated,
             }
         )
 
@@ -299,6 +386,9 @@ def _build_teacher_sample(args: Any, anchor: Sample, segments: list[TeacherSegme
             "luffy_teacher_reward": teacher_reward,
             "luffy_teacher_token_count": response_length,
             "luffy_teacher_loss_token_count": sum(off_policy_mask),
+            "luffy_teacher_source_chars": sum(segment.source_chars or len(segment.text) for segment in segments),
+            "luffy_teacher_rendered_chars": sum(len(segment.text) for segment in segments),
+            "luffy_teacher_compacted_segment_count": sum(int(segment.truncated) for segment in segments),
             "rm_reward": {
                 "score": teacher_reward,
                 "components": {"luffy_teacher": teacher_reward},

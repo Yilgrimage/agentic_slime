@@ -67,6 +67,12 @@ def _compress_part_text(text: Any, spec: TracePartSpec, *, label: str) -> str:
     return _middle_truncate_text(value, limit, label=label).strip()
 
 
+def compact_trace_part(text: Any, spec: TracePartSpec, *, label: str) -> str:
+    """Apply the canonical head-tail compaction used by reward trace adapters."""
+
+    return _compress_part_text(text, spec, label=label)
+
+
 @dataclass(frozen=True)
 class TraceCompressionOptions:
     strip_reasoning: TracePartSpec = True

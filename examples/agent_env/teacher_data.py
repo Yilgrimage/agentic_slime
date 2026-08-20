@@ -262,3 +262,43 @@ def teacher_trace_text(
     if status != "completed":
         return ""
     return text
+
+
+def teacher_trace_value(
+    args: Any,
+    sample: Sample,
+    *,
+    config_prefix: str,
+    env_var: str,
+    key_config_name: str,
+    default_fields: tuple[str, ...] = DEFAULT_TEACHER_TRACE_FIELDS,
+    join_value: str | None = None,
+) -> Any:
+    """Return a structured teacher field without serializing it through text."""
+
+    keys = list_value(config_value(args, config_prefix, key_config_name, None), default_fields)
+    sample_metadata = metadata(sample)
+    for key in keys:
+        value = sample_metadata.get(key)
+        if value not in (None, "", []):
+            return value
+
+    row = teacher_index_row_for_sample(
+        args,
+        sample,
+        config_prefix=config_prefix,
+        env_var=env_var,
+        join_value=join_value,
+    )
+    if row is None:
+        return None
+    for source in (row, row.get("evidence"), row.get("adapter_result"), row.get("source_row")):
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, "", []):
+                if teacher_index_row_status(row, has_text=True) != "completed":
+                    return None
+                return value
+    return None

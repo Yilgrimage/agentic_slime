@@ -427,6 +427,8 @@ TASA_STATE_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory semanti
 - API `status=returned` 只表示调用返回，不等于业务成功。未授权/未登录、错误消息、空结果或错误对象都不能证明 predicate；必须结合可见 result/output 判断。
 - `code_execution=error` 本身不能证明任何状态；但若同一步较早的 API 调用已有明确返回值或副作用证据，后续 Python 错误不会自动抹掉已发生的事实。若结果被省略且 API 名称本身不足以证明 predicate，则不得 set。
 - predicate 若声称覆盖“全部”“目标集合”或完整核验，抽查单个/部分对象不足以 set；必须有可见结果证明所需范围已完整覆盖。
+- `count` 只表示同名 API 在该 step 中被调用的次数，不证明这些调用覆盖了不同目标。对于“每个/全部”对象，若证据没有保留各调用的目标参数或足以核对完整覆盖的结果，必须保持 milestone 为 false。
+- 不得用相邻 step 的计划、代码循环意图或后续总结补足当前 step 缺失的执行证据；缺少目标参数/结果时宁可不 set，也不能猜测集合任务已经完成。
 - `set_steps` 只记录 false→true 的首次转变；milestone 保持为 true 时不得在后续 step 重复 set，除非中间先有对应 unset。
 - predicate 若描述“已读取/已创建/已确认”等历史完成事实，后续 logout、无关错误或再次查询失败不会使该事实变回 false；只有可见执行证据明确撤销、删除或破坏 predicate 所描述的状态时才能 unset。
 - 被压缩或省略的内容不能作为状态证据。
