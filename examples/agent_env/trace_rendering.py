@@ -173,6 +173,12 @@ def render_trace_for_reward(
     )
 
 
+def resolve_trace_env_name(sample: Any, *, explicit_env_name: str | None = None) -> str:
+    """Resolve the trace environment from the sample contract, not ambient state."""
+
+    return _trace_env_name(_sample_payload(sample), explicit_env_name=explicit_env_name)
+
+
 def render_teacher_trace_for_reward(
     trace: Any,
     *,

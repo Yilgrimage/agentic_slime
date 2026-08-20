@@ -18,6 +18,7 @@ from typing import Any
 from slime.utils.types import Sample
 
 from examples.agent_env.prompting import require_prompt
+from examples.agent_env.rewards.config import reward_cfg_path
 from examples.agent_env.rollout import (
     AgentEnvSpec,
     AgentTokenLedger,
@@ -51,6 +52,16 @@ from examples.agent_env.rollout import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _requires_structured_env_trace(args: Any, spec: AgentEnvSpec) -> bool:
+    """Return whether reward computation needs env-owned per-turn evidence."""
+
+    if spec.name != "appworld":
+        return False
+    reward_impl = str(reward_cfg_path(args, "impl", "") or "").strip().lower()
+    answer_mode = str(reward_cfg_path(args, "ropd.answer_mode", "trace") or "trace").strip().lower()
+    return reward_impl == "ropd" and answer_mode == "trace"
 
 
 class AgentPolicyThreadingHTTPServer(ThreadingHTTPServer):
@@ -648,7 +659,7 @@ async def _generate_server_episode_rollout_once(
             "request_id": lease_request_id(sample),
             "release_on_done": True,
             "include_messages": True,
-            "include_trace": _sample_case_dump_enabled(args),
+            "include_trace": _sample_case_dump_enabled(args) or _requires_structured_env_trace(args, spec),
             "prompt": require_prompt(sample.prompt, env_name=spec.name, source="sample.prompt"),
             "max_turns": int(cfg_path(args, "max_turns", spec.default_max_turns)),
             "max_response_tokens": int(response_max_tokens),

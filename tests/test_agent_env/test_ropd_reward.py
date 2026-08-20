@@ -7,8 +7,10 @@ from slime.utils.types import Sample
 
 from examples.agent_env import credit_assignment
 from examples.agent_env.advantage import segment_credit_assignment_advantage
+from examples.agent_env.episode import _requires_structured_env_trace
 from examples.agent_env.metrics import reward_metrics
 from examples.agent_env.rewards.ropd import (
+    _answer_for_judge,
     _build_ca_compact_verifier_prompt,
     _ca_compact_result,
     _parse_ca_compact_batch_masks,
@@ -55,6 +57,53 @@ def test_answer_process_env_success_override_and_failure_shaping():
     assert success_reason == "env_success_else_answer_process_50_50"
     assert abs(failure_score - 0.16) < 1e-9
     assert failure_reason == "env_success_else_answer_process_50_50"
+
+
+def test_appworld_ropd_trace_requires_env_owned_turns() -> None:
+    args = Namespace(reward={"impl": "ropd", "ropd": {"answer_mode": "trace"}})
+    appworld_spec = Namespace(name="appworld")
+
+    assert _requires_structured_env_trace(args, appworld_spec)
+    assert not _requires_structured_env_trace(
+        Namespace(reward={"impl": "ropd", "ropd": {"answer_mode": "final"}}),
+        appworld_spec,
+    )
+    assert not _requires_structured_env_trace(args, Namespace(name="webshop"))
+
+
+def test_appworld_reward_trace_rejects_message_fallback_without_ambient_env_name():
+    args = Namespace(
+        reward={
+            "ropd": {
+                "answer_mode": "trace",
+                "trace_compression": {
+                    "strip_reasoning": True,
+                    "strip_tool_call": 256,
+                    "strip_tool_response": 120,
+                    "strip_assistant_response": True,
+                    "strip_system_prompt": True,
+                },
+            }
+        }
+    )
+    sample = Sample(
+        prompt="prompt",
+        metadata={
+            "appworld": {"task_id": "demo"},
+            "task_prompt": "Update the calendar.",
+            "messages": [
+                {"role": "assistant", "content": "apis.calendar.create_event({'title': 'sync'})"},
+                {"role": "user", "content": "Execution successful."},
+            ],
+        },
+    )
+
+    try:
+        _answer_for_judge(args, sample)
+    except ValueError as exc:
+        assert "lacks valid structured execution evidence" in str(exc)
+    else:
+        raise AssertionError("AppWorld ROPD accepted a legacy message-only trace")
 
 
 def test_ca_compact_parser_accepts_tasa_state_annotations():

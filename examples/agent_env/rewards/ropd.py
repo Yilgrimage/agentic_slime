@@ -20,6 +20,7 @@ from examples.agent_env.trace_rendering import (
     compress_trace_text,
     render_answer_for_reward,
     render_teacher_trace_for_reward,
+    resolve_trace_env_name,
 )
 
 from .config import resolve_path, reward_cfg_path
@@ -421,6 +422,9 @@ TASA_STATE_VERIFIER_PROMPT_TEMPLATE = """你是一名 agentic trajectory semanti
 - 同一 milestone 可以在一条 trajectory 中多次 set/unset。
 - student 可以采用与 reference 不同的路径；只要达成同一状态事实，就应命中同一 milestone。
 - 终止调用、`Execution successful`、格式整洁或 agent 声称完成任务都不能单独证明 milestone 成立。
+- 只能依据该 step 中可见的结构化执行证据判断状态变化；代码文本、计划、注释和预期结果都不是执行证据。执行报错或证据缺失时不得 set。
+- predicate 若声称覆盖“全部”“目标集合”或完整核验，抽查单个/部分对象不足以 set；必须有可见结果证明所需范围已完整覆盖。
+- `set_steps` 只记录 false→true 的首次转变；milestone 保持为 true 时不得在后续 step 重复 set，除非中间先有对应 unset。
 - 被压缩或省略的内容不能作为状态证据。
 
 # Milestone schema
@@ -1284,10 +1288,11 @@ def _trace_env_name_from_args(args: Any) -> str:
 
 
 def _sanitize_teacher_answer_for_anonymous_verifier(args: Any, answer: Any, *, sample: Sample) -> str:
+    env_name = resolve_trace_env_name(sample, explicit_env_name=_trace_env_name_from_args(args))
     text = render_teacher_trace_for_reward(
         answer,
         options=_trace_options(args),
-        env_name=_trace_env_name_from_args(args),
+        env_name=env_name,
         context_metadata=metadata(sample),
         check_reasoning_presence=True,
         reasoning_context="ropd_teacher_answer",
@@ -1302,12 +1307,12 @@ def _sanitize_teacher_answer_for_anonymous_verifier(args: Any, answer: Any, *, s
     )
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text)
-    _require_appworld_execution_evidence(args, text, role="teacher")
+    _require_appworld_execution_evidence(args, text, role="teacher", env_name=env_name)
     return text
 
 
-def _require_appworld_execution_evidence(args: Any, text: str, *, role: str) -> None:
-    if _trace_env_name_from_args(args) != "appworld" or _answer_mode(args) != "trace":
+def _require_appworld_execution_evidence(args: Any, text: str, *, role: str, env_name: str) -> None:
+    if env_name != "appworld" or _answer_mode(args) != "trace":
         return
     try:
         parse_execution_evidence_trace(text)
@@ -1361,15 +1366,16 @@ def _answer_for_judge(args: Any, sample: Sample) -> str:
             check_reasoning_presence=True,
             reasoning_context="ropd_student_final_answer",
         )
+    env_name = resolve_trace_env_name(sample, explicit_env_name=_trace_env_name_from_args(args))
     text = render_answer_for_reward(
         sample,
         final_answer=_explicit_final_answer(sample),
         answer_mode=mode,
         options=_trace_options(args),
-        env_name=_trace_env_name_from_args(args),
+        env_name=env_name,
         check_reasoning_presence=True,
     )
-    _require_appworld_execution_evidence(args, text, role="student")
+    _require_appworld_execution_evidence(args, text, role="student", env_name=env_name)
     return text
 
 
