@@ -48,6 +48,7 @@ _STATE_CHANGING_API_PREFIXES = (
     "withdraw_",
     "write_",
 )
+_STATE_CHANGE_ARGUMENT_SAMPLE_LIMIT = 16
 
 
 def api_arguments(call_args: tuple[Any, ...], call_kwargs: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
@@ -195,7 +196,7 @@ def render_execution_evidence(
         if "count" in item:
             for key in ("arguments", "argument_samples"):
                 if key in item:
-                    reduced[key] = _compact_render_value(item[key])
+                    reduced[key] = _compact_call_detail(item, key)
         if _is_terminal_call(item) or _is_state_changing_call(item):
             for key in (
                 "arguments",
@@ -205,7 +206,7 @@ def render_execution_evidence(
                 "error",
             ):
                 if key in item:
-                    reduced[key] = _compact_render_value(item[key])
+                    reduced[key] = _compact_call_detail(item, key)
         reduced_calls.append(reduced)
     reduced_payload = {**payload, "api_calls": reduced_calls, "details_compacted": "identity"}
     if output_summary:
@@ -296,10 +297,19 @@ def _structured_call_summary(call: dict[str, Any]) -> dict[str, Any]:
     }
     for key in ("arguments", "argument_samples", "result_summary", "result_samples", "error"):
         if key in call:
-            summary[key] = _compact_render_value(call[key])
+            summary[key] = _compact_call_detail(call, key)
     if _is_terminal_call(call) and "arguments" in call:
         summary["arguments"] = call["arguments"]
     return summary
+
+
+def _compact_call_detail(call: dict[str, Any], key: str) -> Any:
+    value = call[key]
+    if key != "argument_samples" or not _is_state_changing_call(call):
+        return _compact_render_value(value)
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return _compact_render_value(value)
+    return [_compact_render_value(item, _depth=1) for item in value]
 
 
 def _compact_render_value(value: Any, *, _depth: int = 0) -> Any:
@@ -346,12 +356,22 @@ def _aggregate_call_group(group: list[dict[str, Any]]) -> dict[str, Any]:
         values = [item.get(field) for item in group if item.get(field) not in (None, "", {}, [])]
         if not values:
             continue
+        sample_limit = (
+            _STATE_CHANGE_ARGUMENT_SAMPLE_LIMIT
+            if field == "arguments" and _is_state_changing_call(aggregated)
+            else 4
+        )
         if all(value == values[0] for value in values):
             aggregated[field] = values[0]
-        elif len(values) <= 4:
+        elif len(values) <= sample_limit:
             aggregated[plural] = values
         else:
-            aggregated[plural] = [values[0], values[1], {"__omitted_calls__": len(values) - 4}, values[-2], values[-1]]
+            edge_count = sample_limit // 2
+            aggregated[plural] = [
+                *values[:edge_count],
+                {"__omitted_calls__": len(values) - sample_limit},
+                *values[-edge_count:],
+            ]
         if field == "arguments":
             aggregated["distinct_argument_count"] = len({_json(value) for value in values})
     errors = [item.get("error") for item in group if item.get("error")]

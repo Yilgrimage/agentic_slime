@@ -270,6 +270,7 @@ def test_tasa_prompt_uses_only_milestone_centric_schema():
     assert '"requires": []' in prompt
     assert "milestone 集合必须覆盖任务成功所必需的全部子目标" in prompt
     assert "仅“文件已创建”“接口已调用”不是有意义的高 progress 状态" in prompt
+    assert "可见参数与 reference 目标冲突时必须保持 false" in prompt
     assert '"behaviors"' not in prompt
     assert "bad_flags" not in prompt
 

@@ -414,6 +414,28 @@ def test_appworld_identity_compaction_preserves_repeated_call_target_coverage() 
     assert "configured_budget_exceeded" in rendered
 
 
+def test_appworld_compaction_preserves_bounded_state_change_targets() -> None:
+    evidence = build_execution_evidence(
+        observation="Execution successful.",
+        api_calls=[
+            build_api_call_evidence(
+                app_name="phone",
+                api_name="update_alarm",
+                arguments={"alarm_id": alarm_id, "enabled": alarm_id == 122},
+                result={"message": "Alarm updated successfully."},
+            )
+            for alarm_id in (120, 121, 122, 123, 125)
+        ],
+    )
+
+    rendered = render_execution_evidence(evidence, max_chars=256)
+
+    assert '"count":5' in rendered
+    assert '"distinct_argument_count":5' in rendered
+    for alarm_id in (120, 121, 122, 123, 125):
+        assert f'"alarm_id":{alarm_id}' in rendered
+
+
 def test_appworld_execution_evidence_carries_safe_stdout_without_raw_tool_response() -> None:
     evidence = build_execution_evidence(
         observation='Collected 57 songs: {"title": "A Love That Never Was", "like_count": 18}',
