@@ -121,6 +121,8 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ca_tasa_value_source_teacher_mc_rates: list[float] = []
     ca_tasa_value_source_none_rates: list[float] = []
     ca_tasa_peer_count_means: list[float] = []
+    ca_tasa_non_root_peer_count_means: list[float] = []
+    ca_tasa_non_root_mc_reliable_rates: list[float] = []
     ca_tasa_state_reward_std_means: list[float] = []
     ca_tasa_local_outcome_corrs: list[float] = []
     ca_tasa_state_prior_means: list[float] = []
@@ -186,6 +188,14 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             tasa_peer_count_mean = _float_or_none(ca.get("tasa_group_peer_count_mean"))
             if tasa_peer_count_mean is not None:
                 ca_tasa_peer_count_means.append(tasa_peer_count_mean)
+            tasa_non_root_peer_count_mean = _float_or_none(ca.get("tasa_group_non_root_peer_count_mean"))
+            if tasa_non_root_peer_count_mean is not None:
+                ca_tasa_non_root_peer_count_means.append(tasa_non_root_peer_count_mean)
+            tasa_non_root_mc_reliable_rate = _float_or_none(
+                ca.get("tasa_group_non_root_mc_reliable_rate")
+            )
+            if tasa_non_root_mc_reliable_rate is not None:
+                ca_tasa_non_root_mc_reliable_rates.append(tasa_non_root_mc_reliable_rate)
             tasa_state_reward_std_mean = _float_or_none(ca.get("tasa_group_state_reward_std_mean"))
             if tasa_state_reward_std_mean is not None:
                 ca_tasa_state_reward_std_means.append(tasa_state_reward_std_mean)
@@ -379,6 +389,14 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             metrics[f"reward/credit_assignment/{key}"] = _mean(values)
     if ca_tasa_peer_count_means:
         metrics["reward/credit_assignment/tasa_peer_count_mean"] = _mean(ca_tasa_peer_count_means)
+    if ca_tasa_non_root_peer_count_means:
+        metrics["reward/credit_assignment/tasa_non_root_peer_count_mean"] = _mean(
+            ca_tasa_non_root_peer_count_means
+        )
+    if ca_tasa_non_root_mc_reliable_rates:
+        metrics["reward/credit_assignment/tasa_non_root_mc_reliable_rate_mean"] = _mean(
+            ca_tasa_non_root_mc_reliable_rates
+        )
     if ca_tasa_state_reward_std_means:
         metrics["reward/credit_assignment/tasa_state_reward_std_mean"] = _mean(ca_tasa_state_reward_std_means)
     if ca_tasa_local_outcome_corrs:

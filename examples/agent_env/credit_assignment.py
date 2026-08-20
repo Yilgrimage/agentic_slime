@@ -1386,14 +1386,34 @@ def _write_tasa_group_stats(
     mc_records = [record for record in records if record.mc_reliable]
     prerequisite_records = [record for record in records if record.prerequisites_satisfied]
     records_with_any_peer = [record for record in records if (record.peer_count or 0) >= 1]
-    unique_state_observations: dict[tuple[int, str], int] = {}
+    unique_state_observations: dict[tuple[int, str], tuple[int, int, bool]] = {}
     for record in records:
         if record.state_key is not None and record.peer_count is not None:
-            unique_state_observations[(record.sample_index, record.state_key)] = int(record.peer_count)
+            unique_state_observations[(record.sample_index, record.state_key)] = (
+                int(record.peer_count),
+                len(record.state_ids),
+                bool(record.mc_reliable),
+            )
     peer_histogram: dict[str, int] = {}
-    for peer_count in unique_state_observations.values():
+    non_root_peer_histogram: dict[str, int] = {}
+    peer_histogram_by_depth: dict[str, dict[str, int]] = {}
+    for (_, state_key), (peer_count, depth, _) in unique_state_observations.items():
         key = str(peer_count)
         peer_histogram[key] = peer_histogram.get(key, 0) + 1
+        if state_key != "ROOT":
+            non_root_peer_histogram[key] = non_root_peer_histogram.get(key, 0) + 1
+            depth_histogram = peer_histogram_by_depth.setdefault(str(depth), {})
+            depth_histogram[key] = depth_histogram.get(key, 0) + 1
+    non_root_peer_counts = [
+        peer_count
+        for (_, state_key), (peer_count, _, _) in unique_state_observations.items()
+        if state_key != "ROOT"
+    ]
+    non_root_mc_reliable = [
+        reliable
+        for (_, state_key), (_, _, reliable) in unique_state_observations.items()
+        if state_key != "ROOT"
+    ]
     segment_keys = {
         (record.sample_index, record.segment_index)
         for record in records
@@ -1431,6 +1451,16 @@ def _write_tasa_group_stats(
         "tasa_group_segment_peer_rate": len(records_with_any_peer) / len(records) if records else 0.0,
         "tasa_group_peer_count_mean": _mean_float([float(record.peer_count or 0) for record in records]),
         "tasa_group_peer_count_histogram": peer_histogram,
+        "tasa_group_non_root_peer_count_mean": _mean_float(
+            [float(peer_count) for peer_count in non_root_peer_counts]
+        ),
+        "tasa_group_non_root_mc_reliable_rate": (
+            sum(non_root_mc_reliable) / len(non_root_mc_reliable)
+            if non_root_mc_reliable
+            else 0.0
+        ),
+        "tasa_group_non_root_peer_count_histogram": non_root_peer_histogram,
+        "tasa_group_peer_count_histogram_by_depth": peer_histogram_by_depth,
         "tasa_group_state_reward_std_mean": _mean_float(state_reward_stds),
         "tasa_local_outcome_corr": _corr(local_values, base_values),
         "tasa_state_prior_mean": _mean_float(

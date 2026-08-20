@@ -22,6 +22,32 @@ _REQUEST_CONTROL_FIELDS = {
     "show",
     "track",
 }
+_STATE_CHANGING_API_PREFIXES = (
+    "add_",
+    "approve_",
+    "cancel_",
+    "create_",
+    "delete_",
+    "deny_",
+    "disable_",
+    "enable_",
+    "login",
+    "logout",
+    "mark_",
+    "move_",
+    "remove_",
+    "remind_",
+    "reset_",
+    "send_",
+    "set_",
+    "signup",
+    "transfer_",
+    "update_",
+    "upload_",
+    "verify_",
+    "withdraw_",
+    "write_",
+)
 
 
 def api_arguments(call_args: tuple[Any, ...], call_kwargs: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
@@ -162,10 +188,10 @@ def render_execution_evidence(
     reduced_calls = []
     for item in payload["api_calls"]:
         reduced = {key: item[key] for key in ("api", "status", "count") if key in item}
-        if _is_terminal_call(item):
+        if _is_terminal_call(item) or _is_state_changing_call(item):
             for key in ("arguments", "argument_samples", "error"):
                 if key in item:
-                    reduced[key] = item[key]
+                    reduced[key] = _compact_render_value(item[key])
         reduced_calls.append(reduced)
     reduced_payload = {**payload, "api_calls": reduced_calls, "details_compacted": "identity"}
     if output_summary:
@@ -174,6 +200,12 @@ def render_execution_evidence(
     if len(rendered) <= max_chars:
         return f"{TRACE_LABEL}:\n{rendered}"
 
+    terminal_calls = [item for item in reduced_calls if _is_terminal_call(item)]
+    state_changing_calls = [
+        item
+        for item in reduced_calls
+        if _is_state_changing_call(item) and not _is_terminal_call(item)
+    ]
     identity_payload = {
         "schema_version": SCHEMA_VERSION,
         "code_execution": payload["code_execution"],
@@ -182,7 +214,8 @@ def render_execution_evidence(
             {key: item[key] for key in ("api", "status", "count") if key in item}
             for item in payload["api_calls"]
         ],
-        "terminal_calls": [item for item in reduced_calls if _is_terminal_call(item)],
+        "terminal_calls": terminal_calls,
+        "state_changing_calls": state_changing_calls,
         "details_compacted": "identity",
         "configured_budget_exceeded": True,
     }
@@ -302,6 +335,11 @@ def _call_group_key(call: dict[str, Any]) -> tuple[str, str]:
 
 def _is_terminal_call(call: dict[str, Any]) -> bool:
     return str(call.get("api") or "").endswith(".complete_task")
+
+
+def _is_state_changing_call(call: dict[str, Any]) -> bool:
+    api_name = str(call.get("api") or "").rsplit(".", 1)[-1].strip().lower()
+    return api_name.startswith(_STATE_CHANGING_API_PREFIXES)
 
 
 def _safe_output_summary(observation: Any, calls: list[dict[str, Any]]) -> str:

@@ -688,6 +688,9 @@ def test_tasa_value_source_masks_cover_full_and_no_teacher_modes():
     )
 
     assert blended.teacher_prior_available and blended.mc_reliable and blended.source == "teacher_mc"
+    assert blended.peer_count == 2
+    assert blended.peer_outcome_sum == 1.0
+    assert abs(float(blended.value) - (4.0 * 0.6 + 1.0) / 6.0) < 1e-9
     assert teacher_only.value == 0.6 and teacher_only.source == "teacher"
     assert mc_only.value == 0.5 and mc_only.source == "mc"
     assert unavailable.value is None and not unavailable.anchor_eligible and unavailable.source == "none"
@@ -700,6 +703,8 @@ def test_tasa_metrics_report_masks_and_segment_coverage():
         "tasa_group_anchor_eligible_rate": 0.75,
         "tasa_group_teacher_prior_available_rate": 0.0,
         "tasa_group_mc_reliable_rate": 0.5,
+        "tasa_group_non_root_peer_count_mean": 3.5,
+        "tasa_group_non_root_mc_reliable_rate": 0.625,
         "tasa_group_prerequisite_valid_rate": 0.875,
         "tasa_group_semantic_segment_count": 4.0,
         "tasa_group_semantic_segment_length_mean": 2.5,
@@ -713,6 +718,8 @@ def test_tasa_metrics_report_masks_and_segment_coverage():
 
     assert metrics["reward/credit_assignment/tasa_train_token_coverage_rate_mean"] == 1.0
     assert metrics["reward/credit_assignment/tasa_mc_reliable_rate_mean"] == 0.5
+    assert metrics["reward/credit_assignment/tasa_non_root_peer_count_mean"] == 3.5
+    assert metrics["reward/credit_assignment/tasa_non_root_mc_reliable_rate_mean"] == 0.625
     assert metrics["reward/credit_assignment/tasa_value_source_none_rate_mean"] == 0.5
 
 
@@ -751,6 +758,8 @@ def test_tasa_debug_dump_exposes_state_value_and_segment_evidence(tmp_path, monk
     assert payload["step_marks"] == {}
     assert payload["step_mark_events"] == []
     assert isinstance(payload["credit_assignment"]["tasa_group_peer_count_histogram"], dict)
+    assert isinstance(payload["credit_assignment"]["tasa_group_non_root_peer_count_histogram"], dict)
+    assert isinstance(payload["credit_assignment"]["tasa_group_peer_count_histogram_by_depth"], dict)
     for key in (
         "action",
         "state_key",

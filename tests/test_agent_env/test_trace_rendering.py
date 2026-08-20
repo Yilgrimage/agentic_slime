@@ -305,6 +305,41 @@ def test_appworld_evidence_budget_preserves_api_identity_and_terminal_answer() -
     assert "configured_budget_exceeded" in rendered
 
 
+def test_appworld_evidence_budget_preserves_state_changing_call_arguments() -> None:
+    evidence = {
+        "schema_version": SCHEMA_VERSION,
+        "code_execution": "ok",
+        "output_kind": "no_stdout",
+        "api_calls": [
+            {
+                "api": f"venmo.show_sent_payment_requests_{index}",
+                "status": "returned",
+                "result_summary": {"rows": ["x" * 400]},
+            }
+            for index in range(8)
+        ]
+        + [
+            {
+                "api": "venmo.create_payment_request",
+                "status": "returned",
+                "arguments": {
+                    "amount": 41.0,
+                    "description": "Dinner with Colleagues",
+                    "user_id": 917,
+                },
+            }
+        ],
+    }
+
+    rendered = render_execution_evidence(evidence, max_chars=128)
+
+    assert '"state_changing_calls"' in rendered
+    assert "venmo.create_payment_request" in rendered
+    assert '"amount":41.0' in rendered
+    assert "Dinner with Colleagues" in rendered
+    assert '"user_id":917' in rendered
+
+
 def test_appworld_evidence_uses_structured_compaction_before_identity_only() -> None:
     evidence = build_execution_evidence(
         observation="Execution successful.",
