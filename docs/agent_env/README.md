@@ -7,6 +7,9 @@ design boundaries and failure modes that are easy to miss when reading code.
 For details, read the source and the resolved run profiles under
 `RUN_ROOT/logs/`.
 
+For the current TASA-GAE implementation, reproducible profiles, required dump
+audits, and known unvalidated items, see [TASA-GAE Handoff](tasa_handoff.md).
+
 Portable agent operating rules live in `.claude/skills/`:
 
 - `.claude/skills/agentic-slime-discipline/SKILL.md`: agentic Slime code,

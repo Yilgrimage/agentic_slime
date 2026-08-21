@@ -23,6 +23,7 @@ LOCAL_ENVS_DIR="${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}"
 SESSION="${RUN_BENCH_SESSION:-torch_bench}"
 PY="${RUN_BENCH_SCRIPT:-/tmp/server_ops_torch_bench.py}"
 PY_PATTERN="${RUN_BENCH_SCRIPT_PATTERN:-${PY}}"
+PY_PROCESS_PATTERN="${RUN_BENCH_PROCESS_PATTERN:-[p]ython.*${PY_PATTERN}}"
 LOG="${RUN_BENCH_LOG:-/tmp/server_ops_torch_bench.log}"
 NODES_FILE=""
 NODE_SELECTOR=""
@@ -99,7 +100,7 @@ done
 
 stop_local() {
   tmux kill-session -t "${SESSION}" 2>/dev/null || true
-  pkill -f "${PY_PATTERN}" 2>/dev/null || true
+  pkill -f "${PY_PROCESS_PATTERN}" 2>/dev/null || true
   if [ "${KILL_VLLM}" = "1" ]; then
     tmux kill-session -t "vllm_bench" 2>/dev/null || true
     tmux kill-session -t "vllm_server" 2>/dev/null || true
@@ -115,7 +116,7 @@ cleanup_before_start() {
   else
     tmux kill-session -t "${SESSION}" 2>/dev/null || true
   fi
-  pkill -f "${PY_PATTERN}" 2>/dev/null || true
+  pkill -f "${PY_PROCESS_PATTERN}" 2>/dev/null || true
   if [ "${KILL_VLLM}" = "1" ]; then
     tmux kill-session -t "vllm_bench" 2>/dev/null || true
     tmux kill-session -t "vllm_server" 2>/dev/null || true
@@ -128,16 +129,16 @@ cleanup_before_start() {
 wait_local_cleanup() {
   local deadline
   deadline=$((SECONDS + 60))
-  while pgrep -f "${PY_PATTERN}" >/dev/null 2>&1; do
+  while pgrep -f "${PY_PROCESS_PATTERN}" >/dev/null 2>&1; do
     [ "${SECONDS}" -ge "${deadline}" ] && break
-    pkill -f "${PY_PATTERN}" 2>/dev/null || true
+    pkill -f "${PY_PROCESS_PATTERN}" 2>/dev/null || true
     sleep 1
   done
 }
 
 status_local() {
   tmux ls 2>/dev/null | grep -E "^${SESSION}:" || true
-  pgrep -af "${PY_PATTERN}" || true
+  pgrep -af "${PY_PROCESS_PATTERN}" || true
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi || true
   fi
