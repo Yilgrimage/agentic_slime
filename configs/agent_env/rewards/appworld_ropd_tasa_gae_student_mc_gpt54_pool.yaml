@@ -1,0 +1,41 @@
+impl: ropd
+judge_mode: aux
+source: score
+outcome: 10.0
+
+ropd:
+  schema_mode: ca_compact
+  ca_scalar_reward_source: env_success
+  join_key: task_id
+  teacher_index_path: ${ROOT_DIR}/data/teacher_traces/processed/appworld_deepseek_v4_flash_train_bestofn_teacher_clean_trace.jsonl
+  teacher_index_keys:
+    - task_id
+  teacher_answer_keys:
+    - teacher_reward_trace_payload
+  concurrency: 8
+  judge_concurrency: 8
+  max_attempts: 4
+  rate_limit_backoff_s: 10
+  retry_backoff_s: 1
+  response_format: json_object
+  judge_max_tokens: 8192
+  answer_mode: trace
+  strip_reasoning: true
+  strip_tool_call: 512
+  strip_tool_response: true
+  strip_assistant_response: true
+  strip_system_prompt: true
+
+credit_assignment:
+  enable: true
+  advantage_mode: teacher_anchored_value_gae
+  tasa_min_peer_support: 4
+  tasa_local_normalization: group_segment_rms
+  tasa_use_teacher_prior: false
+  tasa_enforce_prerequisites: true
+  tasa_lambda: 0.8
+  tasa_prior_root: 0.1
+  tasa_prior_success: 0.9
+  tasa_outcome_scale: 10.0
+  clip: 2.0
+  step_index_base: 1
