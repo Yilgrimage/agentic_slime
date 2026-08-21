@@ -25,6 +25,7 @@ PY="${RUN_BENCH_SCRIPT:-/tmp/server_ops_torch_bench.py}"
 PY_PATTERN="${RUN_BENCH_SCRIPT_PATTERN:-${PY}}"
 PY_PROCESS_PATTERN="${RUN_BENCH_PROCESS_PATTERN:-[p]ython.*${PY_PATTERN}}"
 LOG="${RUN_BENCH_LOG:-/tmp/server_ops_torch_bench.log}"
+BENCH_CUDA_VISIBLE_DEVICES="${BENCH_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
 NODES_FILE=""
 NODE_SELECTOR=""
 SSH_USER="${SSH_USER:-$(id -un 2>/dev/null || echo tiger)}"
@@ -98,9 +99,36 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+bench_pids() {
+  local proc pid comm arg matched
+  for proc in /proc/[0-9]*; do
+    pid="${proc##*/}"
+    [ -r "${proc}/comm" ] && [ -r "${proc}/cmdline" ] || continue
+    comm="$(cat "${proc}/comm" 2>/dev/null || true)"
+    case "${comm}" in
+      python|python[0-9]*) ;;
+      *) continue ;;
+    esac
+    matched=0
+    while IFS= read -r -d '' arg; do
+      if [ "${arg}" = "${PY_PATTERN}" ]; then
+        matched=1
+        break
+      fi
+    done < "${proc}/cmdline"
+    [ "${matched}" = 1 ] && echo "${pid}"
+  done
+}
+
+stop_bench_processes() {
+  local pids
+  pids="$(bench_pids | tr '\n' ' ' || true)"
+  [ -z "${pids//[[:space:]]/}" ] || kill ${pids} 2>/dev/null || true
+}
+
 stop_local() {
   tmux kill-session -t "${SESSION}" 2>/dev/null || true
-  pkill -f "${PY_PROCESS_PATTERN}" 2>/dev/null || true
+  stop_bench_processes
   if [ "${KILL_VLLM}" = "1" ]; then
     tmux kill-session -t "vllm_bench" 2>/dev/null || true
     tmux kill-session -t "vllm_server" 2>/dev/null || true
@@ -116,7 +144,7 @@ cleanup_before_start() {
   else
     tmux kill-session -t "${SESSION}" 2>/dev/null || true
   fi
-  pkill -f "${PY_PROCESS_PATTERN}" 2>/dev/null || true
+  stop_bench_processes
   if [ "${KILL_VLLM}" = "1" ]; then
     tmux kill-session -t "vllm_bench" 2>/dev/null || true
     tmux kill-session -t "vllm_server" 2>/dev/null || true
@@ -129,16 +157,18 @@ cleanup_before_start() {
 wait_local_cleanup() {
   local deadline
   deadline=$((SECONDS + 60))
-  while pgrep -f "${PY_PROCESS_PATTERN}" >/dev/null 2>&1; do
+  while [ -n "$(bench_pids)" ]; do
     [ "${SECONDS}" -ge "${deadline}" ] && break
-    pkill -f "${PY_PROCESS_PATTERN}" 2>/dev/null || true
+    stop_bench_processes
     sleep 1
   done
 }
 
 status_local() {
   tmux ls 2>/dev/null | grep -E "^${SESSION}:" || true
-  pgrep -af "${PY_PROCESS_PATTERN}" || true
+  local pids
+  pids="$(bench_pids | tr '\n' ' ' || true)"
+  [ -z "${pids//[[:space:]]/}" ] || ps -o pid=,args= -p ${pids} || true
   if command -v nvidia-smi >/dev/null 2>&1; then
     nvidia-smi || true
   fi
@@ -210,7 +240,11 @@ PY
 
 wait_bench_ready() {
   local expected ready deadline
-  expected=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
+  if [ -n "${BENCH_CUDA_VISIBLE_DEVICES}" ]; then
+    expected=$(awk -F, '{print NF}' <<< "${BENCH_CUDA_VISIBLE_DEVICES}")
+  else
+    expected=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
+  fi
   [ "${expected:-0}" -gt 0 ] || expected=1
   deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
   while [ "${SECONDS}" -lt "${deadline}" ]; do
@@ -233,7 +267,11 @@ start_local() {
   write_bench_worker
   : > "${LOG}"
   local cmd
-  cmd=$(printf '%q -u %q >> %q 2>&1' "${BENCH_PYTHON}" "${PY}" "${LOG}")
+  if [ -n "${BENCH_CUDA_VISIBLE_DEVICES}" ]; then
+    cmd=$(printf 'CUDA_VISIBLE_DEVICES=%q %q -u %q >> %q 2>&1' "${BENCH_CUDA_VISIBLE_DEVICES}" "${BENCH_PYTHON}" "${PY}" "${LOG}")
+  else
+    cmd=$(printf '%q -u %q >> %q 2>&1' "${BENCH_PYTHON}" "${PY}" "${LOG}")
+  fi
   tmux new-session -d -s "${SESSION}" "${cmd}"
   wait_bench_ready || {
     status_local
@@ -299,12 +337,15 @@ is_current_node() {
 
 run_one() {
   local node=$1
-  local cmd bench_python_env=""
+  local cmd bench_python_env="" bench_cuda_env=""
   if [ "${BENCH_PYTHON_EXPLICIT}" = "1" ]; then
     bench_python_env=$(printf ' BENCH_PYTHON=%q' "${BENCH_PYTHON}")
   fi
-  cmd=$(printf 'ROOT_DIR=%q LOCAL_ENVS_DIR=%q RUN_BENCH_SESSION=%q RUN_BENCH_SCRIPT=%q RUN_BENCH_SCRIPT_PATTERN=%q RUN_BENCH_LOG=%q RUN_BENCH_READY_TIMEOUT_SECONDS=%q RUN_BENCH_KILL_TMUX_SERVER=%q RUN_BENCH_KILL_VLLM=%q%s bash %q %q' \
-    "${ROOT_DIR}" "${LOCAL_ENVS_DIR}" "${SESSION}" "${PY}" "${PY_PATTERN}" "${LOG}" "${READY_TIMEOUT_SECONDS}" "${KILL_TMUX_SERVER}" "${KILL_VLLM}" "${bench_python_env}" "${REMOTE_SCRIPT}" "${ACTION}")
+  if [ -n "${BENCH_CUDA_VISIBLE_DEVICES}" ]; then
+    bench_cuda_env=$(printf ' BENCH_CUDA_VISIBLE_DEVICES=%q' "${BENCH_CUDA_VISIBLE_DEVICES}")
+  fi
+  cmd=$(printf 'ROOT_DIR=%q LOCAL_ENVS_DIR=%q RUN_BENCH_SESSION=%q RUN_BENCH_SCRIPT=%q RUN_BENCH_SCRIPT_PATTERN=%q RUN_BENCH_LOG=%q RUN_BENCH_READY_TIMEOUT_SECONDS=%q RUN_BENCH_KILL_TMUX_SERVER=%q RUN_BENCH_KILL_VLLM=%q%s%s bash %q %q' \
+    "${ROOT_DIR}" "${LOCAL_ENVS_DIR}" "${SESSION}" "${PY}" "${PY_PATTERN}" "${LOG}" "${READY_TIMEOUT_SECONDS}" "${KILL_TMUX_SERVER}" "${KILL_VLLM}" "${bench_python_env}" "${bench_cuda_env}" "${REMOTE_SCRIPT}" "${ACTION}")
   if is_current_node "${node}"; then
     run_local
   else

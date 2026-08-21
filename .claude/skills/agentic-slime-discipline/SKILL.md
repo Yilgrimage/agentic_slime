@@ -219,6 +219,21 @@ Do not include model names or aux providers in train profile names.
 ## Training Pitfalls
 
 - Disable dropout for PPO/GRPO/RL training.
+- For Slime PPO, expect a separate critic role. Configure role-specific
+  Megatron entries or resolved overrides so actor and critic save to disjoint
+  sibling directories, for example `checkpoints/actor` and
+  `checkpoints/critic`. Fail fast if the paths overlap, because a critic save
+  can otherwise overwrite actor weights and make eval appear broken.
+- Keep PPO role-save fixes in launch/profile layers. Do not modify Slime core
+  merely to separate actor and critic checkpoints.
+- When using critic warmup such as `num_critic_only_steps`, do not expect actor
+  metrics or actor checkpoints before warmup finishes. Judge early PPO health
+  from rollout validity, reward/success/truncation, critic value loss, and
+  critic grad norm; actor grad norm appears only after actor updates start.
+- For PPO eval, load the actor checkpoint path, not the top-level checkpoint
+  root or critic role path. If a checkpoint has a scalar value head such as
+  `output_layer.weight` shaped `[1, hidden]`, treat it as critic-contaminated
+  for policy eval and preserve logs before deleting/re-running.
 - In full-async training, use rollout-time logprobs as the old policy
   denominator, for example `USE_ROLLOUT_LOGPROBS=1`.
 - Treat `train_rollout_logprob_abs_diff=0` under rollout-logprob mode as a

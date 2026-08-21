@@ -133,6 +133,11 @@ A100 jixf-nas-lq:  ROOT_DIR=/mnt/bn/jixf-nas-lq/mlf, SSH_PORT=10413,
   and GPUs become idle, watchdog should restart bench by utilization threshold.
 - `bench_on_exit` must call `${ROOT_DIR}/scripts/run_bench.sh`; do not embed a
   second keepalive implementation in training repos.
+- When stopping a training run to release GPUs, read that run's
+  `logs/resolved_launch.env`, stop only the selected train/Ray/env/router
+  tmux sessions and processes, then decide bench explicitly. If the user wants
+  idle GPUs, stop bench after train exit; if keepalive is acceptable, start or
+  leave `${ROOT_DIR}/scripts/run_bench.sh` running.
 - Reset only selected train/Ray/env processes. Do not kill unrelated user
   processes.
 - Avoid `pkill -f <pattern>` in SSH one-liners; it can match and kill the SSH
@@ -140,6 +145,10 @@ A100 jixf-nas-lq:  ROOT_DIR=/mnt/bn/jixf-nas-lq/mlf, SSH_PORT=10413,
 - For repeated large-model startup, prefer a node-local model cache. NAS reads
   are acceptable for smoke tests, but repeated SGLang/actor loads should use a
   disposable local cache.
+- After stop/start actions, verify with `nvidia-smi --query-compute-apps`,
+  GPU memory/utilization, `tmux ls`, and targeted `pgrep` patterns for train,
+  Ray, SGLang, env/router, and bench. Do not rely on a single SSH command that
+  may have been killed by process cleanup.
 - To stop a distributed run, first read its `resolved_launch.env`, then target
   only its selected nodes and named train/Ray/env/router sessions. Request a
   normal train exit before stopping that run's Ray daemons. Do not stop the GPU
@@ -171,6 +180,10 @@ A100 jixf-nas-lq:  ROOT_DIR=/mnt/bn/jixf-nas-lq/mlf, SSH_PORT=10413,
 - If node disk grows, inspect `/tmp/ray`, Ray logs, object spilling,
   runtime-env cache, core files, and debug dumps before changing training
   semantics.
+- A healthy Slime/agent-env run should not require `/tmp/ray` to grow without
+  bound. If it jumps from small scratch usage to hundreds of GB, capture
+  `du -sh /tmp/ray`, `df -h /tmp`, deleted-open files, Ray object spill logs,
+  and the writing process before relaunching on another node.
 
 ## Keepalive
 
