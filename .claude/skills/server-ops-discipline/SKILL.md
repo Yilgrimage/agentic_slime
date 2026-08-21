@@ -184,6 +184,9 @@ A100 jixf-nas-lq:  ROOT_DIR=/mnt/bn/jixf-nas-lq/mlf, SSH_PORT=10413,
 ## Eval Records
 
 - Keep a small eval index under `${ROOT_DIR}/runs/eval_summaries`.
+- For AppWorld, read `references/appworld_eval_results.md` before comparing,
+  deleting, or handing off experiments. It is the portable accepted-results
+  ledger when the original NAS is unavailable.
 - Copy TSV/JSON summary files into `eval_summaries/<env>/summaries/` and add
   raw symlinks under `eval_summaries/<env>/raw_links/`.
 - Update `eval_summaries/index.tsv` for every result used in discussion,
@@ -192,3 +195,6 @@ A100 jixf-nas-lq:  ROOT_DIR=/mnt/bn/jixf-nas-lq/mlf, SSH_PORT=10413,
 - Do not rely on chat history or W&B alone for remembered eval outcomes.
 - Before deleting checkpoints, verify the corresponding eval summary is indexed.
   If no eval was run, record that explicitly in the cleanup manifest.
+- Before releasing a cluster or trail, copy the compact accepted metrics,
+  protocol, checkpoint ancestry, and validity caveats into a tracked skill
+  reference. Raw symlinks and run-local files are not a portable handoff.

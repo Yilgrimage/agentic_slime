@@ -136,6 +136,10 @@ Do not include model names or aux providers in train profile names.
   TSV/JSON summaries into `<env>/summaries/`, link raw run/eval directories from
   `<env>/raw_links/`, and add an `index.tsv` row. Label dev-only and smoke evals
   explicitly so they are not confused with full official eval.
+- Before using remembered AppWorld numbers, read
+  `../server-ops-discipline/references/appworld_eval_results.md`. It records the
+  portable accepted protocol, checkpoint ancestry, formal results, and known
+  invalid historical evaluations without requiring the original NAS.
 - Checkpoint eval must use a path that actually loads the checkpoint weights.
   Megatron dist checkpoints need the actor-load plus weight-sync eval path;
   rollout-only eval is valid only for HF checkpoints already loadable by the
