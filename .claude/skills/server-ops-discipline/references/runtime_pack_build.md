@@ -80,8 +80,8 @@ mkdir -p "${ROOT_DIR}"/{code,data,envs,models,packs,runs,secrets,scripts,tools}
 
 git clone https://github.com/Yilgrimage/agentic_slime.git \
   "${ROOT_DIR}/code/slime"
-git -C "${ROOT_DIR}/code/slime" fetch origin agentic-env-backend
-git -C "${ROOT_DIR}/code/slime" checkout --detach origin/agentic-env-backend
+git -C "${ROOT_DIR}/code/slime" fetch origin main
+git -C "${ROOT_DIR}/code/slime" checkout --detach origin/main
 git -C "${ROOT_DIR}/code/slime" rev-parse HEAD
 
 cp -a "${ROOT_DIR}/code/slime/.claude/skills/server-ops-discipline/scripts/." \
