@@ -50,9 +50,11 @@ class SegmentCreditRecord:
     anchor_eligible: bool | None = None
     value_source: str | None = None
     anchor_state_key: str | None = None
+    anchor_value: float | None = None
     boundary_state_key: str | None = None
+    boundary_value: float | None = None
     segment_index: int | None = None
-    distance_to_boundary: int | None = None
+    future_gae_contribution: float | None = None
     action_text: str | None = None
     boundary_value_source: str | None = None
     boundary_peer_count: int | None = None
@@ -1074,13 +1076,15 @@ def _credit_record_payload(
                 "anchor_eligible": record.anchor_eligible,
                 "value_source": record.value_source,
                 "anchor_state_key": record.anchor_state_key,
+                "anchor_value": record.anchor_value,
                 "boundary_state_key": record.boundary_state_key,
+                "boundary_value": record.boundary_value,
                 "boundary_value_source": record.boundary_value_source,
                 "boundary_peer_count": record.boundary_peer_count,
                 "boundary_teacher_prior_available": record.boundary_teacher_prior_available,
                 "boundary_mc_reliable": record.boundary_mc_reliable,
                 "segment_index": record.segment_index,
-                "distance_to_boundary": record.distance_to_boundary,
+                "future_gae_contribution": record.future_gae_contribution,
             }
             for record in records
         ],
@@ -1477,6 +1481,24 @@ def _write_tasa_group_stats(
         "tasa_gae_abs_mean": _mean_float(
             [abs(float(record.gae_advantage)) for record in records if record.gae_advantage is not None]
         ),
+        "tasa_gae_future_tail_abs_mean": _mean_float(
+            [
+                abs(float(record.future_gae_contribution))
+                for record in records
+                if record.future_gae_contribution is not None
+            ]
+        ),
+        "tasa_gae_future_tail_nonzero_rate": (
+            sum(
+                1
+                for record in records
+                if record.future_gae_contribution is not None
+                and abs(float(record.future_gae_contribution)) > 1e-12
+            )
+            / len(records)
+            if records
+            else 0.0
+        ),
     }
     by_sample: dict[int, list[SegmentCreditRecord]] = {}
     for record in records:
@@ -1678,12 +1700,15 @@ def _normalize_tasa_gae_values(
     return normalized
 
 
-def _segment_local_gae(delta: float, length: int, lam: float) -> list[float]:
-    """Propagate one boundary delta only inside its semantic segment."""
+def _global_turn_gae(deltas: list[float], lam: float) -> list[float]:
+    """Propagate future semantic-state deltas across the full trajectory."""
 
-    if length <= 0:
-        return []
-    return [(lam ** (length - offset - 1)) * delta for offset in range(length)]
+    advantages = [0.0] * len(deltas)
+    tail = 0.0
+    for position in range(len(deltas) - 1, -1, -1):
+        tail = float(deltas[position]) + lam * tail
+        advantages[position] = tail
+    return advantages
 
 
 def _attach_tasa_value_gae(
@@ -1699,9 +1724,10 @@ def _attach_tasa_value_gae(
     A semantic state is an anchor when its prerequisites are valid and either
     a teacher prior or a reliable leave-one-out MC estimate is available. Full
     TASA enables the teacher mask; TASA-no-teacher disables it and therefore
-    ignores low-support milestone states as segment boundaries. Every student
-    action is assigned to exactly one segment, and GAE propagation stops at the
-    segment's semantic boundary.
+    ignores low-support milestone states as value boundaries. Each action gets
+    one semantic-state TD delta, then GAE propagates those deltas backwards over
+    the full trajectory. Milestones do not reset the GAE tail, so terminal
+    outcomes can correct earlier progress credit.
     """
 
     cfg_clip = clip(args)
@@ -1820,53 +1846,78 @@ def _attach_tasa_value_gae(
                     f"sample_index={sample_index} has fewer than tasa_min_peer_support peers"
                 )
 
-            sample_final = list(annotated)
-            segment_start = 0
+            sample_final: list[SegmentCreditRecord] = []
             anchor_key = "ROOT"
             anchor_value = float(root_estimate.value)
             segment_index = 0
+            deltas: list[float] = []
             for position, record in enumerate(annotated):
                 is_terminal = position == len(annotated) - 1
                 next_key = record.next_state_key or record.state_key or "ROOT"
                 next_estimate = estimate(sample_index, next_key)
                 closes_anchor = not is_terminal and next_key != anchor_key and next_estimate.anchor_eligible
-                if not is_terminal and not closes_anchor:
-                    continue
-                boundary_key = "TERMINAL" if is_terminal else next_key
-                boundary_value = outcomes[sample_index] if is_terminal else float(next_estimate.value)
-                delta = boundary_value - anchor_value
-                segment_values = _segment_local_gae(delta, position - segment_start + 1, cfg_lambda)
-                for segment_position, local in zip(
-                    range(segment_start, position + 1), segment_values, strict=True
-                ):
-                    distance = position - segment_position
-                    current = sample_final[segment_position]
-                    sample_final[segment_position] = replace(
-                        current,
-                        value=local,
-                        marked=abs(local) > 0,
-                        local_advantage=local,
+                if is_terminal:
+                    # A terminal action can also set a milestone. Treat it as
+                    # one transition to the observed outcome, not as a progress
+                    # reward followed by an artificial zero-length failure.
+                    boundary_key = "TERMINAL"
+                    boundary_value = outcomes[sample_index]
+                    delta = boundary_value - anchor_value
+                    boundary_value_source = "terminal"
+                    boundary_peer_count = None
+                    boundary_teacher_prior_available = None
+                    boundary_mc_reliable = None
+                elif closes_anchor:
+                    boundary_key = next_key
+                    boundary_value = float(next_estimate.value)
+                    delta = boundary_value - anchor_value
+                    boundary_value_source = next_estimate.source
+                    boundary_peer_count = next_estimate.peer_count
+                    boundary_teacher_prior_available = next_estimate.teacher_prior_available
+                    boundary_mc_reliable = next_estimate.mc_reliable
+                else:
+                    boundary_key = anchor_key
+                    boundary_value = anchor_value
+                    delta = 0.0
+                    anchor_estimate = estimate(sample_index, anchor_key)
+                    boundary_value_source = anchor_estimate.source
+                    boundary_peer_count = anchor_estimate.peer_count
+                    boundary_teacher_prior_available = anchor_estimate.teacher_prior_available
+                    boundary_mc_reliable = anchor_estimate.mc_reliable
+                deltas.append(delta)
+                sample_final.append(
+                    replace(
+                        record,
                         supported=True,
                         td_delta=delta,
-                        gae_advantage=local,
                         anchor_state_key=anchor_key,
+                        anchor_value=anchor_value,
                         boundary_state_key=boundary_key,
+                        boundary_value=boundary_value,
                         segment_index=segment_index,
-                        distance_to_boundary=distance,
-                        boundary_value_source="terminal" if is_terminal else next_estimate.source,
-                        boundary_peer_count=None if is_terminal else next_estimate.peer_count,
-                        boundary_teacher_prior_available=(
-                            None if is_terminal else next_estimate.teacher_prior_available
-                        ),
-                        boundary_mc_reliable=None if is_terminal else next_estimate.mc_reliable,
+                        boundary_value_source=boundary_value_source,
+                        boundary_peer_count=boundary_peer_count,
+                        boundary_teacher_prior_available=boundary_teacher_prior_available,
+                        boundary_mc_reliable=boundary_mc_reliable,
                     )
-                segment_index += 1
-                segment_start = position + 1
-                if not is_terminal:
+                )
+                if closes_anchor:
+                    segment_index += 1
                     anchor_key = next_key
                     anchor_value = float(next_estimate.value)
-            if segment_start != len(annotated):
-                raise AssertionError("TASA-GAE segment construction left unassigned actions")
+
+            gae_values = _global_turn_gae(deltas, cfg_lambda)
+            sample_final = [
+                replace(
+                    record,
+                    value=gae_value,
+                    marked=abs(gae_value) > 0,
+                    local_advantage=gae_value,
+                    gae_advantage=gae_value,
+                    future_gae_contribution=gae_value - float(record.td_delta or 0.0),
+                )
+                for record, gae_value in zip(sample_final, gae_values, strict=True)
+            ]
             final_records.extend(sample_final)
 
         normalized_values = _normalize_tasa_gae_values(final_records, cfg_normalization, cfg_clip)

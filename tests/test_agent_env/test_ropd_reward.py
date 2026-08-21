@@ -638,10 +638,84 @@ def test_tasa_teacher_prior_aggregates_active_progress_weights():
     ) < 1e-9
 
 
-def test_tasa_segment_local_gae_stops_at_each_boundary():
-    assert credit_assignment._segment_local_gae(2.0, 3, 0.0) == [0.0, 0.0, 2.0]
-    assert credit_assignment._segment_local_gae(2.0, 3, 0.5) == [0.5, 1.0, 2.0]
-    assert credit_assignment._segment_local_gae(2.0, 3, 1.0) == [2.0, 2.0, 2.0]
+def test_tasa_global_turn_gae_propagates_across_milestone_boundaries():
+    deltas = [0.6, 0.0, -0.7]
+
+    assert credit_assignment._global_turn_gae(deltas, 0.0) == deltas
+    assert credit_assignment._global_turn_gae(deltas, 0.5) == [0.425, -0.35, -0.7]
+    assert all(
+        abs(actual - expected) < 1e-9
+        for actual, expected in zip(
+            credit_assignment._global_turn_gae(deltas, 1.0),
+            [-0.1, -0.7, -0.7],
+            strict=True,
+        )
+    )
+
+
+def test_tasa_global_gae_terminal_failure_corrects_immediate_milestone():
+    args = Namespace(
+        n_samples_per_prompt=3,
+        reward={
+            "outcome": 1.0,
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_value_gae",
+                "tasa_min_peer_support": 1,
+                "tasa_local_normalization": "none",
+                "tasa_prior_kappa": 4.0,
+                "tasa_lambda": 1.0,
+                "tasa_prior_root": 0.1,
+                "tasa_prior_success": 0.9,
+                "tasa_outcome_scale": 1.0,
+                "clip": 10.0,
+            },
+        },
+    )
+    samples = [
+        _tasa_sample(0, turns=1, changes=[{"step": 1, "set": ["M1"], "unset": []}]),
+        _tasa_sample(1, turns=1, changes=[{"step": 1, "set": ["M1"], "unset": []}]),
+        _tasa_sample(2, turns=1, changes=[]),
+    ]
+
+    credit_assignment.attach_process_advantages(args, samples, scalar_rewards=[0.0, 0.0, 0.0])
+
+    # The only action both sets M1 and terminates unsuccessfully. It must get
+    # R - V(ROOT), not the positive V(M1) - V(ROOT) transition.
+    assert samples[0].metadata["process_advantages"][0] < 0
+
+
+def test_tasa_global_gae_propagates_unique_success_through_loo_baselines():
+    args = Namespace(
+        n_samples_per_prompt=3,
+        reward={
+            "outcome": 1.0,
+            "credit_assignment": {
+                "enable": True,
+                "advantage_mode": "teacher_anchored_value_gae",
+                "tasa_min_peer_support": 1,
+                "tasa_local_normalization": "none",
+                "tasa_prior_kappa": 4.0,
+                "tasa_lambda": 1.0,
+                "tasa_prior_root": 0.1,
+                "tasa_prior_success": 0.9,
+                "tasa_outcome_scale": 1.0,
+                "clip": 10.0,
+            },
+        },
+    )
+    samples = [
+        _tasa_sample(0, turns=3, changes=[{"step": 1, "set": ["M1"], "unset": []}]),
+        _tasa_sample(1, turns=3, changes=[{"step": 1, "set": ["M1"], "unset": []}]),
+        _tasa_sample(2, turns=3, changes=[]),
+    ]
+
+    credit_assignment.attach_process_advantages(args, samples, scalar_rewards=[1.0, 0.0, 0.0])
+
+    advantages = samples[0].metadata["process_advantages"]
+    assert advantages[0] > 0
+    assert advantages[2] > 0
+    assert advantages[4] > 0
 
 
 def test_tasa_rms_normalization_preserves_advantage_sign():
@@ -713,6 +787,8 @@ def test_tasa_metrics_report_masks_and_segment_coverage():
         "tasa_group_value_source_mc_rate": 0.5,
         "tasa_group_value_source_teacher_mc_rate": 0.0,
         "tasa_group_value_source_none_rate": 0.5,
+        "tasa_gae_future_tail_abs_mean": 0.25,
+        "tasa_gae_future_tail_nonzero_rate": 0.75,
     }
 
     metrics = reward_metrics([sample])
@@ -722,6 +798,8 @@ def test_tasa_metrics_report_masks_and_segment_coverage():
     assert metrics["reward/credit_assignment/tasa_non_root_peer_count_mean"] == 3.5
     assert metrics["reward/credit_assignment/tasa_non_root_mc_reliable_rate_mean"] == 0.625
     assert metrics["reward/credit_assignment/tasa_value_source_none_rate_mean"] == 0.5
+    assert metrics["reward/credit_assignment/tasa_gae_future_tail_abs_mean"] == 0.25
+    assert metrics["reward/credit_assignment/tasa_gae_future_tail_nonzero_rate"] == 0.75
 
 
 def test_tasa_debug_dump_exposes_state_value_and_segment_evidence(tmp_path, monkeypatch):
@@ -774,9 +852,11 @@ def test_tasa_debug_dump_exposes_state_value_and_segment_evidence(tmp_path, monk
         "mc_reliable",
         "value_source",
         "anchor_state_key",
+        "anchor_value",
         "boundary_state_key",
+        "boundary_value",
         "segment_index",
-        "distance_to_boundary",
+        "future_gae_contribution",
     ):
         assert key in segment
 

@@ -45,8 +45,8 @@ def segment_credit_assignment_advantage(args: Any, rollout_data: dict[str, Any])
       support keep the original GRPO advantage exactly.
     - ``teacher_anchored_value_gae`` (TASA-GAE): consume the unified masked
       teacher-prior/MC value estimate. Every on-policy student token uses the
-      segment-local GAE advantage directly; only LUFFY off-policy teacher tokens
-      retain their teacher loss advantage.
+      global turn-level GAE advantage directly; only LUFFY off-policy teacher
+      tokens retain their teacher loss advantage.
     """
 
     if getattr(args, "advantage_estimator", "grpo") not in {"grpo", "gspo", "cispo"}:
@@ -319,7 +319,7 @@ def _teacher_anchored_value_gae(
         uncovered = trainable & ~teacher & (support <= 0)
         if bool(uncovered.any().item()):
             raise ValueError(
-                "TASA-GAE requires every on-policy trainable token to have a segment-local advantage"
+                "TASA-GAE requires every on-policy trainable token to have a global turn-level advantage"
             )
         advantages.append(torch.where(teacher, base, local))
     return advantages

@@ -129,6 +129,8 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ca_tasa_state_value_means: list[float] = []
     ca_tasa_td_delta_abs_means: list[float] = []
     ca_tasa_gae_abs_means: list[float] = []
+    ca_tasa_gae_future_tail_abs_means: list[float] = []
+    ca_tasa_gae_future_tail_nonzero_rates: list[float] = []
     ca_tasa_prior_kappas: list[float] = []
     ca_tasa_lambdas: list[float] = []
     ca_tasa_teacher_weights: list[float] = []
@@ -214,6 +216,12 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             tasa_gae_abs_mean = _float_or_none(ca.get("tasa_gae_abs_mean"))
             if tasa_gae_abs_mean is not None:
                 ca_tasa_gae_abs_means.append(tasa_gae_abs_mean)
+            tasa_gae_future_tail_abs_mean = _float_or_none(ca.get("tasa_gae_future_tail_abs_mean"))
+            if tasa_gae_future_tail_abs_mean is not None:
+                ca_tasa_gae_future_tail_abs_means.append(tasa_gae_future_tail_abs_mean)
+            tasa_gae_future_tail_nonzero_rate = _float_or_none(ca.get("tasa_gae_future_tail_nonzero_rate"))
+            if tasa_gae_future_tail_nonzero_rate is not None:
+                ca_tasa_gae_future_tail_nonzero_rates.append(tasa_gae_future_tail_nonzero_rate)
             tasa_prior_kappa = _float_or_none(ca.get("tasa_prior_kappa"))
             if tasa_prior_kappa is not None:
                 ca_tasa_prior_kappas.append(tasa_prior_kappa)
@@ -409,6 +417,14 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
         metrics["reward/credit_assignment/tasa_td_delta_abs_mean"] = _mean(ca_tasa_td_delta_abs_means)
     if ca_tasa_gae_abs_means:
         metrics["reward/credit_assignment/tasa_gae_abs_mean"] = _mean(ca_tasa_gae_abs_means)
+    if ca_tasa_gae_future_tail_abs_means:
+        metrics["reward/credit_assignment/tasa_gae_future_tail_abs_mean"] = _mean(
+            ca_tasa_gae_future_tail_abs_means
+        )
+    if ca_tasa_gae_future_tail_nonzero_rates:
+        metrics["reward/credit_assignment/tasa_gae_future_tail_nonzero_rate"] = _mean(
+            ca_tasa_gae_future_tail_nonzero_rates
+        )
     if ca_tasa_prior_kappas:
         metrics["reward/credit_assignment/tasa_prior_kappa"] = _mean(ca_tasa_prior_kappas)
     if ca_tasa_lambdas:
