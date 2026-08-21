@@ -33,11 +33,14 @@ must not own Luffy settings.
 TASA modes use one milestone-centric judge schema and do not also request the
 generic good/bad behavior schema. `tasa_use_teacher_prior` controls only the
 teacher value-prior mask: set it to `false` for the pure student-MC ablation.
-`tasa_min_peer_support` controls the independent LOO-MC reliability mask, and
-`tasa_enforce_prerequisites` controls dependency projection. A semantic state
-cuts a segment only when at least one value-source mask is active; when both
-teacher and MC are active their values are combined through `tasa_prior_kappa`.
-TASA-GAE does not mean-center advantages; use RMS/std-only scaling if needed.
+Full TASA-GAE uses coverage-adaptive shrinkage: for each student and state,
+`B` is the number of other on-policy students in the group and
+`V=(1-N/B)*V_teacher+(N/B)*V_MC` with strict LOO evidence. The teacher fills
+only missing peer slots and exits completely at full coverage. The
+`tasa_min_peer_support` hard gate applies only when the teacher prior is
+disabled (and to the older TASA-GRPO mode). `tasa_enforce_prerequisites`
+controls dependency projection. TASA-GAE does not mean-center advantages; use
+RMS/std-only scaling if needed.
 When `ropd.answer_mode=trace`, student inputs must be rendered by the shared
 agent-env trace renderer from structured trajectory fields such as `turns`,
 `messages`, `token_segments`, `reward_trace`, `judge_trace`, or `ropd_trace`.

@@ -45,7 +45,10 @@ class SegmentCreditRecord:
     td_delta: float | None = None
     gae_advantage: float | None = None
     teacher_prior_available: bool | None = None
-    mc_reliable: bool | None = None
+    mc_evidence_used: bool | None = None
+    peer_budget: int | None = None
+    mc_weight: float | None = None
+    state_teacher_weight: float | None = None
     prerequisites_satisfied: bool | None = None
     anchor_eligible: bool | None = None
     value_source: str | None = None
@@ -58,17 +61,23 @@ class SegmentCreditRecord:
     action_text: str | None = None
     boundary_value_source: str | None = None
     boundary_peer_count: int | None = None
+    boundary_peer_budget: int | None = None
+    boundary_mc_weight: float | None = None
+    boundary_teacher_weight: float | None = None
     boundary_teacher_prior_available: bool | None = None
-    boundary_mc_reliable: bool | None = None
+    boundary_mc_evidence_used: bool | None = None
 
 
 @dataclass(frozen=True)
 class TasaStateValue:
     value: float | None
     peer_count: int
+    peer_budget: int
     peer_outcome_sum: float
     teacher_prior_available: bool
-    mc_reliable: bool
+    mc_evidence_used: bool
+    mc_weight: float
+    teacher_weight: float
     source: str
 
     @property
@@ -259,13 +268,6 @@ def tasa_local_normalization(args: Any) -> str:
         raise ValueError(f"reward.credit_assignment.tasa_local_normalization must be one of {sorted(valid)}")
     if advantage_mode(args) == "teacher_anchored_value_gae" and value == "group_segment_zscore":
         raise ValueError("TASA-GAE v2 forbids mean-centering; use none, group_segment_std, or group_segment_rms")
-    return value
-
-
-def tasa_prior_kappa(args: Any) -> float:
-    value = float_value(config(args).get("tasa_prior_kappa", 4.0), 4.0)
-    if value < 0:
-        raise ValueError("reward.credit_assignment.tasa_prior_kappa must be non-negative")
     return value
 
 
@@ -1071,7 +1073,10 @@ def _credit_record_payload(
                 "td_delta": record.td_delta,
                 "gae_advantage": record.gae_advantage,
                 "teacher_prior_available": record.teacher_prior_available,
-                "mc_reliable": record.mc_reliable,
+                "mc_evidence_used": record.mc_evidence_used,
+                "peer_budget": record.peer_budget,
+                "mc_weight": record.mc_weight,
+                "state_teacher_weight": record.state_teacher_weight,
                 "prerequisites_satisfied": record.prerequisites_satisfied,
                 "anchor_eligible": record.anchor_eligible,
                 "value_source": record.value_source,
@@ -1081,8 +1086,11 @@ def _credit_record_payload(
                 "boundary_value": record.boundary_value,
                 "boundary_value_source": record.boundary_value_source,
                 "boundary_peer_count": record.boundary_peer_count,
+                "boundary_peer_budget": record.boundary_peer_budget,
+                "boundary_mc_weight": record.boundary_mc_weight,
+                "boundary_teacher_weight": record.boundary_teacher_weight,
                 "boundary_teacher_prior_available": record.boundary_teacher_prior_available,
-                "boundary_mc_reliable": record.boundary_mc_reliable,
+                "boundary_mc_evidence_used": record.boundary_mc_evidence_used,
                 "segment_index": record.segment_index,
                 "future_gae_contribution": record.future_gae_contribution,
             }
@@ -1217,7 +1225,11 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
                 {
                     "beta": cfg_beta,
                     "tasa_local_normalization": tasa_local_normalization(args),
-                    "tasa_min_peer_support": tasa_min_peer_support(args),
+                    "tasa_min_peer_support": (
+                        None
+                        if mode == "teacher_anchored_value_gae" and tasa_use_teacher_prior(args)
+                        else tasa_min_peer_support(args)
+                    ),
                     "tasa_enforce_prerequisites": tasa_enforce_prerequisites(args),
                 }
             )
@@ -1247,7 +1259,6 @@ def attach_process_advantages(args: Any, samples: list[Sample], *, scalar_reward
         if mode == "teacher_anchored_value_gae":
             credit_stats.update(
                 {
-                    "tasa_prior_kappa": tasa_prior_kappa(args),
                     "tasa_lambda": tasa_lambda(args),
                     "tasa_prior_root": tasa_prior_root(args),
                     "tasa_prior_success": tasa_prior_success(args),
@@ -1349,9 +1360,9 @@ def _tasa_state_prior(
 def _tasa_state_value(
     *,
     prior: float | None,
-    kappa: float,
     outcomes_by_sample: dict[int, float],
     exclude_sample_index: int,
+    peer_budget: int,
     min_peer_support: int,
 ) -> TasaStateValue:
     values = [
@@ -1361,17 +1372,56 @@ def _tasa_state_value(
     ]
     count = len(values)
     total = sum(values)
+    if peer_budget < 0:
+        raise ValueError("TASA peer budget must be non-negative")
+    if count > peer_budget:
+        raise ValueError(f"TASA LOO peer count {count} exceeds peer budget {peer_budget}")
     teacher_prior_available = prior is not None
-    mc_reliable = count >= min_peer_support
-    if teacher_prior_available and mc_reliable:
-        denominator = kappa + count
-        value = (kappa * float(prior) + total) / denominator if denominator > 0 else float(prior)
-        return TasaStateValue(value, count, total, True, True, "teacher_mc")
     if teacher_prior_available:
-        return TasaStateValue(float(prior), count, total, True, False, "teacher")
-    if mc_reliable:
-        return TasaStateValue(total / count, count, total, False, True, "mc")
-    return TasaStateValue(None, count, total, False, False, "none")
+        mc_weight = (count / peer_budget) if peer_budget > 0 else 0.0
+        teacher_weight = 1.0 - mc_weight
+        mc_mean = (total / count) if count > 0 else 0.0
+        value = teacher_weight * float(prior) + mc_weight * mc_mean
+        if count == 0:
+            source = "teacher"
+        elif teacher_weight > 0:
+            source = "teacher_mc"
+        else:
+            source = "mc"
+        return TasaStateValue(
+            value=value,
+            peer_count=count,
+            peer_budget=peer_budget,
+            peer_outcome_sum=total,
+            teacher_prior_available=True,
+            mc_evidence_used=count > 0,
+            mc_weight=mc_weight,
+            teacher_weight=teacher_weight,
+            source=source,
+        )
+    if count >= min_peer_support:
+        return TasaStateValue(
+            value=total / count,
+            peer_count=count,
+            peer_budget=peer_budget,
+            peer_outcome_sum=total,
+            teacher_prior_available=False,
+            mc_evidence_used=True,
+            mc_weight=1.0,
+            teacher_weight=0.0,
+            source="mc",
+        )
+    return TasaStateValue(
+        value=None,
+        peer_count=count,
+        peer_budget=peer_budget,
+        peer_outcome_sum=total,
+        teacher_prior_available=False,
+        mc_evidence_used=False,
+        mc_weight=0.0,
+        teacher_weight=0.0,
+        source="none",
+    )
 
 
 def _write_tasa_group_stats(
@@ -1389,21 +1439,23 @@ def _write_tasa_group_stats(
     supported_records = [record for record in records if record.supported]
     anchor_records = [record for record in records if record.anchor_eligible]
     teacher_records = [record for record in records if record.teacher_prior_available]
-    mc_records = [record for record in records if record.mc_reliable]
     prerequisite_records = [record for record in records if record.prerequisites_satisfied]
     records_with_any_peer = [record for record in records if (record.peer_count or 0) >= 1]
-    unique_state_observations: dict[tuple[int, str], tuple[int, int, bool]] = {}
+    unique_state_observations: dict[tuple[int, str], tuple[int, int, int, bool, float, float]] = {}
     for record in records:
-        if record.state_key is not None and record.peer_count is not None:
+        if record.state_key is not None and record.peer_count is not None and record.peer_budget is not None:
             unique_state_observations[(record.sample_index, record.state_key)] = (
                 int(record.peer_count),
+                int(record.peer_budget),
                 len(record.state_ids),
-                bool(record.mc_reliable),
+                bool(record.mc_evidence_used),
+                float(record.mc_weight or 0.0),
+                float(record.state_teacher_weight or 0.0),
             )
     peer_histogram: dict[str, int] = {}
     non_root_peer_histogram: dict[str, int] = {}
     peer_histogram_by_depth: dict[str, dict[str, int]] = {}
-    for (_, state_key), (peer_count, depth, _) in unique_state_observations.items():
+    for (_, state_key), (peer_count, _, depth, _, _, _) in unique_state_observations.items():
         key = str(peer_count)
         peer_histogram[key] = peer_histogram.get(key, 0) + 1
         if state_key != "ROOT":
@@ -1412,13 +1464,33 @@ def _write_tasa_group_stats(
             depth_histogram[key] = depth_histogram.get(key, 0) + 1
     non_root_peer_counts = [
         peer_count
-        for (_, state_key), (peer_count, _, _) in unique_state_observations.items()
+        for (_, state_key), (peer_count, _, _, _, _, _) in unique_state_observations.items()
         if state_key != "ROOT"
     ]
-    non_root_mc_reliable = [
-        reliable
-        for (_, state_key), (_, _, reliable) in unique_state_observations.items()
+    non_root_peer_coverages = [
+        (peer_count / peer_budget) if peer_budget > 0 else 0.0
+        for (_, state_key), (peer_count, peer_budget, _, _, _, _) in unique_state_observations.items()
         if state_key != "ROOT"
+    ]
+    non_root_mc_weights = [
+        mc_weight
+        for (_, state_key), (_, _, _, _, mc_weight, _) in unique_state_observations.items()
+        if state_key != "ROOT"
+    ]
+    non_root_teacher_weights = [
+        teacher_weight
+        for (_, state_key), (_, _, _, _, _, teacher_weight) in unique_state_observations.items()
+        if state_key != "ROOT"
+    ]
+    state_peer_counts = [peer_count for peer_count, _, _, _, _, _ in unique_state_observations.values()]
+    state_peer_coverages = [
+        (peer_count / peer_budget) if peer_budget > 0 else 0.0
+        for peer_count, peer_budget, _, _, _, _ in unique_state_observations.values()
+    ]
+    state_mc_evidence_used = [used for _, _, _, used, _, _ in unique_state_observations.values()]
+    state_mc_weights = [mc_weight for _, _, _, _, mc_weight, _ in unique_state_observations.values()]
+    state_teacher_weights = [
+        teacher_weight for _, _, _, _, _, teacher_weight in unique_state_observations.values()
     ]
     segment_keys = {
         (record.sample_index, record.segment_index)
@@ -1443,7 +1515,11 @@ def _write_tasa_group_stats(
         "tasa_group_semantic_segment_length_mean": _mean_float([float(value) for value in segment_lengths.values()]),
         "tasa_group_anchor_eligible_rate": len(anchor_records) / len(records) if records else 0.0,
         "tasa_group_teacher_prior_available_rate": len(teacher_records) / len(records) if records else 0.0,
-        "tasa_group_mc_reliable_rate": len(mc_records) / len(records) if records else 0.0,
+        "tasa_group_mc_evidence_used_rate": (
+            sum(state_mc_evidence_used) / len(state_mc_evidence_used)
+            if state_mc_evidence_used
+            else 0.0
+        ),
         "tasa_group_prerequisite_valid_rate": len(prerequisite_records) / len(records) if records else 0.0,
         "tasa_group_value_source_teacher_rate": source_counts.get("teacher", 0) / len(records) if records else 0.0,
         "tasa_group_value_source_mc_rate": source_counts.get("mc", 0) / len(records) if records else 0.0,
@@ -1455,16 +1531,18 @@ def _write_tasa_group_stats(
         "tasa_group_reused_states": float(reused_states),
         "tasa_group_state_reuse_rate": reused_states / unique_states if unique_states else 0.0,
         "tasa_group_segment_peer_rate": len(records_with_any_peer) / len(records) if records else 0.0,
-        "tasa_group_peer_count_mean": _mean_float([float(record.peer_count or 0) for record in records]),
+        "tasa_group_peer_count_mean": _mean_float([float(value) for value in state_peer_counts]),
+        "tasa_group_peer_budget": max((int(record.peer_budget or 0) for record in records), default=0),
+        "tasa_group_peer_coverage_mean": _mean_float(state_peer_coverages),
+        "tasa_group_state_mc_weight_mean": _mean_float(state_mc_weights),
+        "tasa_group_state_teacher_weight_mean": _mean_float(state_teacher_weights),
         "tasa_group_peer_count_histogram": peer_histogram,
         "tasa_group_non_root_peer_count_mean": _mean_float(
             [float(peer_count) for peer_count in non_root_peer_counts]
         ),
-        "tasa_group_non_root_mc_reliable_rate": (
-            sum(non_root_mc_reliable) / len(non_root_mc_reliable)
-            if non_root_mc_reliable
-            else 0.0
-        ),
+        "tasa_group_non_root_peer_coverage_mean": _mean_float(non_root_peer_coverages),
+        "tasa_group_non_root_state_mc_weight_mean": _mean_float(non_root_mc_weights),
+        "tasa_group_non_root_state_teacher_weight_mean": _mean_float(non_root_teacher_weights),
         "tasa_group_non_root_peer_count_histogram": non_root_peer_histogram,
         "tasa_group_peer_count_histogram_by_depth": peer_histogram_by_depth,
         "tasa_group_state_reward_std_mean": _mean_float(state_reward_stds),
@@ -1721,21 +1799,20 @@ def _attach_tasa_value_gae(
 ) -> None:
     """Build Full TASA and TASA-no-teacher through one masked value pipeline.
 
-    A semantic state is an anchor when its prerequisites are valid and either
-    a teacher prior or a reliable leave-one-out MC estimate is available. Full
-    TASA enables the teacher mask; TASA-no-teacher disables it and therefore
-    ignores low-support milestone states as value boundaries. Each action gets
-    one semantic-state TD delta, then GAE propagates those deltas backwards over
-    the full trajectory. Milestones do not reset the GAE tail, so terminal
-    outcomes can correct earlier progress credit.
+    Full TASA fills missing LOO peer slots with the teacher prior, then lets MC
+    evidence replace that prior continuously as state coverage increases.
+    TASA-no-teacher retains a minimum-support gate because it has no prior to
+    stabilize sparse MC states. Each action gets one semantic-state TD delta,
+    then GAE propagates those deltas backwards over the full trajectory.
+    Milestones do not reset the GAE tail, so terminal outcomes can correct
+    earlier progress credit.
     """
 
     cfg_clip = clip(args)
-    cfg_min_peer_support = tasa_min_peer_support(args)
     cfg_normalization = tasa_local_normalization(args)
-    cfg_kappa = tasa_prior_kappa(args)
     cfg_lambda = tasa_lambda(args)
     cfg_use_teacher_prior = tasa_use_teacher_prior(args)
+    cfg_min_peer_support = 1 if cfg_use_teacher_prior else tasa_min_peer_support(args)
     for indices in _group_indices(args, samples).values():
         records_by_sample: dict[int, list[SegmentCreditRecord]] = {}
         raw_records: list[SegmentCreditRecord] = []
@@ -1767,6 +1844,7 @@ def _attach_tasa_value_gae(
         if not raw_records or progress_by_id is None:
             continue
 
+        peer_budget = max(0, len(student_indices) - 1)
         outcomes = _tasa_outcomes(args, student_indices, scalar_rewards)
         state_outcomes: dict[str, dict[int, float]] = {}
         state_ids_by_key: dict[str, tuple[str, ...]] = {}
@@ -1794,9 +1872,9 @@ def _attach_tasa_value_gae(
             if cache_key not in value_cache:
                 value_cache[cache_key] = _tasa_state_value(
                     prior=state_prior.get(state_key),
-                    kappa=cfg_kappa,
                     outcomes_by_sample=state_outcomes.get(state_key, {}),
                     exclude_sample_index=sample_index,
+                    peer_budget=peer_budget,
                     min_peer_support=cfg_min_peer_support,
                 )
             return value_cache[cache_key]
@@ -1829,13 +1907,19 @@ def _attach_tasa_value_gae(
                         state_value=state_estimate.value,
                         next_state_value=next_estimate.value,
                         teacher_prior_available=state_estimate.teacher_prior_available,
-                        mc_reliable=state_estimate.mc_reliable,
+                        mc_evidence_used=state_estimate.mc_evidence_used,
+                        peer_budget=state_estimate.peer_budget,
+                        mc_weight=state_estimate.mc_weight,
+                        state_teacher_weight=state_estimate.teacher_weight,
                         anchor_eligible=state_estimate.anchor_eligible,
                         value_source=state_estimate.source,
                         boundary_value_source=next_estimate.source,
                         boundary_peer_count=next_estimate.peer_count,
+                        boundary_peer_budget=next_estimate.peer_budget,
+                        boundary_mc_weight=next_estimate.mc_weight,
+                        boundary_teacher_weight=next_estimate.teacher_weight,
                         boundary_teacher_prior_available=next_estimate.teacher_prior_available,
-                        boundary_mc_reliable=next_estimate.mc_reliable,
+                        boundary_mc_evidence_used=next_estimate.mc_evidence_used,
                     )
                 )
 
@@ -1865,16 +1949,22 @@ def _attach_tasa_value_gae(
                     delta = boundary_value - anchor_value
                     boundary_value_source = "terminal"
                     boundary_peer_count = None
+                    boundary_peer_budget = None
+                    boundary_mc_weight = None
+                    boundary_teacher_weight = None
                     boundary_teacher_prior_available = None
-                    boundary_mc_reliable = None
+                    boundary_mc_evidence_used = None
                 elif closes_anchor:
                     boundary_key = next_key
                     boundary_value = float(next_estimate.value)
                     delta = boundary_value - anchor_value
                     boundary_value_source = next_estimate.source
                     boundary_peer_count = next_estimate.peer_count
+                    boundary_peer_budget = next_estimate.peer_budget
+                    boundary_mc_weight = next_estimate.mc_weight
+                    boundary_teacher_weight = next_estimate.teacher_weight
                     boundary_teacher_prior_available = next_estimate.teacher_prior_available
-                    boundary_mc_reliable = next_estimate.mc_reliable
+                    boundary_mc_evidence_used = next_estimate.mc_evidence_used
                 else:
                     boundary_key = anchor_key
                     boundary_value = anchor_value
@@ -1882,8 +1972,11 @@ def _attach_tasa_value_gae(
                     anchor_estimate = estimate(sample_index, anchor_key)
                     boundary_value_source = anchor_estimate.source
                     boundary_peer_count = anchor_estimate.peer_count
+                    boundary_peer_budget = anchor_estimate.peer_budget
+                    boundary_mc_weight = anchor_estimate.mc_weight
+                    boundary_teacher_weight = anchor_estimate.teacher_weight
                     boundary_teacher_prior_available = anchor_estimate.teacher_prior_available
-                    boundary_mc_reliable = anchor_estimate.mc_reliable
+                    boundary_mc_evidence_used = anchor_estimate.mc_evidence_used
                 deltas.append(delta)
                 sample_final.append(
                     replace(
@@ -1897,8 +1990,11 @@ def _attach_tasa_value_gae(
                         segment_index=segment_index,
                         boundary_value_source=boundary_value_source,
                         boundary_peer_count=boundary_peer_count,
+                        boundary_peer_budget=boundary_peer_budget,
+                        boundary_mc_weight=boundary_mc_weight,
+                        boundary_teacher_weight=boundary_teacher_weight,
                         boundary_teacher_prior_available=boundary_teacher_prior_available,
-                        boundary_mc_reliable=boundary_mc_reliable,
+                        boundary_mc_evidence_used=boundary_mc_evidence_used,
                     )
                 )
                 if closes_anchor:

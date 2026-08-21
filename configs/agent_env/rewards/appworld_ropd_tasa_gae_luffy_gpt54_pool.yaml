@@ -30,11 +30,9 @@ ropd:
 credit_assignment:
   enable: true
   advantage_mode: teacher_anchored_value_gae
-  tasa_min_peer_support: 4
   tasa_local_normalization: group_segment_rms
   tasa_use_teacher_prior: true
   tasa_enforce_prerequisites: true
-  tasa_prior_kappa: 4.0
   tasa_lambda: 0.8
   tasa_prior_root: 0.1
   tasa_prior_success: 0.9

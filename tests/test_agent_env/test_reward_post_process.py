@@ -78,11 +78,9 @@ def _tasa_luffy_args() -> Namespace:
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "teacher_anchored_value_gae",
-                "tasa_min_peer_support": 4,
                 "tasa_local_normalization": "none",
                 "tasa_use_teacher_prior": True,
                 "tasa_enforce_prerequisites": True,
-                "tasa_prior_kappa": 4.0,
                 "tasa_lambda": 0.5,
                 "tasa_prior_root": 0.1,
                 "tasa_prior_success": 0.9,
@@ -114,6 +112,7 @@ def test_tasa_luffy_teacher_is_excluded_from_state_value_estimation():
     for low, high in zip(low_teacher[:-1], high_teacher[:-1], strict=True):
         assert low.metadata["process_advantages"] == high.metadata["process_advantages"]
         assert low.metadata["credit_assignment"]["tasa_group_peer_count_histogram"]["14"] > 0
+        assert low.metadata["credit_assignment"]["tasa_group_peer_budget"] == 14
 
 
 def test_tasa_luffy_keeps_student_and_teacher_advantages_isolated():

@@ -1,6 +1,7 @@
 from argparse import Namespace
 import json
 
+import pytest
 import torch
 
 from slime.utils.types import Sample
@@ -477,9 +478,7 @@ def test_tasa_gae_attaches_prior_posterior_segment_advantages():
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "teacher_anchored_value_gae",
-                "tasa_min_peer_support": 1,
                 "tasa_local_normalization": "none",
-                "tasa_prior_kappa": 4.0,
                 "tasa_lambda": 0.0,
                 "tasa_prior_root": 0.1,
                 "tasa_prior_success": 0.9,
@@ -509,7 +508,8 @@ def test_tasa_gae_attaches_prior_posterior_segment_advantages():
     assert second_adv[2] < 0
     stats = samples[0].metadata["credit_assignment"]
     assert stats["advantage_mode"] == "teacher_anchored_value_gae"
-    assert stats["tasa_prior_kappa"] == 4.0
+    assert stats["tasa_min_peer_support"] is None
+    assert stats["tasa_group_peer_budget"] == 2
     assert stats["tasa_group_unique_states"] >= 3
     assert stats["tasa_td_delta_abs_mean"] > 0
     assert stats["tasa_group_teacher_prior_available_rate"] == 1.0
@@ -570,7 +570,7 @@ def test_tasa_no_teacher_skips_unsupported_state_and_uses_mc_anchor():
     assert abs(first_adv[2] - 0.5 * first_adv[4]) < 1e-6
     stats = samples[0].metadata["credit_assignment"]
     assert stats["tasa_group_teacher_prior_available_rate"] == 0.0
-    assert stats["tasa_group_mc_reliable_rate"] < 1.0
+    assert stats["tasa_group_mc_evidence_used_rate"] < 1.0
     assert stats["tasa_group_value_source_mc_rate"] > 0.0
     assert stats["tasa_group_value_source_none_rate"] > 0.0
     assert stats["tasa_train_token_coverage_rate"] == 1.0
@@ -661,9 +661,7 @@ def test_tasa_global_gae_terminal_failure_corrects_immediate_milestone():
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "teacher_anchored_value_gae",
-                "tasa_min_peer_support": 1,
                 "tasa_local_normalization": "none",
-                "tasa_prior_kappa": 4.0,
                 "tasa_lambda": 1.0,
                 "tasa_prior_root": 0.1,
                 "tasa_prior_success": 0.9,
@@ -678,7 +676,7 @@ def test_tasa_global_gae_terminal_failure_corrects_immediate_milestone():
         _tasa_sample(2, turns=1, changes=[]),
     ]
 
-    credit_assignment.attach_process_advantages(args, samples, scalar_rewards=[0.0, 0.0, 0.0])
+    credit_assignment.attach_process_advantages(args, samples, scalar_rewards=[0.0, 1.0, 0.0])
 
     # The only action both sets M1 and terminates unsuccessfully. It must get
     # R - V(ROOT), not the positive V(M1) - V(ROOT) transition.
@@ -693,9 +691,7 @@ def test_tasa_global_gae_propagates_unique_success_through_loo_baselines():
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "teacher_anchored_value_gae",
-                "tasa_min_peer_support": 1,
                 "tasa_local_normalization": "none",
-                "tasa_prior_kappa": 4.0,
                 "tasa_lambda": 1.0,
                 "tasa_prior_root": 0.1,
                 "tasa_prior_success": 0.9,
@@ -735,40 +731,73 @@ def test_tasa_value_source_masks_cover_full_and_no_teacher_modes():
 
     blended = credit_assignment._tasa_state_value(
         prior=0.6,
-        kappa=4.0,
         outcomes_by_sample=outcomes,
         exclude_sample_index=0,
+        peer_budget=4,
         min_peer_support=2,
     )
     teacher_only = credit_assignment._tasa_state_value(
         prior=0.6,
-        kappa=4.0,
+        outcomes_by_sample={0: 1.0},
+        exclude_sample_index=0,
+        peer_budget=4,
+        min_peer_support=3,
+    )
+    full_coverage = credit_assignment._tasa_state_value(
+        prior=0.6,
         outcomes_by_sample=outcomes,
         exclude_sample_index=0,
-        min_peer_support=3,
+        peer_budget=2,
+        min_peer_support=99,
     )
     mc_only = credit_assignment._tasa_state_value(
         prior=None,
-        kappa=4.0,
         outcomes_by_sample=outcomes,
         exclude_sample_index=0,
+        peer_budget=4,
         min_peer_support=2,
     )
     unavailable = credit_assignment._tasa_state_value(
         prior=None,
-        kappa=4.0,
         outcomes_by_sample=outcomes,
         exclude_sample_index=0,
+        peer_budget=4,
         min_peer_support=3,
     )
 
-    assert blended.teacher_prior_available and blended.mc_reliable and blended.source == "teacher_mc"
+    assert blended.teacher_prior_available and blended.mc_evidence_used and blended.source == "teacher_mc"
     assert blended.peer_count == 2
+    assert blended.peer_budget == 4
     assert blended.peer_outcome_sum == 1.0
-    assert abs(float(blended.value) - (4.0 * 0.6 + 1.0) / 6.0) < 1e-9
+    assert blended.teacher_weight == 0.5
+    assert blended.mc_weight == 0.5
+    assert abs(float(blended.value) - 0.55) < 1e-9
     assert teacher_only.value == 0.6 and teacher_only.source == "teacher"
+    assert teacher_only.teacher_weight == 1.0 and teacher_only.mc_weight == 0.0
+    assert full_coverage.value == 0.5 and full_coverage.source == "mc"
+    assert full_coverage.teacher_weight == 0.0 and full_coverage.mc_weight == 1.0
     assert mc_only.value == 0.5 and mc_only.source == "mc"
     assert unavailable.value is None and not unavailable.anchor_eligible and unavailable.source == "none"
+
+
+def test_tasa_teacher_fill_tracks_strict_loo_state_coverage():
+    prior = 0.8
+    peer_budget = 4
+    values = []
+    for reached_peers in range(peer_budget + 1):
+        outcomes = {0: 1.0, **{index + 1: 0.0 for index in range(reached_peers)}}
+        estimate = credit_assignment._tasa_state_value(
+            prior=prior,
+            outcomes_by_sample=outcomes,
+            exclude_sample_index=0,
+            peer_budget=peer_budget,
+            min_peer_support=99,
+        )
+        values.append(float(estimate.value))
+        assert estimate.mc_weight == reached_peers / peer_budget
+        assert estimate.teacher_weight == 1.0 - reached_peers / peer_budget
+
+    assert values == pytest.approx([0.8, 0.6, 0.4, 0.2, 0.0])
 
 
 def test_tasa_metrics_report_masks_and_segment_coverage():
@@ -777,9 +806,15 @@ def test_tasa_metrics_report_masks_and_segment_coverage():
         "tasa_train_token_coverage_rate": 1.0,
         "tasa_group_anchor_eligible_rate": 0.75,
         "tasa_group_teacher_prior_available_rate": 0.0,
-        "tasa_group_mc_reliable_rate": 0.5,
+        "tasa_group_mc_evidence_used_rate": 0.5,
+        "tasa_group_peer_budget": 14.0,
+        "tasa_group_peer_coverage_mean": 0.5,
+        "tasa_group_state_mc_weight_mean": 0.5,
+        "tasa_group_state_teacher_weight_mean": 0.5,
         "tasa_group_non_root_peer_count_mean": 3.5,
-        "tasa_group_non_root_mc_reliable_rate": 0.625,
+        "tasa_group_non_root_peer_coverage_mean": 0.25,
+        "tasa_group_non_root_state_mc_weight_mean": 0.25,
+        "tasa_group_non_root_state_teacher_weight_mean": 0.75,
         "tasa_group_prerequisite_valid_rate": 0.875,
         "tasa_group_semantic_segment_count": 4.0,
         "tasa_group_semantic_segment_length_mean": 2.5,
@@ -793,13 +828,19 @@ def test_tasa_metrics_report_masks_and_segment_coverage():
 
     metrics = reward_metrics([sample])
 
-    assert metrics["reward/credit_assignment/tasa_train_token_coverage_rate_mean"] == 1.0
-    assert metrics["reward/credit_assignment/tasa_mc_reliable_rate_mean"] == 0.5
-    assert metrics["reward/credit_assignment/tasa_non_root_peer_count_mean"] == 3.5
-    assert metrics["reward/credit_assignment/tasa_non_root_mc_reliable_rate_mean"] == 0.625
-    assert metrics["reward/credit_assignment/tasa_value_source_none_rate_mean"] == 0.5
-    assert metrics["reward/credit_assignment/tasa_gae_future_tail_abs_mean"] == 0.25
-    assert metrics["reward/credit_assignment/tasa_gae_future_tail_nonzero_rate"] == 0.75
+    assert metrics["reward/tasa/train_token_coverage_rate_mean"] == 1.0
+    assert metrics["reward/tasa/mc_evidence_used_rate_mean"] == 0.5
+    assert metrics["reward/tasa/peer_budget"] == 14.0
+    assert metrics["reward/tasa/peer_coverage_mean"] == 0.5
+    assert metrics["reward/tasa/state_mc_weight_mean"] == 0.5
+    assert metrics["reward/tasa/state_teacher_weight_mean"] == 0.5
+    assert metrics["reward/tasa/non_root_peer_count_mean"] == 3.5
+    assert metrics["reward/tasa/non_root_peer_coverage_mean"] == 0.25
+    assert metrics["reward/tasa/non_root_state_mc_weight_mean"] == 0.25
+    assert metrics["reward/tasa/non_root_state_teacher_weight_mean"] == 0.75
+    assert metrics["reward/tasa/value_source_none_rate_mean"] == 0.5
+    assert metrics["reward/tasa/gae_future_tail_abs_mean"] == 0.25
+    assert metrics["reward/tasa/gae_future_tail_nonzero_rate"] == 0.75
 
 
 def test_tasa_debug_dump_exposes_state_value_and_segment_evidence(tmp_path, monkeypatch):
@@ -813,7 +854,6 @@ def test_tasa_debug_dump_exposes_state_value_and_segment_evidence(tmp_path, monk
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "teacher_anchored_value_gae",
-                "tasa_min_peer_support": 1,
                 "tasa_local_normalization": "none",
                 "tasa_use_teacher_prior": True,
                 "tasa_lambda": 0.5,
@@ -849,7 +889,10 @@ def test_tasa_debug_dump_exposes_state_value_and_segment_evidence(tmp_path, monk
         "td_delta",
         "gae_advantage",
         "teacher_prior_available",
-        "mc_reliable",
+        "mc_evidence_used",
+        "peer_budget",
+        "mc_weight",
+        "state_teacher_weight",
         "value_source",
         "anchor_state_key",
         "anchor_value",
@@ -872,7 +915,6 @@ def test_credit_dump_prefers_trainable_student_over_luffy_teacher(tmp_path, monk
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "teacher_anchored_value_gae",
-                "tasa_min_peer_support": 1,
                 "tasa_local_normalization": "none",
                 "tasa_use_teacher_prior": True,
                 "tasa_outcome_scale": 1.0,
@@ -913,7 +955,6 @@ def test_tasa_train_token_coverage_excludes_environment_tokens():
             "credit_assignment": {
                 "enable": True,
                 "advantage_mode": "teacher_anchored_value_gae",
-                "tasa_min_peer_support": 1,
                 "tasa_local_normalization": "none",
                 "tasa_use_teacher_prior": True,
                 "tasa_lambda": 0.5,

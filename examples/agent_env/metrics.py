@@ -112,7 +112,7 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ca_tasa_state_reuse_rates: list[float] = []
     ca_tasa_anchor_eligible_rates: list[float] = []
     ca_tasa_teacher_prior_available_rates: list[float] = []
-    ca_tasa_mc_reliable_rates: list[float] = []
+    ca_tasa_mc_evidence_used_rates: list[float] = []
     ca_tasa_prerequisite_valid_rates: list[float] = []
     ca_tasa_semantic_segment_counts: list[float] = []
     ca_tasa_semantic_segment_length_means: list[float] = []
@@ -121,8 +121,14 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ca_tasa_value_source_teacher_mc_rates: list[float] = []
     ca_tasa_value_source_none_rates: list[float] = []
     ca_tasa_peer_count_means: list[float] = []
+    ca_tasa_peer_budgets: list[float] = []
+    ca_tasa_peer_coverage_means: list[float] = []
+    ca_tasa_state_mc_weight_means: list[float] = []
+    ca_tasa_state_teacher_weight_means: list[float] = []
     ca_tasa_non_root_peer_count_means: list[float] = []
-    ca_tasa_non_root_mc_reliable_rates: list[float] = []
+    ca_tasa_non_root_peer_coverage_means: list[float] = []
+    ca_tasa_non_root_state_mc_weight_means: list[float] = []
+    ca_tasa_non_root_state_teacher_weight_means: list[float] = []
     ca_tasa_state_reward_std_means: list[float] = []
     ca_tasa_local_outcome_corrs: list[float] = []
     ca_tasa_state_prior_means: list[float] = []
@@ -131,7 +137,6 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     ca_tasa_gae_abs_means: list[float] = []
     ca_tasa_gae_future_tail_abs_means: list[float] = []
     ca_tasa_gae_future_tail_nonzero_rates: list[float] = []
-    ca_tasa_prior_kappas: list[float] = []
     ca_tasa_lambdas: list[float] = []
     ca_tasa_teacher_weights: list[float] = []
 
@@ -175,7 +180,7 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             for key, target in (
                 ("tasa_group_anchor_eligible_rate", ca_tasa_anchor_eligible_rates),
                 ("tasa_group_teacher_prior_available_rate", ca_tasa_teacher_prior_available_rates),
-                ("tasa_group_mc_reliable_rate", ca_tasa_mc_reliable_rates),
+                ("tasa_group_mc_evidence_used_rate", ca_tasa_mc_evidence_used_rates),
                 ("tasa_group_prerequisite_valid_rate", ca_tasa_prerequisite_valid_rates),
                 ("tasa_group_semantic_segment_count", ca_tasa_semantic_segment_counts),
                 ("tasa_group_semantic_segment_length_mean", ca_tasa_semantic_segment_length_means),
@@ -190,14 +195,29 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             tasa_peer_count_mean = _float_or_none(ca.get("tasa_group_peer_count_mean"))
             if tasa_peer_count_mean is not None:
                 ca_tasa_peer_count_means.append(tasa_peer_count_mean)
+            for key, target in (
+                ("tasa_group_peer_budget", ca_tasa_peer_budgets),
+                ("tasa_group_peer_coverage_mean", ca_tasa_peer_coverage_means),
+                ("tasa_group_state_mc_weight_mean", ca_tasa_state_mc_weight_means),
+                ("tasa_group_state_teacher_weight_mean", ca_tasa_state_teacher_weight_means),
+            ):
+                value = _float_or_none(ca.get(key))
+                if value is not None:
+                    target.append(value)
             tasa_non_root_peer_count_mean = _float_or_none(ca.get("tasa_group_non_root_peer_count_mean"))
             if tasa_non_root_peer_count_mean is not None:
                 ca_tasa_non_root_peer_count_means.append(tasa_non_root_peer_count_mean)
-            tasa_non_root_mc_reliable_rate = _float_or_none(
-                ca.get("tasa_group_non_root_mc_reliable_rate")
-            )
-            if tasa_non_root_mc_reliable_rate is not None:
-                ca_tasa_non_root_mc_reliable_rates.append(tasa_non_root_mc_reliable_rate)
+            for key, target in (
+                ("tasa_group_non_root_peer_coverage_mean", ca_tasa_non_root_peer_coverage_means),
+                ("tasa_group_non_root_state_mc_weight_mean", ca_tasa_non_root_state_mc_weight_means),
+                (
+                    "tasa_group_non_root_state_teacher_weight_mean",
+                    ca_tasa_non_root_state_teacher_weight_means,
+                ),
+            ):
+                value = _float_or_none(ca.get(key))
+                if value is not None:
+                    target.append(value)
             tasa_state_reward_std_mean = _float_or_none(ca.get("tasa_group_state_reward_std_mean"))
             if tasa_state_reward_std_mean is not None:
                 ca_tasa_state_reward_std_means.append(tasa_state_reward_std_mean)
@@ -222,9 +242,6 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
             tasa_gae_future_tail_nonzero_rate = _float_or_none(ca.get("tasa_gae_future_tail_nonzero_rate"))
             if tasa_gae_future_tail_nonzero_rate is not None:
                 ca_tasa_gae_future_tail_nonzero_rates.append(tasa_gae_future_tail_nonzero_rate)
-            tasa_prior_kappa = _float_or_none(ca.get("tasa_prior_kappa"))
-            if tasa_prior_kappa is not None:
-                ca_tasa_prior_kappas.append(tasa_prior_kappa)
             tasa_lambda = _float_or_none(ca.get("tasa_lambda"))
             if tasa_lambda is not None:
                 ca_tasa_lambdas.append(tasa_lambda)
@@ -374,63 +391,72 @@ def reward_metrics(samples: list[Any]) -> dict[str, float]:
     if ca_process_delta_abs_means:
         metrics["reward/credit_assignment/process_delta_abs_mean"] = _mean(ca_process_delta_abs_means)
     if ca_tasa_train_token_coverage_rates:
-        metrics["reward/credit_assignment/tasa_train_token_coverage_rate_mean"] = _mean(
+        metrics["reward/tasa/train_token_coverage_rate_mean"] = _mean(
             ca_tasa_train_token_coverage_rates
         )
     if ca_tasa_unique_states:
-        metrics["reward/credit_assignment/tasa_unique_states_mean"] = _mean(ca_tasa_unique_states)
+        metrics["reward/tasa/unique_states_mean"] = _mean(ca_tasa_unique_states)
     if ca_tasa_state_reuse_rates:
-        metrics["reward/credit_assignment/tasa_state_reuse_rate_mean"] = _mean(ca_tasa_state_reuse_rates)
+        metrics["reward/tasa/state_reuse_rate_mean"] = _mean(ca_tasa_state_reuse_rates)
     for key, values in (
-        ("tasa_anchor_eligible_rate_mean", ca_tasa_anchor_eligible_rates),
-        ("tasa_teacher_prior_available_rate_mean", ca_tasa_teacher_prior_available_rates),
-        ("tasa_mc_reliable_rate_mean", ca_tasa_mc_reliable_rates),
-        ("tasa_prerequisite_valid_rate_mean", ca_tasa_prerequisite_valid_rates),
-        ("tasa_semantic_segment_count_mean", ca_tasa_semantic_segment_counts),
-        ("tasa_semantic_segment_length_mean", ca_tasa_semantic_segment_length_means),
-        ("tasa_value_source_teacher_rate_mean", ca_tasa_value_source_teacher_rates),
-        ("tasa_value_source_mc_rate_mean", ca_tasa_value_source_mc_rates),
-        ("tasa_value_source_teacher_mc_rate_mean", ca_tasa_value_source_teacher_mc_rates),
-        ("tasa_value_source_none_rate_mean", ca_tasa_value_source_none_rates),
+        ("anchor_eligible_rate_mean", ca_tasa_anchor_eligible_rates),
+        ("teacher_prior_available_rate_mean", ca_tasa_teacher_prior_available_rates),
+        ("mc_evidence_used_rate_mean", ca_tasa_mc_evidence_used_rates),
+        ("prerequisite_valid_rate_mean", ca_tasa_prerequisite_valid_rates),
+        ("semantic_segment_count_mean", ca_tasa_semantic_segment_counts),
+        ("semantic_segment_length_mean", ca_tasa_semantic_segment_length_means),
+        ("value_source_teacher_rate_mean", ca_tasa_value_source_teacher_rates),
+        ("value_source_mc_rate_mean", ca_tasa_value_source_mc_rates),
+        ("value_source_teacher_mc_rate_mean", ca_tasa_value_source_teacher_mc_rates),
+        ("value_source_none_rate_mean", ca_tasa_value_source_none_rates),
     ):
         if values:
-            metrics[f"reward/credit_assignment/{key}"] = _mean(values)
+            metrics[f"reward/tasa/{key}"] = _mean(values)
     if ca_tasa_peer_count_means:
-        metrics["reward/credit_assignment/tasa_peer_count_mean"] = _mean(ca_tasa_peer_count_means)
+        metrics["reward/tasa/peer_count_mean"] = _mean(ca_tasa_peer_count_means)
+    for key, values in (
+        ("peer_budget", ca_tasa_peer_budgets),
+        ("peer_coverage_mean", ca_tasa_peer_coverage_means),
+        ("state_mc_weight_mean", ca_tasa_state_mc_weight_means),
+        ("state_teacher_weight_mean", ca_tasa_state_teacher_weight_means),
+    ):
+        if values:
+            metrics[f"reward/tasa/{key}"] = _mean(values)
     if ca_tasa_non_root_peer_count_means:
-        metrics["reward/credit_assignment/tasa_non_root_peer_count_mean"] = _mean(
+        metrics["reward/tasa/non_root_peer_count_mean"] = _mean(
             ca_tasa_non_root_peer_count_means
         )
-    if ca_tasa_non_root_mc_reliable_rates:
-        metrics["reward/credit_assignment/tasa_non_root_mc_reliable_rate_mean"] = _mean(
-            ca_tasa_non_root_mc_reliable_rates
-        )
+    for key, values in (
+        ("non_root_peer_coverage_mean", ca_tasa_non_root_peer_coverage_means),
+        ("non_root_state_mc_weight_mean", ca_tasa_non_root_state_mc_weight_means),
+        ("non_root_state_teacher_weight_mean", ca_tasa_non_root_state_teacher_weight_means),
+    ):
+        if values:
+            metrics[f"reward/tasa/{key}"] = _mean(values)
     if ca_tasa_state_reward_std_means:
-        metrics["reward/credit_assignment/tasa_state_reward_std_mean"] = _mean(ca_tasa_state_reward_std_means)
+        metrics["reward/tasa/state_reward_std_mean"] = _mean(ca_tasa_state_reward_std_means)
     if ca_tasa_local_outcome_corrs:
-        metrics["reward/credit_assignment/tasa_local_outcome_corr_mean"] = _mean(ca_tasa_local_outcome_corrs)
+        metrics["reward/tasa/local_outcome_corr_mean"] = _mean(ca_tasa_local_outcome_corrs)
     if ca_tasa_state_prior_means:
-        metrics["reward/credit_assignment/tasa_state_prior_mean"] = _mean(ca_tasa_state_prior_means)
+        metrics["reward/tasa/state_prior_mean"] = _mean(ca_tasa_state_prior_means)
     if ca_tasa_state_value_means:
-        metrics["reward/credit_assignment/tasa_state_value_mean"] = _mean(ca_tasa_state_value_means)
+        metrics["reward/tasa/state_value_mean"] = _mean(ca_tasa_state_value_means)
     if ca_tasa_td_delta_abs_means:
-        metrics["reward/credit_assignment/tasa_td_delta_abs_mean"] = _mean(ca_tasa_td_delta_abs_means)
+        metrics["reward/tasa/td_delta_abs_mean"] = _mean(ca_tasa_td_delta_abs_means)
     if ca_tasa_gae_abs_means:
-        metrics["reward/credit_assignment/tasa_gae_abs_mean"] = _mean(ca_tasa_gae_abs_means)
+        metrics["reward/tasa/gae_abs_mean"] = _mean(ca_tasa_gae_abs_means)
     if ca_tasa_gae_future_tail_abs_means:
-        metrics["reward/credit_assignment/tasa_gae_future_tail_abs_mean"] = _mean(
+        metrics["reward/tasa/gae_future_tail_abs_mean"] = _mean(
             ca_tasa_gae_future_tail_abs_means
         )
     if ca_tasa_gae_future_tail_nonzero_rates:
-        metrics["reward/credit_assignment/tasa_gae_future_tail_nonzero_rate"] = _mean(
+        metrics["reward/tasa/gae_future_tail_nonzero_rate"] = _mean(
             ca_tasa_gae_future_tail_nonzero_rates
         )
-    if ca_tasa_prior_kappas:
-        metrics["reward/credit_assignment/tasa_prior_kappa"] = _mean(ca_tasa_prior_kappas)
     if ca_tasa_lambdas:
-        metrics["reward/credit_assignment/tasa_lambda"] = _mean(ca_tasa_lambdas)
+        metrics["reward/tasa/lambda"] = _mean(ca_tasa_lambdas)
     if ca_tasa_teacher_weights:
-        metrics["reward/credit_assignment/tasa_teacher_weight"] = _mean(ca_tasa_teacher_weights)
+        metrics["reward/tasa/teacher_weight"] = _mean(ca_tasa_teacher_weights)
     _reward_call_metrics(metrics, role="judge", calls=judge_calls, sample_count=total)
     _reward_call_metrics(metrics, role="rubric", calls=rubric_calls, sample_count=total)
     return metrics
