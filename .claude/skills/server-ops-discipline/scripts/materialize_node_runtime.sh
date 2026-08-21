@@ -133,7 +133,9 @@ materialize_pack() {
   rm -rf "${target}"
   mkdir -p "${target}"
   tar -xzf "${pack}" -C "${target}"
-  "${target}/bin/conda-unpack"
+  if [ -x "${target}/bin/conda-unpack" ]; then
+    "${target}/bin/conda-unpack"
+  fi
   write_stamp "${stamp}" "${sha_file}"
   echo "${name}_ENV=${target}"
 }
