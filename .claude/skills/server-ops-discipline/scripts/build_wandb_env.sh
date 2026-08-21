@@ -16,11 +16,14 @@ PIP_CACHE_DIR=${PIP_CACHE_DIR:-${ROOT_DIR}/envs/pip-cache}
 ENV_PREFIX=${WANDB_ENV_PREFIX:-${ROOT_DIR}/envs/wandb}
 PACK_DIR=${PACK_DIR:-${ROOT_DIR}/packs}
 PYTHON_VERSION=${WANDB_PYTHON_VERSION:-${PYTHON_VERSION:-3.12}}
-WANDB_SPEC=${WANDB_SPEC:-wandb}
+WANDB_SPEC=${WANDB_SPEC:-wandb==0.26.1}
 WANDB_EXTRA_PIP_PACKAGES=${WANDB_EXTRA_PIP_PACKAGES:-}
 WANDB_RECREATE=${WANDB_RECREATE:-0}
 REVISION=${WANDB_REVISION:-wandb-$(date -u +%Y%m%d)}
 
+export PIP_CONFIG_FILE="${PACK_PIP_CONFIG_FILE:-/dev/null}"
+export PIP_INDEX_URL="${PACK_PIP_INDEX_URL:-https://pypi.org/simple}"
+unset PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST
 export MAMBA_ROOT_PREFIX CONDA_PKGS_DIRS PIP_CACHE_DIR PYTHONNOUSERSITE=1
 unset PYTHONPATH CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER CONDA_SHLVL CONDA_EXE CONDA_PYTHON_EXE _CONDA_EXE _CONDA_ROOT _CE_CONDA _CE_M || true
 
@@ -65,21 +68,33 @@ print("wandb_env_imports_ok", versions, getattr(wandb, "__file__", "unknown"))
 PY
 
 tmp_pack="${PACK_DIR}/wandb.tmp.tar.gz"
-tmp_revision="${PACK_DIR}/wandb.revision.tmp"
 
 conda-pack -p "${ENV_PREFIX}" -o "${tmp_pack}" --force
 mv "${tmp_pack}" "${PACK_DIR}/wandb.tar.gz"
-sha256sum "${PACK_DIR}/wandb.tar.gz" > "${PACK_DIR}/wandb.tar.gz.sha256"
+printf '%s\n' "${REVISION}" > "${PACK_DIR}/wandb.revision"
 {
-  printf "%s\n" "${REVISION}"
+  printf "manifest_version=1\n"
+  printf "runtime=wandb\n"
+  printf "built_at_utc=%s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf "revision=%s\n" "${REVISION}"
   printf "python=%s\n" "${PYTHON_VERSION}"
   printf "wandb_spec=%s\n" "${WANDB_SPEC}"
   printf "extra_pip_packages=%s\n" "${WANDB_EXTRA_PIP_PACKAGES}"
+  printf "pip_index_url=%s\n" "${PIP_INDEX_URL}"
+  printf "\n[pip_freeze]\n"
   python -m pip freeze
-} > "${tmp_revision}"
-mv "${tmp_revision}" "${PACK_DIR}/wandb.revision"
-chmod a+r "${PACK_DIR}/wandb.tar.gz" "${PACK_DIR}/wandb.tar.gz.sha256" "${PACK_DIR}/wandb.revision"
+} > "${PACK_DIR}/wandb.manifest.txt"
+(
+  cd "${PACK_DIR}"
+  sha256sum wandb.tar.gz > wandb.tar.gz.sha256
+)
+chmod a+r \
+  "${PACK_DIR}/wandb.tar.gz" \
+  "${PACK_DIR}/wandb.tar.gz.sha256" \
+  "${PACK_DIR}/wandb.revision" \
+  "${PACK_DIR}/wandb.manifest.txt"
 
 echo "WANDB_ENV=${ENV_PREFIX}"
 echo "WANDB_PACK=${PACK_DIR}/wandb.tar.gz"
 echo "WANDB_REVISION=${REVISION}"
+echo "WANDB_MANIFEST=${PACK_DIR}/wandb.manifest.txt"

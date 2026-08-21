@@ -55,6 +55,9 @@ chmod +x "${ROOT_DIR}/scripts/"*.sh
 Stable entrypoints:
 
 ```text
+bootstrap_micromamba.sh
+build_runtime_packs.sh --runtime slime,alfworld,appworld,tau2,webshop,wandb
+verify_pack_bundle.sh --runtime ...
 run_bench.sh start|stop|status|restart [--nodes nodes.txt --node 0,1]
 gpu_idle_watchdog.sh start|stop|status|restart
 prepare_data.sh --data <env>
@@ -69,6 +72,10 @@ node materialization, SSH fanout, or root discovery logic.
 
 ## Packs And Data
 
+- Before rebuilding or handing packs to a new cluster, read
+  `references/runtime_pack_build.md`. It is the provider-neutral cold-start,
+  verification, backup, and restore contract; no historical pack or specific
+  NAS mount is a prerequisite.
 - Prefer a complete training image when available. Otherwise use one complete
   conda pack per foundation stack. A Slime pack must include Slime, training
   dependencies, and bundled Megatron source at `src/Megatron-LM`.
@@ -86,6 +93,10 @@ node materialization, SSH fanout, or root discovery logic.
   it.
 - Do not run Python directly from NAS env directories. Use node-local extracted
   packs to avoid slow small-file IO and stale absolute prefixes.
+- A newly published runtime/data pack is complete only with its tarball,
+  portable checksum, revision, and manifest. Back up all four files to any
+  available durable cloud/shared storage after verification. Source rebuild is
+  the recovery path, not a substitute for preserving an exact working bundle.
 
 ## Nodes And SSH
 

@@ -337,6 +337,68 @@ copy_webshop_from_source() {
   mv "${tmp}" "${dst}"
 }
 
+find_webshop_python() {
+  local candidate
+  for candidate in \
+    "${WEBSHOP_PYTHON:-}" \
+    "${LOCAL_ENVS_DIR:-/tmp/server-ops-envs}/webshop/bin/python" \
+    "${ROOT_DIR}/envs/webshop-clean/bin/python"; do
+    if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+download_webshop_data() (
+  local dst=$1
+  local source_checkout="${WEBSHOP_LIB:-${ROOT_DIR}/code/WebShop}"
+  local python
+  local stage="${ROOT_DIR}/data/.staging/webshop.$$"
+  python=$(find_webshop_python) || {
+    echo "Cannot download WebShop data: set WEBSHOP_PYTHON to the WebShop runtime Python." >&2
+    return 1
+  }
+  [ -f "${source_checkout}/search_engine/convert_product_file_format.py" ] || {
+    echo "Cannot download WebShop data: missing pinned WebShop checkout at ${source_checkout}." >&2
+    return 1
+  }
+
+  rm -rf "${stage}"
+  mkdir -p "${stage}"
+  trap 'rm -rf "${stage}"' EXIT
+  tar -C "${source_checkout}" \
+    --exclude='.git' \
+    --exclude='./data' \
+    --exclude='./search_engine/indexes*' \
+    --exclude='./search_engine/resources*' \
+    -cf - . | tar -C "${stage}" -xf -
+  mkdir -p "${stage}/data" "${stage}/search_engine/resources_100k" "${stage}/search_engine/indexes_100k"
+
+  "${python}" -m gdown 'https://drive.google.com/uc?id=1A2whVgOO0euk5O13n2iYDM0bQRkkRduB' \
+    -O "${stage}/data/items_shuffle.json"
+  "${python}" -m gdown 'https://drive.google.com/uc?id=1s2j6NgHljiZzQNL3veZaAiyW_qDEgBNi' \
+    -O "${stage}/data/items_ins_v2.json"
+  "${python}" -m gdown 'https://drive.google.com/uc?id=14Kb5SPBk_jfdLZ_CDBNitW98QLDlKR5O' \
+    -O "${stage}/data/items_human_ins.json"
+
+  (
+    cd "${stage}/search_engine"
+    JAVA_HOME="$(dirname "$(dirname "$(readlink -f "${python}")")")" \
+      "${python}" convert_product_file_format.py
+    JAVA_HOME="$(dirname "$(dirname "$(readlink -f "${python}")")")" \
+      "${python}" -m pyserini.index.lucene \
+        --collection JsonCollection \
+        --input resources_100k \
+        --index indexes_100k \
+        --generator DefaultLuceneDocumentGenerator \
+        --threads "${WEBSHOP_INDEX_THREADS:-8}" \
+        --storePositions --storeDocvectors --storeRaw
+  )
+  copy_webshop_from_source "${stage}" "${dst}"
+)
+
 prepare_webshop_data() {
   local dst="${ROOT_DIR}/data/webshop"
   local src="${WEBSHOP_DATA_SOURCE_DIR:-}"
@@ -348,8 +410,14 @@ prepare_webshop_data() {
     :
   elif [ -d "${ROOT_DIR}/code/WebShop/data" ] && [ -d "${ROOT_DIR}/code/WebShop/search_engine" ]; then
     src="${ROOT_DIR}/code/WebShop"
+  elif ops_bool_enabled "${WEBSHOP_DOWNLOAD:-0}"; then
+    echo "Downloading official WebShop 100k data and building indexes_100k -> ${dst}"
+    download_webshop_data "${dst}"
+    validate_dataset webshop "${dst}"
+    echo "webshop_DATA=${dst}"
+    return 0
   else
-    echo "Cannot prepare WebShop data: provide ${dst} or WEBSHOP_DATA_SOURCE_DIR with data/ and search_engine/." >&2
+    echo "Cannot prepare WebShop data: provide WEBSHOP_DATA_SOURCE_DIR or set WEBSHOP_DOWNLOAD=1." >&2
     return 1
   fi
   echo "Preparing WebShop data from ${src} -> ${dst}"

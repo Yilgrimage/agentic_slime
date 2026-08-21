@@ -34,6 +34,8 @@ Options:
 
 Optional dataset inputs:
   WEBSHOP_DATA_SOURCE_DIR   Existing WebShop checkout/data root with data/ and search_engine/
+  WEBSHOP_DOWNLOAD=1        Download official 100k WebShop files and build indexes_100k
+  WEBSHOP_PYTHON            Python from the WebShop runtime pack/build env
   TAU2_DATA_SOURCE_DIR      tau2 official data root, usually code/tau2-bench/data
   TAU2_AREAL_SOURCE_DIR     AReaL synthetic tau2 root with tau2_rl_train.jsonl
   TAU2_DOWNLOAD_AREAL=1     Download AReaL synthetic tau2 data if no local source exists

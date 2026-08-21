@@ -34,9 +34,11 @@ Runtime setup:
 2. Ensure the WebShop data backup exists at `${ROOT_DIR}/data/webshop`.
 3. Materialize node-local runtime with `${ROOT_DIR}/scripts/prepare_node_runtime.sh`.
 
-Use `scripts/utils/build_webshop_env.sh`, `scripts/utils/pack_webshop_env.sh`, and
-`${ROOT_DIR}/scripts/pack_data.sh` only when rebuilding shared packs/data. They
-are not part of normal training startup.
+Use `${ROOT_DIR}/scripts/build_runtime_packs.sh --runtime webshop` and
+`${ROOT_DIR}/scripts/pack_data.sh --data webshop` only when rebuilding shared
+packs/data. They are not part of normal training startup. The complete
+provider-neutral rebuild procedure is documented in the server-ops skill's
+`references/runtime_pack_build.md`.
 
 ## Data Scope
 

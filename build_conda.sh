@@ -1,13 +1,36 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -ex
+set -euxo pipefail
 
-# create conda
-yes '' | "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
-export PS1=tmp
-mkdir -p /root/.cargo/
-touch /root/.cargo/env
-source ~/.bashrc
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT_DIR=${ROOT_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
+MICROMAMBA=${MICROMAMBA:-${ROOT_DIR}/tools/micromamba/bin/micromamba}
+MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-${ROOT_DIR}/tools/micromamba/root}
+SLIME_ENV_PREFIX=${SLIME_ENV_PREFIX:-${ROOT_DIR}/envs/slime-build}
+SLIME_RECREATE=${SLIME_RECREATE:-0}
+export PIP_CONFIG_FILE="${PACK_PIP_CONFIG_FILE:-/dev/null}"
+export PIP_INDEX_URL="${PACK_PIP_INDEX_URL:-https://pypi.org/simple}"
+unset PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST
+export MAMBA_ROOT_PREFIX
+
+if [ ! -x "${MICROMAMBA}" ]; then
+  bootstrap="${ROOT_DIR}/scripts/bootstrap_micromamba.sh"
+  if [ ! -x "${bootstrap}" ]; then
+    bootstrap="${SCRIPT_DIR}/.claude/skills/server-ops-discipline/scripts/bootstrap_micromamba.sh"
+  fi
+  ROOT_DIR="${ROOT_DIR}" MICROMAMBA="${MICROMAMBA}" bash "${bootstrap}"
+fi
+eval "$("${MICROMAMBA}" shell hook -s bash)"
+
+if [ -e "${SLIME_ENV_PREFIX}" ]; then
+  if [ "${SLIME_RECREATE}" = "1" ]; then
+    rm -rf "${SLIME_ENV_PREFIX}"
+  else
+    echo "Slime build prefix already exists: ${SLIME_ENV_PREFIX}" >&2
+    echo "Use a fresh prefix or set SLIME_RECREATE=1." >&2
+    exit 1
+  fi
+fi
 
 # The micromamba installer writes `nodefaults` into ~/.condarc as a channel
 # entry, which newer micromamba versions try to fetch as a real anaconda.org
@@ -16,8 +39,8 @@ if [ -f ~/.condarc ]; then
   sed -i '/^\s*-\s*nodefaults\s*$/d' ~/.condarc
 fi
 
-micromamba create -n slime python=3.12 pip -c conda-forge -y
-micromamba activate slime
+"${MICROMAMBA}" create -p "${SLIME_ENV_PREFIX}" python=3.12 pip -c conda-forge -y
+micromamba activate "${SLIME_ENV_PREFIX}"
 export CUDA_HOME="$CONDA_PREFIX"
 
 # Keep these in sync with docker/Dockerfile:
@@ -28,12 +51,16 @@ export SGLANG_VERSION="v0.5.12.post1"
 export SGLANG_COMMIT="5a15cde858ea09b77116212a39356f2fc51b8584"
 export MEGATRON_COMMIT="1dcf0dafa884ad52ffb243625717a3471643e087"
 export PATCH_VERSION="latest"
+export FLASHQLA_COMMIT="c18a4860ea9cb937f1075d606b4823d6ae34e880"
+export MEGATRON_BRIDGE_COMMIT="923842f5d14ca9db2f243b2dfce01826176dd533"
+export TILELANG_VERSION="0.1.8"
 
-export BASE_DIR=${BASE_DIR:-"/root"}
+export BASE_DIR=${BASE_DIR:-"${ROOT_DIR}/code"}
+mkdir -p "${BASE_DIR}"
 cd $BASE_DIR
 
 # install cuda 12.9 as it's the default cuda version for torch
-micromamba install -n slime \
+"${MICROMAMBA}" install -p "${SLIME_ENV_PREFIX}" \
   cuda=12.9.1 \
   cuda-nvtx=12.9.79 \
   cuda-nvtx-dev=12.9.79 \
@@ -42,10 +69,10 @@ micromamba install -n slime \
   -c nvidia \
   -c conda-forge \
   -y
-micromamba install -n slime -c conda-forge cudnn -y
+"${MICROMAMBA}" install -p "${SLIME_ENV_PREFIX}" -c conda-forge cudnn -y
 # sglang's editable install builds a Rust extension (sglang-grpc via
 # setuptools-rust), so the conda env needs a working rustc + cargo.
-micromamba install -n slime -c conda-forge rust -y
+"${MICROMAMBA}" install -p "${SLIME_ENV_PREFIX}" -c conda-forge rust -y
 
 pip install cuda-python==12.9
 
@@ -115,11 +142,11 @@ pip install cmake ninja
 MAX_JOBS=64 pip -v install flash-attn==2.7.4.post1 --no-build-isolation
 
 pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c --no-deps
-pip install flash-linear-attention==0.4.1
+pip install flash-linear-attention==0.4.2
 # FlashQLA: optional GDN backend for Qwen3.5/Qwen3-Next (--qwen-gdn-backend flashqla; requires SM90+)
-pip install git+https://github.com/QwenLM/FlashQLA.git --no-build-isolation
+pip install git+https://github.com/QwenLM/FlashQLA.git@${FLASHQLA_COMMIT} --no-build-isolation
 # tilelang (matches Dockerfile)
-pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu128/
+pip install tilelang==${TILELANG_VERSION} -f https://tile-ai.github.io/whl/nightly/cu128/
 
 pip install --no-build-isolation "transformer_engine[pytorch]==2.10.0"
 
@@ -138,8 +165,8 @@ export TMS_CUDA_MAJOR
 pip install -v git+https://github.com/fzyzcjy/torch_memory_saver.git@a193d9dd1b877d33c64a41cfb3db9f867df2d926 \
   --no-cache-dir --force-reinstall --no-build-isolation
 # matches Dockerfile (different fork/branch from older build_conda.sh)
-pip install git+https://github.com/radixark/Megatron-Bridge.git@bridge --no-deps --no-build-isolation
-pip install nvidia-modelopt[torch]>=0.37.0 --no-build-isolation
+pip install git+https://github.com/radixark/Megatron-Bridge.git@${MEGATRON_BRIDGE_COMMIT} --no-deps --no-build-isolation
+pip install 'nvidia-modelopt[torch]==0.37.0' --no-build-isolation
 pip install https://github.com/zhuzilin/sgl-router/releases/download/v0.3.2-5f8d397/sglang_router-0.3.2-cp38-abi3-manylinux_2_28_x86_64.whl --force-reinstall
 python -c "import sglang_router; assert 'slime' in sglang_router.__version__"
 
@@ -159,11 +186,8 @@ cd $BASE_DIR/Megatron-LM && git checkout ${MEGATRON_COMMIT} && pip install -e . 
 # install slime and apply patches
 
 # if slime does not exist locally, clone it
-if [ ! -d "$BASE_DIR/slime" ]; then
-  cd $BASE_DIR
-  git clone https://github.com/THUDM/slime.git
-fi
-export SLIME_DIR=$BASE_DIR/slime
+export SLIME_DIR=${SLIME_DIR:-${SCRIPT_DIR}}
+[ -d "${SLIME_DIR}/slime" ] || { echo "Invalid SLIME_DIR=${SLIME_DIR}" >&2; exit 1; }
 cd $SLIME_DIR
 # Install slime's pure-python runtime deps first (wandb, ray, accelerate,
 # transformers, etc.) from its requirements.txt, then install slime itself
@@ -208,3 +232,8 @@ if git apply --check $SLIME_DIR/docker/patch/${PATCH_VERSION}/megatron.patch 2>/
 else
   echo "megatron patch already applied or not applicable, skipping"
 fi
+
+echo "SLIME_ENV_PREFIX=${SLIME_ENV_PREFIX}"
+echo "SLIME_SOURCE=${SLIME_DIR}"
+echo "SGLANG_SOURCE=${BASE_DIR}/sglang"
+echo "MEGATRON_SOURCE=${BASE_DIR}/Megatron-LM"

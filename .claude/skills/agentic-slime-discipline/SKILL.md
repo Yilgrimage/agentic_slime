@@ -55,6 +55,10 @@ Do not include model names or aux providers in train profile names.
 
 ## Runtime Contract
 
+- Runtime/data pack creation, verification, backup, and provider-neutral
+  cold-start restore are owned by server ops. Follow
+  `../server-ops-discipline/references/runtime_pack_build.md`; training launch
+  code must never become a second package installer or downloader.
 - Support image and conda-pack Slime runtimes through
   `scripts/utils/slime_runtime.sh`.
 - Treat Megatron-LM as part of the Slime training runtime, not as a separate

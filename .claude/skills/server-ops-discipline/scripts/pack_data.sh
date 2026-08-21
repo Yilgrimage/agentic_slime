@@ -51,6 +51,7 @@ pack_dataset() {
   local name=$1
   local src="${ROOT_DIR}/data/${name}"
   local out="${PACK_DIR}/${name}-data.tar.gz"
+  local archive_sha
   if [ ! -d "${src}" ]; then
     echo "Missing data directory: ${src}" >&2
     exit 1
@@ -64,14 +65,19 @@ pack_dataset() {
     --exclude='*.parts' \
     --exclude='*.part' \
     -czf "${out}" "${name}"
-  sha256sum "${out}" > "${out}.sha256"
+  (cd "${PACK_DIR}" && sha256sum "${name}-data.tar.gz" > "${name}-data.tar.gz.sha256")
+  archive_sha=$(awk '{print $1}' "${out}.sha256")
+  printf '%s\n' "${archive_sha}" > "${PACK_DIR}/${name}-data.revision"
   {
+    echo "manifest_version=1"
     echo "name=${name}"
     echo "source=${src}"
-    echo "archive=${out}"
+    echo "archive=${name}-data.tar.gz"
+    echo "sha256=${archive_sha}"
     echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "bytes=$(stat -c %s "${out}")"
-  } > "${PACK_DIR}/${name}-data.manifest"
+    echo "files=$(find "${src}" -type f | wc -l)"
+  } > "${PACK_DIR}/${name}-data.manifest.txt"
   echo "${name}_DATA_PACK=${out}"
 }
 

@@ -9,6 +9,9 @@ if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
 fi
 REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
 ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/runtime_pack_common.sh"
+runtime_pack_configure_pip
 LOCAL_RUNTIME_DIR=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
 MICROMAMBA=${MICROMAMBA:-${ROOT_DIR}/tools/micromamba/bin/micromamba}
 MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-${ROOT_DIR}/tools/micromamba/root}
@@ -16,20 +19,25 @@ CONDA_PKGS_DIRS=${CONDA_PKGS_DIRS:-${LOCAL_RUNTIME_DIR}/webshop/conda-pkgs}
 PIP_CACHE_DIR=${PIP_CACHE_DIR:-${ROOT_DIR}/envs/pip-cache}
 ENV_PREFIX=${WEBSHOP_ENV_PREFIX:-${ROOT_DIR}/envs/webshop-clean}
 WEBSHOP_LIB=${WEBSHOP_LIB:-${ROOT_DIR}/code/WebShop}
-WEBSHOP_DATA=${WEBSHOP_DATA:-${ROOT_DIR}/data/webshop}
-WEBSHOP_MODEL_SOURCE_SITE=${WEBSHOP_MODEL_SOURCE_SITE:-${ROOT_DIR}/envs/webshop/lib/python3.8/site-packages}
 PACK_DIR=${PACK_DIR:-${ROOT_DIR}/packs}
-REVISION=${WEBSHOP_REVISION:-webshop-clean-$(date +%Y%m%d)}
+WEBSHOP_REPO_URL=${WEBSHOP_REPO_URL:-https://github.com/princeton-nlp/WebShop.git}
+WEBSHOP_COMMIT=${WEBSHOP_COMMIT:-64fa2a5c15c7daa698b9ac93f5bb5437b634c9bd}
+WEBSHOP_SPACY_MODEL_URL=${WEBSHOP_SPACY_MODEL_URL:-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.3.0/en_core_web_sm-3.3.0-py3-none-any.whl}
+WEBSHOP_RECREATE=${WEBSHOP_RECREATE:-0}
+REVISION=${WEBSHOP_REVISION:-webshop-${WEBSHOP_COMMIT:0:12}}
 
 export MAMBA_ROOT_PREFIX CONDA_PKGS_DIRS PIP_CACHE_DIR PYTHONNOUSERSITE=1
 unset PYTHONPATH CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER CONDA_SHLVL CONDA_EXE CONDA_PYTHON_EXE _CONDA_EXE _CONDA_ROOT _CE_CONDA _CE_M || true
 
 mkdir -p "${PACK_DIR}" "${CONDA_PKGS_DIRS}" "${PIP_CACHE_DIR}" "$(dirname "${ENV_PREFIX}")"
+runtime_pack_prepare_prefix "${ENV_PREFIX}" "${WEBSHOP_RECREATE}"
 
 if [ ! -x "${MICROMAMBA}" ]; then
   echo "Missing micromamba: ${MICROMAMBA}" >&2
   exit 1
 fi
+
+runtime_pack_require_checkout "${WEBSHOP_REPO_URL}" "${WEBSHOP_COMMIT}" "${WEBSHOP_LIB}"
 
 if [ ! -x "${ENV_PREFIX}/bin/python" ]; then
   "${MICROMAMBA}" create -y -p "${ENV_PREFIX}" python=3.8 pip openjdk=11 -c conda-forge
@@ -65,40 +73,25 @@ python -m pip install \
 
 python -m pip install --no-deps pydantic==1.10.15
 
-TARGET_SITE=$(python - <<'PY'
-import site
-print(site.getsitepackages()[0])
-PY
-)
-
 if ! python - <<'PY'
 import en_core_web_sm  # noqa: F401
 PY
 then
-  if [ ! -d "${WEBSHOP_MODEL_SOURCE_SITE}/en_core_web_sm" ]; then
-    echo "Missing en_core_web_sm source package: ${WEBSHOP_MODEL_SOURCE_SITE}/en_core_web_sm" >&2
-    exit 1
-  fi
-  cp -a "${WEBSHOP_MODEL_SOURCE_SITE}/en_core_web_sm" "${TARGET_SITE}/"
-  cp -a "${WEBSHOP_MODEL_SOURCE_SITE}"/en_core_web_sm-*.dist-info "${TARGET_SITE}/"
+  python -m pip install "${WEBSHOP_SPACY_MODEL_URL}"
 fi
 
-PYTHONPATH="${REPO_DIR}:${WEBSHOP_LIB}" WEBSHOP_LIB="${WEBSHOP_LIB}" WEBSHOP_DATA="${WEBSHOP_DATA}" python - <<'PY'
-import os
+python - <<'PY'
+import flask
+import pyserini
+import spacy
 
-from examples.agent_env.webshop.server import _install_text_env_import_stubs, _load_text_env_class
-
-_install_text_env_import_stubs()
-cls = _load_text_env_class(os.environ["WEBSHOP_LIB"])
-env = cls(observation_mode="text", num_products=1000, human_goals=True)
-obs = env.reset(session=0)
-print("webshop_clean_env_imports_ok", cls.__name__, type(obs).__name__, len(str(obs)))
+print("webshop_clean_env_imports_ok", flask.__version__, spacy.__version__, pyserini.__file__)
 PY
 
-conda-pack -p "${ENV_PREFIX}" -o "${PACK_DIR}/webshop.tar.gz" --force
-sha256sum "${PACK_DIR}/webshop.tar.gz" > "${PACK_DIR}/webshop.tar.gz.sha256"
-printf "%s\n" "${REVISION}" > "${PACK_DIR}/webshop.revision"
-
-echo "WEBSHOP_ENV=${ENV_PREFIX}"
-echo "WEBSHOP_PACK=${PACK_DIR}/webshop.tar.gz"
-echo "WEBSHOP_REVISION=${REVISION}"
+echo "WEBSHOP_LIB=${WEBSHOP_LIB}"
+runtime_pack_publish \
+  webshop "${ENV_PREFIX}" "${REVISION}" \
+  "builder_repo=$(runtime_pack_git_revision "${REPO_DIR}")" \
+  "webshop_repo=${WEBSHOP_REPO_URL}" \
+  "webshop_commit=${WEBSHOP_COMMIT}" \
+  "spacy_model=${WEBSHOP_SPACY_MODEL_URL}"

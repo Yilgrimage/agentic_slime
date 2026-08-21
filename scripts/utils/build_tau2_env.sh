@@ -9,6 +9,9 @@ if [ -z "${ROOT_DIR:-}" ] && [ -f "${CONFIG_FILE}" ]; then
 fi
 REPO_DIR=${REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd -P)}
 ROOT_DIR=${ROOT_DIR:-$(cd "${REPO_DIR}/../.." && pwd -P)}
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/runtime_pack_common.sh"
+runtime_pack_configure_pip
 LOCAL_RUNTIME_DIR=${LOCAL_RUNTIME_DIR:-/tmp/server-ops-runtime}
 MICROMAMBA=${MICROMAMBA:-${ROOT_DIR}/tools/micromamba/bin/micromamba}
 MAMBA_ROOT_PREFIX=${MAMBA_ROOT_PREFIX:-${ROOT_DIR}/tools/micromamba/root}
@@ -17,24 +20,23 @@ PIP_CACHE_DIR=${PIP_CACHE_DIR:-${ROOT_DIR}/envs/pip-cache}
 ENV_PREFIX=${TAU2_ENV_PREFIX:-${ROOT_DIR}/envs/tau2}
 TAU2_LIB=${TAU2_LIB:-${ROOT_DIR}/code/tau2-bench}
 PACK_DIR=${PACK_DIR:-${ROOT_DIR}/packs}
-REVISION=${TAU2_REVISION:-tau2-$(date +%Y%m%d)}
+TAU2_REPO_URL=${TAU2_REPO_URL:-https://github.com/sierra-research/tau2-bench.git}
+TAU2_COMMIT=${TAU2_COMMIT:-1746a25db265724f6fed2260934bb67f1514fad7}
+TAU2_RECREATE=${TAU2_RECREATE:-0}
+REVISION=${TAU2_REVISION:-tau2-${TAU2_COMMIT:0:12}}
 
 export MAMBA_ROOT_PREFIX CONDA_PKGS_DIRS PIP_CACHE_DIR PYTHONNOUSERSITE=1
 unset PYTHONPATH CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_PROMPT_MODIFIER CONDA_SHLVL CONDA_EXE CONDA_PYTHON_EXE _CONDA_EXE _CONDA_ROOT _CE_CONDA _CE_CONDA _CE_M || true
 
 mkdir -p "${PACK_DIR}" "${CONDA_PKGS_DIRS}" "${PIP_CACHE_DIR}" "$(dirname "${ENV_PREFIX}")" "$(dirname "${TAU2_LIB}")"
+runtime_pack_prepare_prefix "${ENV_PREFIX}" "${TAU2_RECREATE}"
 
 if [ ! -x "${MICROMAMBA}" ]; then
   echo "Missing micromamba: ${MICROMAMBA}" >&2
   exit 1
 fi
 
-if [ ! -d "${TAU2_LIB}/.git" ]; then
-  git clone --depth 1 https://github.com/sierra-research/tau2-bench.git "${TAU2_LIB}"
-else
-  git -C "${TAU2_LIB}" fetch --depth 1 origin main
-  git -C "${TAU2_LIB}" reset --hard origin/main
-fi
+runtime_pack_require_checkout "${TAU2_REPO_URL}" "${TAU2_COMMIT}" "${TAU2_LIB}"
 
 if [ ! -x "${ENV_PREFIX}/bin/python" ]; then
   "${MICROMAMBA}" create -y -p "${ENV_PREFIX}" python=3.12 pip -c conda-forge
@@ -57,11 +59,10 @@ print("tau2_env_imports_ok", {
 })
 PY
 
-conda-pack -p "${ENV_PREFIX}" -o "${PACK_DIR}/tau2.tar.gz" --force
-sha256sum "${PACK_DIR}/tau2.tar.gz" > "${PACK_DIR}/tau2.tar.gz.sha256"
-printf "%s\n" "${REVISION}" > "${PACK_DIR}/tau2.revision"
-
 echo "TAU2_ENV=${ENV_PREFIX}"
 echo "TAU2_LIB=${TAU2_LIB}"
-echo "TAU2_PACK=${PACK_DIR}/tau2.tar.gz"
-echo "TAU2_REVISION=${REVISION}"
+runtime_pack_publish \
+  tau2 "${ENV_PREFIX}" "${REVISION}" \
+  "builder_repo=$(runtime_pack_git_revision "${REPO_DIR}")" \
+  "tau2_repo=${TAU2_REPO_URL}" \
+  "tau2_commit=${TAU2_COMMIT}"
